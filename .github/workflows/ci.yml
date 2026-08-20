@@ -212,6 +212,15 @@ jobs:
       - name: Build debug APK
         run: flutter build apk --debug
 
+      # Runs on failure too, which is the case it is for: the ENOSPC this job
+      # once hit could say neither how much the build had used nor how much it
+      # started with. Against the df above, the delta is what this build
+      # actually costs — the number that decides whether the cleanup is
+      # headroom or the thing holding the job up.
+      - name: Disk usage after the build
+        if: always()
+        run: df -h /
+
   dco:
     name: DCO sign-off
     runs-on: ubuntu-latest
