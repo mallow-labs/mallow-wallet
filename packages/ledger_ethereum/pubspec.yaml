@@ -1,0 +1,10 @@
+name: ledger_ethereum
+description: Ethereum APDU plugin for ledger_flutter_plus
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  ledger_flutter_plus: ^1.5.6

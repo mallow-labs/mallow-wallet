@@ -1,0 +1,47 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"
+    - "**/*.gr.dart"
+    - "packages/**/*.g.dart"
+    - "packages/**/*.freezed.dart"
+    # drift schema snapshots, emitted by `drift_dev schema generate`. Not named
+    # *.g.dart, and they trip strict-raw-types (a warning, so fatal in CI).
+    - "test/core/database/generated/**"
+    # Build output. The iOS SPM migration checks third-party sources out under
+    # build/ios/SourcePackages/, and analyzing those buries our own diagnostics
+    # in ~11k foreign ones, so without this exclude a local analyze drowns in
+    # findings from code this repo does not own.
+    - "build/**"
+  errors:
+    invalid_annotation_target: ignore
+    # Widget scaffolds intentionally leave optional params (e.g. onTap, key,
+    # icon) for forward-compat with future callers. Not a real bug signal.
+    unused_element_parameter: ignore
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+
+linter:
+  rules:
+    avoid_print: true
+    avoid_empty_else: true
+    cancel_subscriptions: true
+    close_sinks: true
+    always_declare_return_types: true
+    always_put_required_named_parameters_first: true
+    avoid_redundant_argument_values: true
+    prefer_const_constructors: true
+    prefer_const_declarations: true
+    prefer_final_fields: true
+    prefer_final_in_for_each: true
+    prefer_final_locals: true
+    prefer_single_quotes: true
+    sort_constructors_first: true
+    sort_unnamed_constructors_first: true
+    unawaited_futures: true
+    unnecessary_await_in_return: true
+    use_super_parameters: true

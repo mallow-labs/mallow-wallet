@@ -1,0 +1,37 @@
+# gitleaks configuration.
+#
+# The public CI runs gitleaks on every pull request. Without this file the
+# `generic-api-key` rule fires on ordinary blockchain addresses — a scan of the
+# release tree returns five, none of them secret — and a check that fails every
+# PR from day one is a check contributors learn to ignore.
+#
+# The allowlist below is deliberately narrow. It suppresses two *shapes* that
+# cannot be a credential for any provider gitleaks knows about, and nothing
+# else. It does not allowlist a path, a file type, or a directory: a real key
+# committed to a test file is still caught.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+On-chain addresses. A wallet's source is full of them — program IDs, mint
+addresses, token contracts — and they are public identifiers by construction:
+every one is readable from the chain by anyone, and none authenticates anything.
+They are high-entropy strings assigned to a constant, which is exactly the
+generic-api-key heuristic, so they match it and always will.
+
+Scoped to that one rule on purpose. The provider-specific rules (AWS, Stripe,
+GitHub, Google, Slack, …) still apply to these same lines, so a real key that
+happens to sit beside an address is still reported.
+"""
+targetRules = ["generic-api-key"]
+regexTarget = "match"
+regexes = [
+  # Solana addresses and program IDs: base58, 32-44 chars. The base58 alphabet
+  # excludes 0, O, I and l, which is what distinguishes this from a random
+  # token — most real API keys contain at least one of them.
+  '''\b[1-9A-HJ-NP-Za-km-z]{32,44}\b''',
+  # EVM addresses: 0x plus exactly 40 hex characters, no more and no less.
+  '''\b0x[a-fA-F0-9]{40}\b''',
+]

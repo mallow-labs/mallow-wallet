@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest a change or an addition
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: >-
+        Describe the situation you are in, not the solution you have in mind.
+        We can usually find a better solution once we understand the problem.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What else did you consider?
+
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security
+      options:
+        - label: >-
+            I have considered whether this would weaken a signing gate, a
+            biometric prompt, or key handling — and it does not.
+          required: true

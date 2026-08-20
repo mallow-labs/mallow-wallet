@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Build-only placeholder. Every value is obviously fake and grants nothing.
+
+  `lib/main.dart` calls `Firebase.initializeApp()`, which throws at startup on
+  iOS when `ios/Runner/GoogleService-Info.plist` is absent. The real file is
+  gitignored, correctly, so a fresh clone has nothing to load. Copy this into
+  place to get the app booting:
+
+      cp test/e2e/GoogleService-Info.placeholder.plist ios/Runner/GoogleService-Info.plist
+
+  With these values Firebase initialises but every Firebase-backed feature —
+  push notifications and crash reporting — is inert. For anything real, create
+  your own Firebase project and download the genuine file. See the README.
+-->
+<plist version="1.0">
+<dict>
+	<key>API_KEY</key>
+	<string>AIzaSyA0000000000000000000000000000000000</string>
+	<key>GCM_SENDER_ID</key>
+	<string>000000000000</string>
+	<key>PLIST_VERSION</key>
+	<string>1</string>
+	<key>BUNDLE_ID</key>
+	<string>com.mallow.wallet.ios</string>
+	<key>PROJECT_ID</key>
+	<string>mallow-e2e-placeholder</string>
+	<key>STORAGE_BUCKET</key>
+	<string>mallow-e2e-placeholder.appspot.com</string>
+	<key>GOOGLE_APP_ID</key>
+	<string>1:000000000000:ios:0000000000000000000000</string>
+	<key>IS_ADS_ENABLED</key>
+	<false/>
+	<key>IS_ANALYTICS_ENABLED</key>
+	<false/>
+	<key>IS_APPINVITE_ENABLED</key>
+	<false/>
+	<key>IS_GCM_ENABLED</key>
+	<true/>
+	<key>IS_SIGNIN_ENABLED</key>
+	<false/>
+</dict>
+</plist>

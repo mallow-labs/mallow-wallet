@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Security vulnerability
+    url: https://github.com/mallow-labs/mallow-wallet/security/policy
+    about: >-
+      Do NOT open a public issue. This is a self-custody wallet — a public
+      report turns a vulnerability into a race. Read SECURITY.md and email
+      security@mallow.art, or use private vulnerability reporting.
+  - name: 💬 Questions and general discussion
+    url: https://github.com/mallow-labs/mallow-wallet/discussions
+    about: Ask about building, forking, or how something works.

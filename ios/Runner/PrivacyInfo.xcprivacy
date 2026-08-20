@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Privacy manifest for the Runner target.
+
+	  Missing this file is returned as ITMS-91053 — an UPLOAD ERROR, not a warning —
+	  so it only surfaces on a real archive upload to App Store Connect. A dry-run
+	  upload is a required verification gate before submission.
+
+	  Pods link dynamically (ios/Podfile uses bare `use_frameworks!`, no static
+	  linkage), so each pod ships or omits its own manifest independently and this
+	  file covers the Runner binary alone. A scan of the Runner target's first-party
+	  sources (AppDelegate, AirPlayPlugin, IosChromecastPlugin, ExternalDisplayHost,
+	  ExternalDisplaySceneDelegate, SecurityChannel, MnemonicVaultChannel,
+	  TimezoneChannel) found no direct required-reason API usage. The declarations
+	  below are therefore a deliberate superset covering what Flutter's embedding
+	  and the plugin surface attribute to the app binary. Over-declaring a reason
+	  code is not a rejection; under-declaring one is.
+	-->
+
+	<!-- No ATT/IDFA anywhere in the app. Must match the App Store Connect
+	     tracking questions, which are answered "no". -->
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<!-- NSUserDefaults — shared_preferences_foundation, and Flutter's own
+		     embedding. CA92.1: access only to app-group/own-app defaults. -->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+
+		<!-- File timestamps — the image/disk cache managers behind SDWebImage and
+		     the Flutter cache paths. C617.1: timestamps of files inside the app's
+		     own container. -->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+			</array>
+		</dict>
+
+		<!-- System boot time — sentry_flutter uses it to compute app-start and
+		     crash timing. 35F9.1: measuring elapsed time within the app. -->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>35F9.1</string>
+			</array>
+		</dict>
+
+		<!-- Disk space — cache eviction and download pre-flight checks.
+		     E174.1: writing/removing files to keep the app functional. -->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>E174.1</string>
+			</array>
+		</dict>
+	</array>
+
+	<!--
+	  Must stay consistent with the App Store Connect privacy nutrition label and
+	  the Play Data safety form. Change one, change all three.
+	  Nothing here is used for tracking; nothing here is used for advertising.
+	-->
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array>
+		<!-- Sentry. sendDefaultPii = false, no screenshots, no view hierarchy. -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeCrashData</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+
+		<!-- Sentry traces, 10% sample in production. -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypePerformanceData</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+
+		<!-- First-party product analytics: client → POST /v1/analytics → backend →
+		     Mixpanel. No Mixpanel SDK on device. User-disableable in
+		     Settings → Security & Privacy → Share usage analytics. -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeProductInteraction</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAnalytics</string>
+			</array>
+		</dict>
+
+		<!-- FCM push token. Functional, not diagnostic — deliberately NOT gated by
+		     the analytics opt-out. -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeDeviceID</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+
+		<!-- Wallet address as the account identifier. -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeUserID</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+
+		<!-- Minted media, profile image/banner, bio. -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeOtherUserContent</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

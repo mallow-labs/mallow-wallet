@@ -1,0 +1,7 @@
+# Copy to android/key.properties (gitignored) and fill in real values to enable
+# release signing for `flutter build appbundle --release`. Leave it absent for
+# debug builds — signing is only consulted for a release build.
+storeFile=/absolute/path/to/upload.jks
+storePassword=
+keyAlias=upload
+keyPassword=

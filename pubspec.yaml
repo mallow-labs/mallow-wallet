@@ -1,0 +1,237 @@
+name: mallow_wallet
+description: "mallow wallet - Art-first mobile wallet for Solana, Ethereum, and Tezos"
+publish_to: 'none'
+version: 0.15.0+19
+
+environment:
+  # Floors track pubspec.lock's resolved `sdks:` block. app_settings 8.x pulled
+  # both up; declaring them here turns an opaque version-solve failure on an
+  # older toolchain into "requires SDK >=3.12.0".
+  sdk: ^3.12.0
+  flutter: ">=3.44.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # Core State Management
+  flutter_bloc: ^9.1.1
+  get_it: ^8.0.3
+  injectable: ^2.5.0
+  
+  # Code Generation Annotations
+  freezed_annotation: ^3.0.0
+  json_annotation: ^4.12.0
+  
+  # Crypto & Blockchain
+  solana: ^0.32.0
+  bip39: ^1.0.6
+  bip32: ^2.0.0 # secp256k1 BIP32 HD derivation (Ethereum)
+  ed25519_hd_key: ^2.3.0 # SLIP-0010 ed25519 HD derivation (Tezos)
+  web3dart: ^3.0.3 # Ethereum address (EIP-55) from secp256k1 key
+  # Single-maintainer and pre-1.0, and it sits on the Ethereum signing path, so
+  # it draws review attention. Accepted because: web3dart 3.x already depends on
+  # `wallet: ^0.0.18` itself, so it is in the tree whether or not this line
+  # exists — declaring it directly only makes the version visible; the caret on
+  # a 0.x version resolves `>=0.0.18 <0.0.19`, so it cannot float to new code on
+  # a `pub upgrade`; and every import is `show EthereumAddress` / `show
+  # EtherAmount` — value types for an address and a wei amount. No key handling,
+  # no signing, no network calls come from it.
+  wallet: ^0.0.18 # EthereumAddress/EtherAmount — web3dart 3.x no longer re-exports them
+  crypto: ^3.0.3 # sha256 for Tezos Base58Check
+
+  # Security
+  flutter_secure_storage: ^10.0.0
+  local_auth: ^3.0.1
+  pointycastle: ^3.9.1 # Argon2id PIN hashing
+  
+  # Database
+  drift: ^2.32.0
+  sqlite3: ^3.2.0
+  path_provider: ^2.1.5
+  path: ^1.9.1
+  
+  # Network
+  dio: ^5.7.0
+  http: ^1.6.0 # web3dart Web3Client transport (Ethereum JSON-RPC)
+  retrofit: ^4.4.2
+  web_socket_channel: ^3.0.1
+  # Native HTTP/2 clients backing the image cache manager (see
+  # mallow_image_cache_manager.dart): NSURLSession on iOS, Cronet on Android.
+  cupertino_http: ^2.1.0
+  cronet_http: ^1.3.2
+  
+  # UI
+  cached_network_image: ^3.4.1
+  flutter_cache_manager: ^3.4.1
+  flutter_staggered_grid_view: ^0.7.0
+  flutter_svg: ^2.0.16
+  go_router: ^17.1.0
+  app_links: ^6.4.1
+  google_fonts: ^8.0.2
+  fl_chart: ^0.70.2
+  extended_image: ^9.0.0
+  lottie: ^3.1.2
+
+  # Media Playback (Cast feature)
+  video_player: ^2.9.2
+  chewie: ^1.8.5
+  visibility_detector: ^0.4.0+2
+  # Holds the screen awake for the duration of a cast session (see
+  # CastAwakeGuard). Already resolved as a transitive dep of chewie; promoted
+  # to direct because we drive it ourselves.
+  wakelock_plus: ^1.3.3
+
+  # 3D Rendering
+  three_js: ^0.2.7
+
+  # Analytics & Error Tracking
+  sentry_flutter: ^9.10.0
+
+  # Social Auth (MetaMask Embedded Wallets)
+  web3auth_flutter: ^7.0.0
+
+  # Push Notifications
+  firebase_core: ^4.5.0
+  firebase_messaging: ^16.1.2
+  
+  # Device & App Info
+  package_info_plus: ^8.3.0
+  device_info_plus: ^12.3.0
+  # The IANA zone name comes from TimezoneChannel (ios/Runner, android
+  # com.mallow.wallet.android) rather than flutter_timezone: that package's iOS
+  # header imports CoreLocation without calling it, autolinking the framework
+  # into the binary and failing App Store validation with ITMS-90683.
+  timezone: ^0.10.0
+
+  # Utilities
+  intl: ^0.20.2
+  equatable: ^2.0.7
+  collection: ^1.19.1
+  shared_preferences: ^2.3.4
+  url_launcher: ^6.3.1
+  # Deep-links into the OS app-settings page (url_launcher can't on Android).
+  # 8.x is Swift Package Manager only (no podspec); the iOS project uses SPM,
+  # so the old 7.x pin no longer applies.
+  app_settings: ^8.0.3
+  uuid: ^4.0.0
+  in_app_review: ^2.0.12
+
+  # Phase 2: QR & Sharing
+  mobile_scanner: ^7.1.4
+  pretty_qr_code: ^3.6.0
+  share_plus: ^12.0.1
+
+  # Save artworks to the device photo library
+  gal: ^2.3.0
+
+  # Hardware Wallet
+  ledger_flutter_plus: ^1.5.6
+
+  # Media Picking (NFT Mint flow)
+  image_picker: ^1.1.2
+  # Document-browser picking. NOT file_picker: its iOS target hard-depends on
+  # DKImagePickerController -> DKCamera, which links CoreLocation and triggers
+  # App Store ITMS-90683 (missing NSLocationWhenInUseUsageDescription).
+  # file_selector wraps UIDocumentPickerViewController with no third-party deps.
+  file_selector: ^1.1.0
+  mime: ^1.0.6
+
+  # Local packages
+  jupiter_aggregator:
+    path: packages/jupiter_aggregator
+  mallow_api:
+    path: packages/mallow_api
+  ledger_solana:
+    path: packages/ledger_solana
+  ledger_ethereum:
+    path: packages/ledger_ethereum
+  ledger_tezos:
+    path: packages/ledger_tezos
+  custom_refresh_indicator: ^4.0.1
+  flutter_image_compress: ^2.5.1
+
+dependency_overrides:
+  # bip32 2.0.0 (last release 2021, unmaintained) caps pointycastle at ^3.0.1,
+  # but web3dart 3.x — a direct dependency (Ethereum address derivation and
+  # signing) — requires ^4.0.0. pointycastle 4.0.0 is additive over 3.9.1 (new
+  # ciphers and OIDs, ASN.1 fixes); nothing bip32 or our Argon2id PIN hashing
+  # uses changed. Covered by test/core/crypto/derivation_test.dart and
+  # pin_hasher tests.
+  pointycastle: ^4.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  # Code Generation
+  build_runner: ^2.4.14
+  freezed: ^3.0.0
+  injectable_generator: ^2.6.2
+  json_serializable: ^6.9.2
+  retrofit_generator: ^10.2.1
+  drift_dev: ^2.32.0
+  
+  # Testing
+  mockito: ^5.4.5
+  mocktail: ^1.0.0
+  bloc_test: ^10.0.0
+  # Lets a widget test stand in for the video decoder, so both states the
+  # artwork detail media can be in — a running player and a source that never
+  # opened — are reachable without a device.
+  video_player_platform_interface: ^6.6.0
+  integration_test:
+    sdk: flutter
+  
+  # Linting
+  flutter_lints: ^6.0.0
+
+  # App Icon
+  flutter_launcher_icons: ^0.14.3
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/app_icon.png"
+  remove_alpha_ios: true
+  # Android 8+ masks the icon itself. Without an adaptive icon the launcher
+  # drops the legacy PNG onto a white plate, so the black artwork reads as a
+  # square inside a white tile. The background matches the artwork's black.
+  adaptive_icon_background: "#000000"
+  adaptive_icon_foreground: "assets/icon/app_icon_foreground.png"
+  # Android 13+ "Themed icons". Same geometry as the foreground, flattened to a
+  # single colour — the system tints it off the alpha channel and ignores RGB.
+  adaptive_icon_monochrome: "assets/icon/app_icon_monochrome.png"
+
+flutter:
+  uses-material-design: true
+
+  # NB: .env / .env.local are deliberately NOT listed here. A bundled asset
+  # ships as plaintext inside the IPA/APK; build vars are compiled in with
+  # --dart-define-from-file instead (see Config in lib/core/config).
+  assets:
+    - assets/images/
+    - assets/images/carousel/
+    - assets/images/tokens/
+    - assets/icons/
+    - assets/animations/
+    - assets/fonts/
+
+  fonts:
+    - family: Geist
+      fonts:
+        - asset: assets/fonts/Geist-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/Geist-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Geist-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Geist-Bold.ttf
+          weight: 700
+
+hooks:
+  user_defines:
+    sqlite3:
+      source: sqlite3mc

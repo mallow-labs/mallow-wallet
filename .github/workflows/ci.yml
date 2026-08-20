@@ -1,0 +1,196 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Read-only by default. Nothing in this workflow needs to write to the repo,
+# and a workflow that cannot write cannot be turned into one that does by a
+# clever pull request.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned deliberately. `dart format` output differs between SDK releases, so
+  # an unpinned check flaps on contributor pull requests for reasons that have
+  # nothing to do with their change. Keep this in step with CONTRIBUTING.md.
+  FLUTTER_VERSION: 3.44.8
+
+jobs:
+  gates:
+    name: Format, analyze, test
+    runs-on: ubuntu-latest
+    # Generous on purpose. This job runs build_runner over three packages and
+    # then the full suite on a 4-vCPU hosted runner; measured runs leave little
+    # headroom under 30, and a timeout here reads as a flaky pipeline rather
+    # than as the slow-but-passing job it is. A real hang still gets caught.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      # No generated file is checked in, so analyze and test cannot pass
+      # without this. It must run before the gates, not alongside them.
+      - name: Code generation
+        run: ./di.sh
+
+      - name: Format check
+        run: dart format --output=none --set-exit-if-changed lib test
+
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos
+
+      - name: Test
+        run: flutter test
+
+      # `flutter test` runs the root package's suite and nothing else — it does
+      # not descend into packages/. Analyze covers them; without this step
+      # nothing executes their tests, which is how packages/mallow_api's suite
+      # once sat red for months with the assertion present and never run.
+      # Loops rather than naming a package, so one that gains a suite is
+      # covered the day it does. All of them are pure Dart, hence `dart test`.
+      - name: Package tests
+        run: |
+          status=0
+          for pkg in packages/*/; do
+            [ -d "${pkg}test" ] || continue
+            # Names the package: `dart test` reports suite paths relative to it,
+            # so with several packages the failing file alone is ambiguous.
+            echo "--- $pkg"
+            (cd "$pkg" && dart test) || status=1
+          done
+          exit $status
+
+      # A security check, not a style one: debugPrint is not stripped from
+      # release builds, so its output reaches logcat/OSLog and anything printed
+      # there is readable off the device.
+      - name: Sensitive debugPrint guard
+        run: ./tool/lint/check_sensitive_debug_print.sh
+
+      # The vendored spec is a build input, and one colon-space in an unquoted
+      # description makes it unparseable — which emits ZERO Dart models and
+      # then fails as thousands of unrelated compile errors somewhere else.
+      # The steps above would go red, but at a distance no contributor could
+      # reasonably debug. This one names the line.
+      - name: OpenAPI spec parses
+        run: ./tool/lint/check_openapi_yaml.sh
+
+      # Every build variable the app reads must be in .env.example, or a fork
+      # that filled in every documented key still gets a misconfigured build
+      # with nothing to tell them so.
+      - name: Build variables documented
+        run: ./tool/lint/check_env_documented.sh
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Pinned so a new detector release cannot turn a green pull request red
+      # without a deliberate bump here.
+      GITLEAKS_VERSION: 8.30.1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The CLI rather than gitleaks-action, for two reasons. The action
+      # requires a GITLEAKS_LICENSE for repositories owned by an organization
+      # and calls process.exit(1) without one, so it would fail this job on
+      # every pull request. It is also proprietary, which is a poor fit for the
+      # one job in this workflow a contributor cannot run themselves. The CLI is
+      # MIT-licensed and needs no key.
+      - name: Install gitleaks
+        run: |
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      # Picks up .gitleaks.toml from the repository root automatically. That
+      # config is load-bearing: without it the generic-api-key rule reports
+      # ordinary program IDs and token contracts — public on-chain identifiers
+      # with the entropy profile of a credential — and every PR fails its secret
+      # scan on day one, which is how a check gets ignored.
+      - name: Scan git history
+        run: gitleaks git --redact --no-banner --verbose .
+
+  build:
+    name: Android debug build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Code generation
+        run: ./di.sh
+
+      # The google-services Gradle plugin fails the build outright when this
+      # file is absent, so the shipped placeholder stands in. It is an
+      # obviously-fake key and grants nothing.
+      - name: Stage the Firebase placeholder
+        run: cp test/e2e/google-services.placeholder.json android/app/google-services.json
+
+      # Analyze and test both pass on a tree that cannot actually produce an
+      # app. Only a build proves a fork can still ship one, so this runs on
+      # every pull request rather than at release time.
+      - name: Build debug APK
+        run: flutter build apk --debug
+
+  dco:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check every commit is signed off
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          missing=0
+          while read -r sha; do
+            [ -n "$sha" ] || continue
+            author="$(git show -s --format='%an <%ae>' "$sha")"
+            if ! git show -s --format='%B' "$sha" | grep -qiF "Signed-off-by: $author"; then
+              echo "::error::missing or mismatched sign-off: $(git show -s --format='%h %s' "$sha")"
+              missing=1
+            fi
+          done < <(git rev-list "$base..$head")
+          if [ "$missing" -ne 0 ]; then
+            echo "Add one with: git commit -s   (or: git rebase --signoff $base)"
+            echo "See CONTRIBUTING.md — https://developercertificate.org/"
+            exit 1
+          fi
+          echo "all commits signed off"

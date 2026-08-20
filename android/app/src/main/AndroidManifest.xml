@@ -1,0 +1,143 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- BLE scanning (Ledger) on API <= 30 only. API 31+ scans under
+         BLUETOOTH_SCAN with usesPermissionFlags="neverForLocation", so the
+         app never collects location. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
+    <!-- gal (save-to-Photos) setup: required for API <= 29 only. Without the
+         declaration the permission request is auto-denied with NO dialog and
+         downloads fail silently on Android 10 and below. -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <application
+        android:label="mallow"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:requestLegacyExternalStorage="true"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:networkSecurityConfig="@xml/network_security_config"
+        tools:replace="android:allowBackup,android:fullBackupContent,android:dataExtractionRules,android:networkSecurityConfig">
+        <activity
+            android:name="com.mallow.wallet.android.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:screenOrientation="portrait"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <!-- Deep links are handled by the app_links plugin (see
+                 DeepLinkService), so the engine's built-in deep linking must
+                 stay off. On (its default since Flutter 3.27), the engine ALSO
+                 pushes every inbound link straight into go_router as a bare
+                 `go` — flattening the stack so the in-page back button has
+                 nothing to pop — and races DeepLinkService for the same link.
+                 Mirrors FlutterDeepLinkingEnabled=false in iOS Info.plist. -->
+            <meta-data
+              android:name="flutter_deeplinking_enabled"
+              android:value="false" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <!-- Verified Android App Links for mallow.art (https). autoVerify
+                 lets Android confirm ownership via the site's
+                 /.well-known/assetlinks.json so these open the app directly
+                 without a chooser. Covers the deep-link paths the app routes. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="mallow.art" />
+                <!-- MUST KEEP — not a Reown leftover. This is the live X
+                     (Twitter) connect callback: the backend
+                     /v2/twitter/callback redirects here with
+                     ?twitter=success|error|error_user_exists and
+                     DeepLinkService publishes it via TwitterConnectNotifier.
+                     Deleting it breaks X connect on Android silently, and no
+                     test catches it (deep_link_service_test injects the URI
+                     directly). Social sign-in no longer uses this path. -->
+                <data android:pathPrefix="/auth/callback" />
+                <data android:pathPrefix="/artwork/" />
+                <data android:pathPrefix="/collection/" />
+                <data android:pathPrefix="/u/" />
+                <data android:pathPrefix="/a/" />
+            </intent-filter>
+            <!-- Non-sensitive custom-scheme surface: the Web3Auth OAuth
+                 redirect (mallowwallet://auth, consumed by the SDK and dropped
+                 by DeepLinkService) plus unverified-link fallback. Kept for
+                 environments where App Links verification is unavailable. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="mallowwallet" />
+            </intent-filter>
+        </activity>
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="mallow_notifications" />
+        <meta-data
+            android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
+            android:value="com.mallow.wallet.android.CastOptionsProvider" />
+        <!-- Receiver app id, resolved from the CAST_RECEIVER_APP_ID dart-define
+             by android/app/build.gradle.kts. It has to reach the SDK through
+             the manifest because the SDK constructs CastOptionsProvider above
+             on its own, before any Dart has run.
+
+             The "id:" prefix is load-bearing and belongs HERE, not in Gradle,
+             so it cannot be applied twice: aapt types a meta-data value by its
+             content, so an all-digit receiver id would be stored as an Int,
+             getString() would return null and the build would silently fall
+             back to mallow's receiver. CastOptionsProvider strips the prefix
+             back off. -->
+        <meta-data
+            android:name="art.mallow.cast.RECEIVER_APP_ID"
+            android:value="id:${castReceiverAppId}" />
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- url_launcher. Android 11+ package visibility hides every browser
+             from us unless it is declared here, which makes canLaunchUrl()
+             answer false for ordinary https links and turns every in-app link
+             (legal pages, explorer links, socials) into a silent no-op. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="https"/>
+        </intent>
+        <!-- LaunchMode.inAppBrowserView resolves a Custom Tabs provider through
+             this service query; without it the in-app browser degrades to an
+             external browser hand-off. -->
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService"/>
+        </intent>
+    </queries>
+</manifest>

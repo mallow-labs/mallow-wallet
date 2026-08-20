@@ -1,0 +1,204 @@
+{
+  "_comment": [
+    "The BASELINE every scenario diffs from: a signed-in wallet that holds",
+    "nothing. Empty is the default, but every body here is the shape the wire",
+    "contract actually specifies - an 'empty' body of the wrong shape is worse",
+    "than no fixture at all, because the screen renders its ERROR view and a",
+    "careless test reads that as 'empty'.",
+    "",
+    "Every entry names the type it is bound to. Change one only against",
+    "packages/mallow_api/openapi/openapi.yaml or the hand-written model, never",
+    "against what a screen appears to accept.",
+    "",
+    "Endpoints deliberately LEFT to the generic DEFAULT, with reasons - do not",
+    "add them without one:",
+    "  * POST /v0/authToken - the signed-login step-up. Answering it would send",
+    "    the app on to signLoginChallenge + /v0/authToken/verify, i.e. a real",
+    "    signature and a Set-Cookie the mock cannot produce, so a 'helpful'",
+    "    fixture would start a flow no case is written for.",
+    "  * GET /home - the home feed. `{ \"result\": {} }` IS the correct empty",
+    "    body (ApiResponse<HomeFeedResponse>; every inner field defaults), and",
+    "    it was tried: serving it makes `HomeBloc._revalidate` succeed, which",
+    "    runs `HomeFeedRepository.cacheAllHomeSections` -> an INSERT into",
+    "    cached_home_feed. That write is issued from a bloc handler that",
+    "    outlives the test - five section fetches are awaited first - so when",
+    "    `restartApp` closes the drift connection under it, drift throws",
+    "    'Tried to send Request ... but the connection was closed!' into the",
+    "    zone, and the framework pins it on whichever case is running by then.",
+    "    Measured: 2 such aborts in one config-and-network run. That is an app",
+    "    bug (an unguarded cache write after teardown,",
+    "    home_feed_repository.dart:158) and it has to be fixed before the feed",
+    "    can be fixtured; the home-feed bucket is Phase 2 and owns both.",
+    "  * GET /v2/health - not the app. It is the readiness probe",
+    "    test/e2e/lib.sh uses to decide the mock is up.",
+    "  * POST /v0/userWithDetails, GET /v0/txFees, POST /v1/bugReport - only",
+    "    reached by the listing / mint / bug-report flows, which are Phase 2-3.",
+    "    Their bodies belong with those fixtures, where a case can assert on",
+    "    them."
+  ],
+  "routes": [
+    {
+      "_note": "Non-JSON-RPC POST to the proxy root. RPC verbs never match this (they need `rpc`); they fall through to the built-ins.",
+      "method": "POST",
+      "path": "^/?$",
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": null
+      }
+    },
+    {
+      "_note": "Helius DAS searchAssets, the Solana token+NFT read. NOT a built-in verb, so without this it answers `result: null` - which TokenRepository degrades to zero tokens WITHOUT erroring. That silent false-empty is the trap this route exists to close: the tab looks empty because the mock said nothing, not because the wallet holds nothing. Body is a real empty-portfolio response.",
+      "method": "POST",
+      "rpc": "searchAssets",
+      "body": {
+        "total": 0,
+        "limit": 1000,
+        "page": 1,
+        "items": [],
+        "nativeBalance": {
+          "lamports": 0,
+          "price_per_sol": 0,
+          "total_price": 0
+        }
+      }
+    },
+    {
+      "_note": "ApiResponse<LoginResult> (POST /v0/login).",
+      "method": "POST",
+      "path": "/v0/login",
+      "body": {
+        "result": {
+          "user": {}
+        }
+      }
+    },
+    {
+      "_note": "`{ result: [EvmHolding, ...] }` per getV2EvmBalances; /v2/tezos/balances reuses it. Reading anything but `result` yields `?? const []`, i.e. a silent zero-holdings answer.",
+      "method": "GET",
+      "path": "/v2/.*balances",
+      "body": {
+        "result": []
+      }
+    },
+    {
+      "_note": "PortfolioArtworksResponse (in openapi.yaml): `result` + `total` both REQUIRED. A missing `total` throws inside the generated fromJson and the Portfolio tab shows its error view.",
+      "method": "POST",
+      "path": "/v2/portfolio/artworks",
+      "body": {
+        "result": [],
+        "total": 0
+      }
+    },
+    {
+      "_note": "PortfolioGroupsResponse (in openapi.yaml) wrapping PortfolioGroupsResult: `groups` + `total` both REQUIRED.",
+      "method": "POST",
+      "path": "/v2/portfolio/groups",
+      "body": {
+        "result": {
+          "groups": [],
+          "total": 0
+        }
+      }
+    },
+    {
+      "_note": "ActivityListResponse (packages/mallow_api .../models/activity.dart): `result` + `pagination` both required, and ActivityPagination requires page/limit/hasMore.",
+      "method": "GET",
+      "path": "/v2/activity",
+      "body": {
+        "result": [],
+        "pagination": {
+          "page": 0,
+          "limit": 50,
+          "hasMore": false
+        }
+      }
+    },
+    {
+      "_note": "BulkUserLookupResponse: `result` is required (its two lists default). Requested on every session init and every drawer open.",
+      "method": "POST",
+      "path": "/v1/user/bulk",
+      "body": {
+        "result": {
+          "users": [],
+          "unlinkedAddresses": []
+        }
+      }
+    },
+    {
+      "_note": "NotificationUnreadCountResponse -> NotificationUnreadCount: both fields required. Drives the drawer's unread badge.",
+      "method": "GET",
+      "path": "/v1/notifications/unread-count",
+      "body": {
+        "result": {
+          "unreadCount": 0,
+          "hasUnreadMessages": false
+        }
+      }
+    },
+    {
+      "_note": "CurationListResponse: `result` required.",
+      "method": "GET",
+      "path": "/v1/curations",
+      "body": {
+        "result": []
+      }
+    },
+    {
+      "_note": "EvmTokenListResponse under a `result` envelope: version/updatedAt/tokens all required. An empty list is the correct sandbox answer - no ERC-20 is verified here.",
+      "method": "GET",
+      "path": "/v2/evm/token-list",
+      "body": {
+        "result": {
+          "version": "0.0.0",
+          "updatedAt": "2026-01-01T00:00:00.000Z",
+          "tokens": []
+        }
+      }
+    },
+    {
+      "_note": "ApiResponse<TokenPricesResponse>: a mint->price map, empty here.",
+      "method": "GET",
+      "path": "/v0/getTokenPrices",
+      "body": {
+        "result": {}
+      }
+    },
+    {
+      "_note": "The remote-config kill switch. Nothing killed, no forced update.",
+      "method": "GET",
+      "path": "/v2/config/mobile",
+      "body": {
+        "result": {
+          "updateRequired": false,
+          "disabledFlows": []
+        }
+      }
+    },
+    {
+      "_note": "Jupiter price v3. THE reason the suite was not offline: TokenRepository reaches _fetchSolPrice() on the balances path whenever no native price is supplied, so a contributor's run sent real traffic to api.jup.ag from their own IP. v3 answers a FLAT map, mint -> price object, with no `data` envelope, and omits any mint it has no price for -- so an empty map is the valid 'nothing is priced' answer rather than an error.",
+      "method": "GET",
+      "path": "^/jupiter/price/v3",
+      "body": {
+        "So11111111111111111111111111111111111111112": {
+          "usdPrice": 100.0,
+          "blockId": 1,
+          "decimals": 9,
+          "priceChange24h": 0.0
+        }
+      }
+    },
+    {
+      "_note": "CoinGecko, reached through GeckoTerminalService for charts and pool reads. One regex for the whole /api/v3 surface: the suite asserts no chart data, so the point is that the call is answered locally rather than leaving the machine.",
+      "method": "GET",
+      "path": "^/coingecko/api/v3/",
+      "body": []
+    },
+    {
+      "_note": "IPFS and Arweave gateways. Media is never asserted in the suite, so these answer an empty object rather than bytes -- the image fails to decode, which is what an unreachable gateway already looked like. The containment is the point: without these two the app walks to ipfs.io and arweave.net for real.",
+      "method": "GET",
+      "path": "^/(ipfs-gateway|arweave-gateway)/",
+      "body": {}
+    }
+  ]
+}

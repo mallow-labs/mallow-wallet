@@ -1,0 +1,89 @@
+name: Bug report
+description: Something behaves incorrectly
+labels: [bug]
+body:
+  # The SECURITY.md link below is absolute because issue-form markdown does not
+  # resolve repository-relative paths. That hardcodes the published repo slug
+  # here as well as in config.yml — change both together if the slug changes.
+  - type: markdown
+    attributes:
+      value: |
+        **If this is a security vulnerability, close this and read
+        [SECURITY.md](https://github.com/mallow-labs/mallow-wallet/blob/main/SECURITY.md)
+        instead.** A public report on a wallet turns a vulnerability into a
+        race.
+
+        **Never paste a seed phrase, mnemonic, or private key.** Not a partial
+        one, not a testnet one you think is empty. There is no field below that
+        needs it, and nobody here will ever ask.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did you expect, and what did you get instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+        3. …
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The app version, or the commit you built from.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [iOS, Android, Both]
+    validations:
+      required: true
+
+  - type: dropdown
+    id: chain
+    attributes:
+      label: Which chain?
+      description: >-
+        Solana, Ethereum and Tezos have separate derivation schemes, address
+        formats and send paths, so a bug on one is rarely a bug on the others.
+      multiple: true
+      options:
+        - Solana
+        - Ethereum
+        - Tezos
+        - Not chain-specific
+    validations:
+      required: true
+
+  - type: dropdown
+    id: build
+    attributes:
+      label: Which build?
+      description: >-
+        Forks are welcome here, but a fork pointed at its own backend has a
+        different failure surface — knowing which saves a round trip.
+      options:
+        - An official mallow build (TestFlight / Google Play)
+        - My own build from source
+        - A fork
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Logs or screenshots
+      description: Redact addresses if you would rather not link them to yourself.

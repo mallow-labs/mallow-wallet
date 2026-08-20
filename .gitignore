@@ -1,0 +1,80 @@
+# Flutter/Dart
+.dart_tool/
+.packages
+build/
+*.iml
+.flutter-plugins
+.flutter-plugins-dependencies
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.pub-cache/
+.pub/
+/coverage/
+
+# Generated code
+*.g.dart
+*.freezed.dart
+*.gr.dart
+*.mocks.dart
+*.swagger.dart
+lib/di.config.dart
+
+# IDE
+.idea/
+*.iws
+.vscode/
+*.swp
+
+# macOS
+.DS_Store
+*.pem
+
+# Secrets - CRITICAL
+.env*
+!.env.example
+credentials.json
+google-services.json
+GoogleService-Info.plist
+keys/
+secrets/
+
+# Build artifacts
+/android/app/debug
+/android/app/profile
+/android/app/release
+*.apk
+*.aab
+*.ipa
+*.dSYM.zip
+*.dSYM
+app.*.symbols
+app.*.map.json
+
+# Symbolication related
+app.*.symbols
+
+# Test coverage
+.test_coverage.dart
+
+# Worktrees
+.worktrees/
+
+# Miscellaneous
+*.class
+*.log
+*.pyc
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+settings.local.json
+.mcp_data
+
+/android/.kotlin/sessions
+/.claude
+.review/
+
+.wrangler/

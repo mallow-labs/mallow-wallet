@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -e
+
+files=$(git diff --cached --name-only --diff-filter=ACM | grep '\.dart$' || true)
+[ -z "$files" ] && exit 0
+
+echo "$files" | xargs dart format
+echo "$files" | xargs git add

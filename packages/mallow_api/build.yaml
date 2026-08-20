@@ -1,0 +1,23 @@
+targets:
+  $default:
+    # build_runner only reads its default source roots (lib/**, etc.); the
+    # vendored spec lives outside lib/ so it must be added explicitly.
+    sources:
+      - lib/**
+      - openapi/**
+      - $package$
+    builders:
+      swagger_dart_code_generator:
+        options:
+          # Vendored OpenAPI spec. It is generated from private schemas and
+          # cannot be regenerated here, so treat it as a build input.
+          input_folder: "openapi/"
+          output_folder: "lib/src/generated/"
+          # Models-only: keep the hand-written Retrofit client interface in
+          # client.dart; we only want the request/response models codegen'd
+          # from the contract so they stay in sync with the backend.
+          build_only_models: true
+          separate_models: true
+          with_converter: false
+          enums_case_sensitive: true
+          use_required_attribute_for_headers: false

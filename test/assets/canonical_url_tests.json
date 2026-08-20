@@ -1,0 +1,269 @@
+{
+	"_comment": [
+		"Cross-language contract for asset-URL canonicalization.",
+		"Consumed by the image-resizing service (Rust), the web client (TS) and the Flutter wallet (Dart).",
+		"Deployment hosts appear here as example.com placeholders: they are CONFIG, not\n\t\tcontract. Each implementation binds arweaveHosts / directGateways / originalBase\n\t\tfrom its own settings and runs these vectors against them; the rules below are\n\t\twhat must match across languages.",
+		"Implementations MUST use string operations only \u2014 no URL-parser round-trips",
+		"(parsers normalize differently across languages). Classification may lowercase",
+		"the host and strip a leading 'www.'; the verbatim branch must return the input",
+		"byte-identical minus everything from the first '#'.",
+		"Rules: ipfs://CID[/path] from ipfs:// scheme (incl. malformed ipfs://ipfs/CID)",
+		"or any http(s) host whose path starts /ipfs/<valid CID>, or a subdomain",
+		"gateway whose host is '<valid CID>.ipfs.<rest>' (origin-isolated gateways put",
+		"the CID in the leftmost label; CIDv1 only, since a DNS label can't be",
+		"case-sensitive base58). ar://TXID[/path] from",
+		"the arweaveHosts list only, first path segment matching txidRegex. gateway.irys.xyz",
+		"is deliberately NOT an arweave host: Irys data items live on its own data chain,",
+		"so an id that looks like a txid does not resolve on any arweave gateway. Do not",
+		"re-add it, and never route an irys URL through an arweave mirror. Query strings",
+		"are dropped for both content-addressed families (the id names the bytes);",
+		"embedded percent-encoding in kept path segments is preserved verbatim.",
+		"originalPath = '/original/' + encodeURIComponent(canonical) \u2014 byte-exact,",
+		"same embedding convention as the existing resize path."
+	],
+	"cidRegex": "^(Qm[1-9A-HJ-NP-Za-km-z]{44}|b[a-z2-7]{50,})$",
+	"txidRegex": "^[A-Za-z0-9_-]{43}$",
+	"arweaveHosts": [
+		"arweave.example.com",
+		"permagate.io",
+		"arweave.net"
+	],
+	"directGateways": {
+		"ipfs": "https://ipfs.example.com/ipfs/",
+		"arweave": "https://arweave.example.com/"
+	},
+	"originalBase": "https://images.example.com/original/",
+	"cases": [
+		{
+			"name": "ipfs-scheme-passthrough",
+			"input": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/0.png",
+			"canonical": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/0.png",
+			"direct": "https://ipfs.example.com/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/0.png",
+			"originalPath": "/original/ipfs%3A%2F%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim%2F0.png"
+		},
+		{
+			"name": "ipfs-scheme-query-fragment-dropped",
+			"input": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/0.png?ext=png#zoom",
+			"canonical": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/0.png",
+			"direct": "https://ipfs.example.com/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/0.png",
+			"originalPath": "/original/ipfs%3A%2F%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim%2F0.png"
+		},
+		{
+			"name": "ipfs-scheme-malformed-double-ipfs",
+			"input": "ipfs://ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"canonical": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"direct": "https://ipfs.example.com/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"originalPath": "/original/ipfs%3A%2F%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim"
+		},
+		{
+			"name": "ipfs-gateway-own-mirror",
+			"input": "https://ipfs.example.com/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/1.png",
+			"canonical": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/1.png",
+			"direct": "https://ipfs.example.com/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/1.png",
+			"originalPath": "/original/ipfs%3A%2F%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim%2F1.png"
+		},
+		{
+			"name": "ipfs-gateway-public-query-dropped",
+			"input": "https://ipfs.io/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim?ext=png",
+			"canonical": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"direct": "https://ipfs.example.com/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"originalPath": "/original/ipfs%3A%2F%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim"
+		},
+		{
+			"name": "ipfs-gateway-any-host",
+			"input": "https://gateway.pinata.cloud/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/art.gif",
+			"canonical": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/art.gif",
+			"direct": "https://ipfs.example.com/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/art.gif",
+			"originalPath": "/original/ipfs%3A%2F%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim%2Fart.gif"
+		},
+		{
+			"name": "ipfs-gateway-cid-v0",
+			"input": "https://cloudflare-ipfs.com/ipfs/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+			"canonical": "ipfs://QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+			"direct": "https://ipfs.example.com/ipfs/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+			"originalPath": "/original/ipfs%3A%2F%2FQmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG"
+		},
+		{
+			"name": "ipfs-percent-encoding-preserved",
+			"input": "https://ipfs.io/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/my%20art.png",
+			"canonical": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/my%20art.png",
+			"direct": "https://ipfs.example.com/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/my%20art.png",
+			"originalPath": "/original/ipfs%3A%2F%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim%2Fmy%2520art.png"
+		},
+		{
+			"name": "ipfs-invalid-cid-verbatim",
+			"input": "https://example.com/ipfs/not-a-cid/x.png",
+			"canonical": "https://example.com/ipfs/not-a-cid/x.png",
+			"direct": "https://example.com/ipfs/not-a-cid/x.png",
+			"originalPath": "/original/https%3A%2F%2Fexample.com%2Fipfs%2Fnot-a-cid%2Fx.png"
+		},
+		{
+			"name": "ipfs-subdomain-gateway",
+			"input": "https://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim.ipfs.dweb.link/0.png",
+			"canonical": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/0.png",
+			"direct": "https://ipfs.example.com/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/0.png",
+			"originalPath": "/original/ipfs%3A%2F%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim%2F0.png"
+		},
+		{
+			"name": "ar-arweave-net",
+			"input": "https://arweave.net/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"canonical": "ar://xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"direct": "https://arweave.example.com/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"originalPath": "/original/ar%3A%2F%2Fxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+		},
+		{
+			"name": "ar-www-stripped",
+			"input": "https://www.arweave.net/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"canonical": "ar://xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"direct": "https://arweave.example.com/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"originalPath": "/original/ar%3A%2F%2Fxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+		},
+		{
+			"name": "ar-host-case-insensitive",
+			"input": "https://ARWEAVE.NET/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"canonical": "ar://xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"direct": "https://arweave.example.com/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"originalPath": "/original/ar%3A%2F%2Fxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+		},
+		{
+			"name": "ar-mirror-with-path",
+			"input": "https://arweave.example.com/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/0",
+			"canonical": "ar://xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/0",
+			"direct": "https://arweave.example.com/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/0",
+			"originalPath": "/original/ar%3A%2F%2Fxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx%2F0"
+		},
+		{
+			"name": "ar-permagate-query-dropped",
+			"input": "https://permagate.io/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx?ext=mp4",
+			"canonical": "ar://xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"direct": "https://arweave.example.com/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"originalPath": "/original/ar%3A%2F%2Fxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+		},
+		{
+			"name": "ar-scheme-passthrough",
+			"input": "ar://xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"canonical": "ar://xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"direct": "https://arweave.example.com/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"originalPath": "/original/ar%3A%2F%2Fxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+		},
+		{
+			"name": "ar-scheme-fragment-dropped",
+			"input": "ar://xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx#f",
+			"canonical": "ar://xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"direct": "https://arweave.example.com/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"originalPath": "/original/ar%3A%2F%2Fxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+		},
+		{
+			"name": "ar-raw-route-verbatim",
+			"input": "https://arweave.net/raw/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"canonical": "https://arweave.net/raw/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"direct": "https://arweave.net/raw/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"originalPath": "/original/https%3A%2F%2Farweave.net%2Fraw%2Fxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+		},
+		{
+			"name": "ar-non-txid-verbatim",
+			"input": "https://arweave.net/some-page",
+			"canonical": "https://arweave.net/some-page",
+			"direct": "https://arweave.net/some-page",
+			"originalPath": "/original/https%3A%2F%2Farweave.net%2Fsome-page"
+		},
+		{
+			"name": "ar-irys-delisted-verbatim",
+			"input": "https://gateway.irys.xyz/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"canonical": "https://gateway.irys.xyz/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"direct": "https://gateway.irys.xyz/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"originalPath": "/original/https%3A%2F%2Fgateway.irys.xyz%2Fxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+		},
+		{
+			"name": "https-fragment-stripped",
+			"input": "https://example.com/a.png#frag",
+			"canonical": "https://example.com/a.png",
+			"direct": "https://example.com/a.png",
+			"originalPath": "/original/https%3A%2F%2Fexample.com%2Fa.png"
+		},
+		{
+			"name": "https-query-preserved-verbatim",
+			"input": "https://example.com/gen.html?b=2&a=1",
+			"canonical": "https://example.com/gen.html?b=2&a=1",
+			"direct": "https://example.com/gen.html?b=2&a=1",
+			"originalPath": "/original/https%3A%2F%2Fexample.com%2Fgen.html%3Fb%3D2%26a%3D1"
+		},
+		{
+			"name": "https-host-case-preserved-verbatim",
+			"input": "https://Example.COM/A.png",
+			"canonical": "https://Example.COM/A.png",
+			"direct": "https://Example.COM/A.png",
+			"originalPath": "/original/https%3A%2F%2FExample.COM%2FA.png"
+		},
+		{
+			"name": "http-verbatim",
+			"input": "http://example.com/x.png",
+			"canonical": "http://example.com/x.png",
+			"direct": "http://example.com/x.png",
+			"originalPath": "/original/http%3A%2F%2Fexample.com%2Fx.png"
+		},
+		{
+			"name": "data-url-verbatim",
+			"input": "data:image/png;base64,AAAA",
+			"canonical": "data:image/png;base64,AAAA",
+			"direct": "data:image/png;base64,AAAA",
+			"originalPath": "/original/data%3Aimage%2Fpng%3Bbase64%2CAAAA"
+		},
+		{
+			"name": "unparseable-verbatim",
+			"input": "not-a-url",
+			"canonical": "not-a-url",
+			"direct": "not-a-url",
+			"originalPath": "/original/not-a-url"
+		},
+		{
+			"name": "ipfs-subdomain-gateway-no-path",
+			"input": "https://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim.ipfs.nftstorage.link",
+			"canonical": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"direct": "https://ipfs.example.com/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"originalPath": "/original/ipfs%3A%2F%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim"
+		},
+		{
+			"name": "ipfs-subdomain-gateway-query-dropped",
+			"input": "https://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim.ipfs.w3s.link/art.gif?ext=gif",
+			"canonical": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/art.gif",
+			"direct": "https://ipfs.example.com/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/art.gif",
+			"originalPath": "/original/ipfs%3A%2F%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim%2Fart.gif"
+		},
+		{
+			"name": "ipfs-subdomain-marker-without-cid-verbatim",
+			"input": "https://gateway.ipfs.io/x.png",
+			"canonical": "https://gateway.ipfs.io/x.png",
+			"direct": "https://gateway.ipfs.io/x.png",
+			"originalPath": "/original/https%3A%2F%2Fgateway.ipfs.io%2Fx.png"
+		},
+		{
+			"name": "ipfs-subdomain-invalid-cid-verbatim",
+			"input": "https://not-a-cid.ipfs.dweb.link/0.png",
+			"canonical": "https://not-a-cid.ipfs.dweb.link/0.png",
+			"direct": "https://not-a-cid.ipfs.dweb.link/0.png",
+			"originalPath": "/original/https%3A%2F%2Fnot-a-cid.ipfs.dweb.link%2F0.png"
+		},
+		{
+			"name": "ar-irys-non-txid-route-verbatim",
+			"input": "https://gateway.irys.xyz/info",
+			"canonical": "https://gateway.irys.xyz/info",
+			"direct": "https://gateway.irys.xyz/info",
+			"originalPath": "/original/https%3A%2F%2Fgateway.irys.xyz%2Finfo"
+		},
+		{
+			"name": "ar-unknown-host-verbatim",
+			"input": "https://arweave.dev/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"canonical": "https://arweave.dev/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"direct": "https://arweave.dev/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"originalPath": "/original/https%3A%2F%2Farweave.dev%2Fxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+		},
+		{
+			"name": "host-with-no-path-verbatim",
+			"input": "https://arweave.net",
+			"canonical": "https://arweave.net",
+			"direct": "https://arweave.net",
+			"originalPath": "/original/https%3A%2F%2Farweave.net"
+		}
+	]
+}

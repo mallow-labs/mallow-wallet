@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>mallow</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>mallow_wallet</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(FLUTTER_BUILD_NAME)</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleVersion</key>
+	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<key>UIMainStoryboardFile</key>
+	<string>Main</string>
+	<key>UIRequiresFullScreen</key>
+	<true/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>mallowwallet</string>
+			</array>
+		</dict>
+	</array>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>mallow wallet needs Bluetooth to connect to your Ledger hardware wallet for secure transaction signing.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>mallow wallet needs Bluetooth to connect to your Ledger hardware wallet for secure transaction signing.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>mallow wallet uses the camera to scan QR codes, such as a wallet address you are sending to.</string>
+	<!-- Read-write photo access is needed only to create and add to the album a
+	     collection download is saved into: Gal.requestAccess(toAlbum: true) maps to
+	     PHPhotoLibrary.requestAuthorization(for: .readWrite), which aborts the process
+	     if this key is absent. Picking media to mint does NOT need it — that goes
+	     through PHPickerViewController (image_picker) or the document browser
+	     (file_selector), both of which run out of process. -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>mallow wallet needs access to your photo library to create a mallow album and save artworks you download into it.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>mallow wallet saves artworks from your collections to your photo library.</string>
+	<!-- Suppresses the system "Select More Photos / Keep Current Selection" alert
+	     that iOS raises on its own, once per launch, the first time a limited-access
+	     app touches the library. It is meaningless here: this app only ever adds
+	     images and never reads the user's photos, so widening the selection grants
+	     it nothing. The alert also interleaves badly with the download progress
+	     sheet — it parks the PhotoKit write behind a modal the sheet knows nothing
+	     about. Saving under limited access still works; see
+	     CollectionDownloadService._putImageInAlbum for the album fallback it needs. -->
+	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
+	<true/>
+	<key>NSFaceIDUsageDescription</key>
+	<string>mallow wallet uses Face ID to unlock your wallet and authorize transactions.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>mallow wallet uses your local network to discover nearby Chromecast and Android TV devices for casting artwork.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_googlecast._tcp</string>
+	</array>
+	<!-- Exempt: uses only standard TLS + Solana/BIP39 signing (mass-market exemption). Re-evaluate if proprietary crypto is introduced. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<!-- `bluetooth-central` is deliberately NOT here. BLE is real — Ledger
+	     pairing and signing (lib/features/ledger/) — but every bit of it is a
+	     foreground interaction: nothing scans, connects or signs off-screen,
+	     and no CBCentralManager restore identifier is set. Declaring a
+	     background mode the app never exercises is an App Store rejection
+	     under Guideline 2.5.4, which is what happened. The NSBluetooth*
+	     usage descriptions above stay — foreground BLE still needs them. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
+	<!-- Deep links are handled by the app_links plugin (see DeepLinkService), so
+	     the engine's built-in deep linking must stay off. Left on (its default),
+	     the engine ALSO pushes every inbound link straight into go_router as a
+	     bare `go` — flattening the stack so the in-page back button has nothing
+	     to pop — and, when the framework hasn't mounted a router yet (cold
+	     start), reports the link unhandled and calls `UIApplication.openURL` to
+	     "throw it back to iOS", which reopens the link in Safari. That is the
+	     app bouncing the user back to mallow.art on the first tap. -->
+	<key>FlutterDeepLinkingEnabled</key>
+	<false/>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneClassName</key>
+					<string>UIWindowScene</string>
+					<key>UISceneDelegateClassName</key>
+					<string>Runner.MallowSceneDelegate</string>
+					<key>UISceneConfigurationName</key>
+					<string>flutter</string>
+					<key>UISceneStoryboardFile</key>
+					<string>Main</string>
+				</dict>
+			</array>
+			<key>UIWindowSceneSessionRoleExternalDisplayNonInteractive</key>
+			<array>
+				<dict>
+					<key>UISceneClassName</key>
+					<string>UIWindowScene</string>
+					<key>UISceneDelegateClassName</key>
+					<string>Runner.ExternalDisplaySceneDelegate</string>
+					<key>UISceneConfigurationName</key>
+					<string>external</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
+</dict>
+</plist>

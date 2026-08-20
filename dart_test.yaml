@@ -1,0 +1,16 @@
+# Test tags. `live-ghostnet` marks tests that hit the real Tezos shadownet node
+# and require a funded source (see test/integration/tezos_ghostnet_e2e_test.dart).
+# The tag name predates Ghostnet's decommissioning and is kept for continuity.
+# They self-skip without funding env, so the default suite is safe; exclude them
+# explicitly with `flutter test --exclude-tags live-ghostnet` when needed.
+#
+# `nightly` marks E2E flows in integration_test/ that are real regression cover
+# but are too slow for a per-PR smoke run. The binding cost is the
+# test *file*: a measured ~34 s of per-file overhead, ~88% of it a Gradle
+# assembleDebug pass that re-runs even when fully up to date. Run the smoke
+# subset with `--exclude-tags nightly`; drop the flag to run everything.
+tags:
+  live-ghostnet:
+    skip: false
+  nightly:
+    skip: false

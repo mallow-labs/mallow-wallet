@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  HTTPS-only enforcement at the platform layer. Every backend this app talks
+  to — the API, the Solana RPC endpoint, the image CDN, Firebase — is TLS, so
+  cleartext is globally denied via base-config.
+
+  Debug overlay adds user CA trust so engineers can inspect traffic with
+  Charles / Proxyman against debug builds. User CAs are NOT trusted in release.
+
+  Loopback domain-config permits cleartext only to localhost / 127.0.0.1 / 10.0.2.2
+  (Android emulator host). Loopback is reachable only from the device itself, so
+  this carries no real-network exposure but keeps the .env API_BASE_URL=http://localhost:...
+  local-dev workflow working.
+
+  Certificate pinning (<pin-set>) is not configured yet. The base-config block is the
+  drop-in site — no manifest change is required when it lands.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+        <!-- <pin-set> entries land here. -->
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">10.0.2.2</domain>
+    </domain-config>
+
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+</network-security-config>
