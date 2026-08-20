@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon/app_icon.png" alt="" width="96">
+</p>
+
 # mallow wallet
 
 A security-first, self-custody mobile wallet for Solana, Ethereum, and Tezos.
@@ -10,6 +14,13 @@ The App Store and Google Play listings are not live yet. Until they are, the
 only official builds are **TestFlight** and **Google Play closed testing**, both
 by invitation. Ask for one at <https://wallet-beta.mallow.art>, and see
 [SECURITY.md](SECURITY.md) for how to tell a genuine build from a fork.
+
+<p align="center">
+  <img src="docs/images/gallery.webp" width="320"
+       alt="A grid of collected artworks across Solana, Ethereum and Tezos">
+</p>
+
+<p align="center"><em>All your SOL/ETH/TEZ artworks in one place.</em></p>
 
 ---
 

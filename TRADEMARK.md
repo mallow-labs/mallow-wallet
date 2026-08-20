@@ -25,6 +25,9 @@ trust it.
 - The mallow logo and app icon (`assets/icon/`).
 - Other material under `assets/` that identifies mallow — the loader animation
   and the mallow marks among the interface icons.
+- The screenshot in [README.md](README.md) (`docs/images/`). The interface in
+  it is ours; the artworks in it are their artists'. Neither is licensed
+  onward, so a fork takes its own screenshot of its own build.
 
 **Not ours to reserve, and not ours to license onward.** Some of `assets/` is
 third-party, and this policy does not reach it:
