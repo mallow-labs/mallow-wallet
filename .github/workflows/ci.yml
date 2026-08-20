@@ -141,15 +141,26 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # A hosted runner starts with roughly 20 GB free, and this job wants more
-      # than that: the Flutter SDK, the pub cache, Gradle's caches and the NDK
-      # the plugins pin all land on the same disk. Without this the build died
-      # with 59 MB left, and Gradle could not write out why it failed — the log
-      # says "3 failures" and nothing else, because the log itself hit ENOSPC.
-      # The image ships toolchains nothing here can use. Deleting them by name
-      # keeps the step readable and adds no third-party action to a workflow
-      # that deliberately has none; the df lines make the next squeeze visible
-      # in the log rather than a mystery.
+      # This job filled its runner's disk once: `Free space left: 59 MB`, then
+      # three Gradle failures with no text against any of them, because the
+      # failure output hit ENOSPC as well.
+      #
+      # How much a runner starts with is not a constant, and the numbers here
+      # do not prove this step is what fixed that. The failing run and the
+      # first passing one drew different image versions — ubuntu24/20260816.2
+      # against 20260810.271 — and only the second printed a figure: 87 GB
+      # free before this step and 105 GB after. Nothing measured the image
+      # that actually ran out. So this buys headroom against a build whose
+      # appetite is known to reach the limit on some images, and the two
+      # `df -h` lines are as much the point as the removal is — the failure
+      # they were added for could not say what filled the disk, or how full it
+      # was to begin with.
+      #
+      # Removals are by name rather than via one of the free-disk-space
+      # actions: this workflow takes no third-party action beyond checkout,
+      # setup-java and flutter-action, and a step whose whole job is
+      # `sudo rm -rf` on the machine that then builds the app is the last
+      # place to add one.
       - name: Free disk space
         run: |
           df -h /
