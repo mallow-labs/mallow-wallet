@@ -145,16 +145,19 @@ jobs:
       # three Gradle failures with no text against any of them, because the
       # failure output hit ENOSPC as well.
       #
-      # How much a runner starts with is not a constant, and the numbers here
-      # do not prove this step is what fixed that. The failing run and the
-      # first passing one drew different image versions — ubuntu24/20260816.2
-      # against 20260810.271 — and only the second printed a figure: 87 GB
-      # free before this step and 105 GB after. Nothing measured the image
-      # that actually ran out. So this buys headroom against a build whose
-      # appetite is known to reach the limit on some images, and the two
-      # `df -h` lines are as much the point as the removal is — the failure
-      # they were added for could not say what filled the disk, or how full it
-      # was to begin with.
+      # Measured, from these df lines and the one after the build: this frees
+      # about 18 GB, and the whole build spends about 15 GB — 40 GB used once
+      # this step is done, 55 GB once the APK is built. Freeing more than the
+      # build spends is what makes the step sufficient rather than merely
+      # generous: on any image carrying these directories the job fits however
+      # little it started with.
+      #
+      # That reasoning is load-bearing, because no run has confirmed the fix
+      # directly. Runner images are not a constant — the failing run drew
+      # ubuntu24/20260816.2, every passing run since has drawn 20260810.271,
+      # and that one starts with 87 GB free and would never have run out. So
+      # keep the `df -h` lines: the failure they were added for could say
+      # neither what filled the disk nor how full it was to begin with.
       #
       # Removals are by name rather than via one of the free-disk-space
       # actions: this workflow takes no third-party action beyond checkout,
