@@ -47,7 +47,8 @@ bundle install                    # once, from the repository root
 ```
 
 Re-run `pod install` after any pubspec change that adds or removes a plugin with
-an iOS side. Android needs none of this — Gradle resolves its own dependencies.
+an iOS side. Android needs none of this — Gradle resolves its own dependencies —
+but it does need one SDK component installed by hand; see below.
 
 `Podfile.lock` is **not** part of this source release. `pod install`
 writes it, and it pins the pod set *your* toolchain resolved rather than one
@@ -66,6 +67,22 @@ It catches third-party frameworks whose Objective-C class names collide with
 Apple's private ones. That collision is invisible to `flutter analyze`,
 `flutter test` and the release build itself, and only surfaces as a crash on
 launch. No CI job runs it — it needs a working simulator and Xcode.
+
+### Building for Android
+
+Install CMake 3.31.4 into your Android SDK once, before the first Android build:
+
+```bash
+"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install 'cmake;3.31.4'
+```
+
+`flutter_angle`, which `three_js` pulls in for the 3D artwork ring, pins that
+exact version in its own Gradle module and its `CMakeLists.txt` requires it too,
+so no override in this repository can lower it. The Android Gradle plugin
+downloads only the CMake *it* defaults to — 3.22.1 — and the build then fails at
+`:flutter_angle:configureCMakeDebug` with `[CXX1300] CMake '3.31.4' was not
+found`, which reads like a broken SDK and is not. Nothing else about the Android
+build needs setting up.
 
 ## Before you open a pull request
 

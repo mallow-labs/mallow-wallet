@@ -159,6 +159,17 @@ jobs:
       - name: Stage the Firebase placeholder
         run: cp test/e2e/google-services.placeholder.json android/app/google-services.json
 
+      # flutter_angle, pulled in by three_js, pins CMake 3.31.4 in its own
+      # Gradle module, and its CMakeLists.txt sets the same floor — so pinning
+      # the module to another version fails at configure instead. AGP installs
+      # only its own default CMake, which is the 3.22.1 the log shows it
+      # fetching, and everything else has to be installed here or
+      # :flutter_angle:configureCMakeDebug fails with CXX1300. Keep in step
+      # with the version in the plugin's android/build.gradle.
+      - name: Install the CMake flutter_angle pins
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install 'cmake;3.31.4'
+
       # Analyze and test both pass on a tree that cannot actually produce an
       # app. Only a build proves a fork can still ship one, so this runs on
       # every pull request rather than at release time.
