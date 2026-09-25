@@ -1,25 +1,25 @@
 import '../../../core/network/auth_service.dart';
-import '../../../core/network/ledger_verify_controller.dart';
+import '../../../core/network/hardware_verify_controller.dart';
 import '../../../di.dart';
 import '../models/cast_queue.dart';
 import 'cast_bloc.dart';
 
 /// Dispatches [CastEvent.castArtwork] for [item] after the standard
-/// pre-flight Ledger check — if the active wallet is a hardware wallet
+/// pre-flight hardware check — if the active wallet is a hardware wallet
 /// without a cached signature, the user is shown the verify sheet first
 /// and casting proceeds only on successful verification.
 Future<void> castArtworkWithVerify(CastQueueItem item) async {
-  if (!await _ensureLedgerVerified()) return;
+  if (!await _ensureHardwareVerified()) return;
   sl<CastBloc>().add(CastEvent.castArtwork(item));
 }
 
 /// Bulk variant: opens the device picker (if not already connected) with
 /// the full queue seeded so the user can preview/edit it via "View Queue"
-/// before committing to cast. The Ledger verification prompt fires at most
+/// before committing to cast. The hardware verification prompt fires at most
 /// once per call.
 Future<void> castArtworksWithVerify(List<CastQueueItem> items) async {
   if (items.isEmpty) return;
-  if (!await _ensureLedgerVerified()) return;
+  if (!await _ensureHardwareVerified()) return;
   sl<CastBloc>().add(CastEvent.castArtworks(items));
 }
 
@@ -43,10 +43,10 @@ void addArtworksToCastQueue(List<CastQueueItem> items) {
   sl<CastBloc>().add(CastEvent.addItemsToQueue(items));
 }
 
-Future<bool> _ensureLedgerVerified() async {
+Future<bool> _ensureHardwareVerified() async {
   final auth = sl<AuthService>();
-  if (!await auth.currentWalletNeedsLedgerVerification()) return true;
+  if (!await auth.currentWalletNeedsHardwareVerification()) return true;
   final addr = auth.currentAddress;
   if (addr == null) return false;
-  return sl<LedgerVerifyController>().requestVerification(addr);
+  return sl<HardwareVerifyController>().requestVerification(addr);
 }

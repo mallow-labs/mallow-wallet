@@ -12,9 +12,8 @@ class FixedPriceRepository {
 
   /// Build an unsigned listing transaction via the v2
   /// `POST /v2/tx/fixed-price/create` route. The payload is wrapped in the
-  /// `{ result }` envelope: for 1/1s, edition prints, and Core master
-  /// editions only [CreateFixedPriceTxResponse.tx] is set; for non-Core
-  /// master editions [CreateFixedPriceTxResponse.setupTx] is also populated
+  /// `{ result }` envelope. When the listing needs a lookup table that does
+  /// not exist yet, [CreateFixedPriceTxResponse.setupTx] is also populated
   /// and must be signed and confirmed first.
   ///
   /// Non-native currency listings go through this route unchanged — the v2

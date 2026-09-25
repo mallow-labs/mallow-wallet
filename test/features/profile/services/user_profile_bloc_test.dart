@@ -5,7 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_api/mallow_api.dart' as api;
 import 'package:mallow_wallet/core/models/account.dart';
 import 'package:mallow_wallet/core/network/auth_service.dart';
-import 'package:mallow_wallet/core/network/ledger_verify_controller.dart';
+import 'package:mallow_wallet/core/network/hardware_verify_controller.dart';
 import 'package:mallow_wallet/core/session/session_manager.dart';
 import 'package:mallow_wallet/features/artwork/widgets/add_to_curation_sheet.dart';
 import 'package:mallow_wallet/di.dart';
@@ -26,14 +26,14 @@ import 'user_profile_bloc_test.mocks.dart';
   UserProfileRepository,
   CurationRepository,
   AuthService,
-  LedgerVerifyController,
+  HardwareVerifyController,
   SessionManager,
 ])
 void main() {
   late MockUserProfileRepository mockRepository;
   late MockCurationRepository mockCurationRepository;
   late MockAuthService mockAuthService;
-  late MockLedgerVerifyController mockLedgerVerifyController;
+  late MockHardwareVerifyController mockHardwareVerifyController;
 
   const testAddress = 'PROFILE_ADDR';
 
@@ -116,13 +116,13 @@ void main() {
     mockRepository = MockUserProfileRepository();
     mockCurationRepository = MockCurationRepository();
     mockAuthService = MockAuthService();
-    mockLedgerVerifyController = MockLedgerVerifyController();
+    mockHardwareVerifyController = MockHardwareVerifyController();
 
     // Default: viewing own profile (skips youOwn fetch).
     when(mockAuthService.currentAddress).thenReturn(testAddress);
     when(mockAuthService.isFollowing(any)).thenReturn(false);
     when(
-      mockAuthService.currentWalletNeedsLedgerVerification(),
+      mockAuthService.currentWalletNeedsHardwareVerification(),
     ).thenAnswer((_) async => false);
 
     // Default: no curations (loads fetch them — own profile with no owner
@@ -147,7 +147,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -167,7 +167,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -186,7 +186,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -212,7 +212,7 @@ void main() {
         mockRepository,
         mockCurationRepository,
         mockAuthService,
-        mockLedgerVerifyController,
+        mockHardwareVerifyController,
       ),
       act: (bloc) =>
           bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -234,7 +234,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -271,7 +271,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -364,7 +364,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           await loadThenLoadMore(bloc, tab: ProfileTab.created);
@@ -437,7 +437,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           await loadThenLoadMore(bloc, tab: ProfileTab.owned);
@@ -476,7 +476,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         seed: () =>
             UserProfileState.loaded(
@@ -542,7 +542,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -569,6 +569,134 @@ void main() {
       );
     });
 
+    group('group sort order', () {
+      const groups = [
+        ArtGroup(
+          id: 'small',
+          type: ArtGroupType.collection,
+          name: 'Alpha',
+          thumbnailUrl: null,
+          artworkCount: 2,
+        ),
+        ArtGroup(
+          id: 'large',
+          type: ArtGroupType.collection,
+          name: 'Zulu',
+          thumbnailUrl: null,
+          artworkCount: 30,
+        ),
+        ArtGroup(
+          id: 'medium',
+          type: ArtGroupType.collection,
+          name: 'Bravo',
+          thumbnailUrl: null,
+          artworkCount: 10,
+        ),
+      ];
+
+      Future<UserProfileLoaded> dispatch(
+        UserProfileBloc bloc,
+        UserProfileEvent event,
+        bool Function(UserProfileLoaded) ready,
+      ) async {
+        final next = bloc.stream
+            .where((s) => s is UserProfileLoaded)
+            .cast<UserProfileLoaded>()
+            .firstWhere(ready);
+        bloc.add(event);
+        return next;
+      }
+
+      for (final delayed in [false, true]) {
+        test(
+          'Count orders collections when opened ${delayed ? "before" : "after"} data arrives',
+          () async {
+            stubLoadHappyPath(loadedProfile: profile());
+            final response = Completer<List<ArtGroup>>();
+            when(
+              mockRepository.getUserCollections(any, page: anyNamed('page')),
+            ).thenAnswer((_) => response.future);
+            final bloc = UserProfileBloc(
+              mockRepository,
+              mockCurationRepository,
+              mockAuthService,
+              mockHardwareVerifyController,
+            );
+            addTearDown(bloc.close);
+            if (!delayed) response.complete(groups);
+            await dispatch(
+              bloc,
+              const UserProfileEvent.load(address: testAddress),
+              (s) => delayed || !s.isRefreshing,
+            );
+            final opened = await dispatch(
+              bloc,
+              const UserProfileEvent.changeTab(tab: ProfileTab.collections),
+              (s) => s.activeTab == ProfileTab.collections,
+            );
+            UserProfileLoaded sorted = opened;
+            if (delayed) {
+              expect(opened.groups, isNull);
+              final loaded = bloc.stream
+                  .where((s) => s is UserProfileLoaded)
+                  .cast<UserProfileLoaded>()
+                  .firstWhere((s) => s.groups != null);
+              response.complete(groups);
+              sorted = await loaded;
+            }
+            expect(sorted.activeSort, PortfolioSortOption.count);
+            expect(sorted.groups!.map((g) => g.artworkCount), [30, 10, 2]);
+
+            final named = await dispatch(
+              bloc,
+              const UserProfileEvent.setSort(sort: PortfolioSortOption.name),
+              (s) => s.activeSort == PortfolioSortOption.name,
+            );
+            expect(named.groups!.map((g) => g.name), [
+              'Alpha',
+              'Bravo',
+              'Zulu',
+            ]);
+            await dispatch(
+              bloc,
+              const UserProfileEvent.changeTab(tab: ProfileTab.created),
+              (s) => s.activeTab == ProfileTab.created,
+            );
+            final reopened = await dispatch(
+              bloc,
+              const UserProfileEvent.changeTab(tab: ProfileTab.collections),
+              (s) => s.activeTab == ProfileTab.collections,
+            );
+            expect(reopened.groups!.map((g) => g.artworkCount), [30, 10, 2]);
+
+            final refreshed = await dispatch(
+              bloc,
+              const UserProfileEvent.load(address: testAddress),
+              (s) => !s.isRefreshing,
+            );
+            expect(refreshed.activeSort, PortfolioSortOption.count);
+            expect(refreshed.groups!.map((g) => g.artworkCount), [30, 10, 2]);
+            await dispatch(
+              bloc,
+              const UserProfileEvent.setSort(sort: PortfolioSortOption.name),
+              (s) => s.activeSort == PortfolioSortOption.name,
+            );
+            final refreshedByName = await dispatch(
+              bloc,
+              const UserProfileEvent.load(address: testAddress),
+              (s) => !s.isRefreshing,
+            );
+            expect(refreshedByName.activeSort, PortfolioSortOption.name);
+            expect(refreshedByName.groups!.map((g) => g.name), [
+              'Alpha',
+              'Bravo',
+              'Zulu',
+            ]);
+          },
+        );
+      }
+    });
+
     group('_onChangeTab default sort', () {
       UserProfileLoaded seedCreated() =>
           UserProfileState.loaded(
@@ -586,7 +714,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         seed: seedCreated,
         act: (bloc) =>
@@ -604,7 +732,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         seed: () =>
             UserProfileState.loaded(profile: profile()) as UserProfileLoaded,
@@ -650,7 +778,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -682,7 +810,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -729,7 +857,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -773,7 +901,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -839,7 +967,7 @@ void main() {
             mockRepository,
             mockCurationRepository,
             mockAuthService,
-            mockLedgerVerifyController,
+            mockHardwareVerifyController,
           ),
           act: (bloc) async {
             bloc.add(const UserProfileEvent.load(address: evmLower));
@@ -917,7 +1045,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -996,7 +1124,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -1063,7 +1191,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         seed: seedCollections,
         act: (bloc) {
@@ -1092,7 +1220,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         seed: seedCollections,
         act: (bloc) {
@@ -1135,7 +1263,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1169,7 +1297,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1212,7 +1340,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1290,7 +1418,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1347,7 +1475,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1396,7 +1524,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1426,7 +1554,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1473,7 +1601,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: 'WALLET_B')),
@@ -1526,7 +1654,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1590,7 +1718,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: 'WALLET_B')),
@@ -1610,12 +1738,88 @@ void main() {
         },
       );
 
-      // The manual verify CTA can only be satisfied by a Ledger BLE sign. With
-      // no Ledger session wallet (here: a social wallet), tapping verify must
-      // NOT pop the BLE sheet — it can never succeed for a social/watch-only
-      // address — so no Ledger verification is requested.
+      // The manual verify CTA can only be satisfied by a hardware wallet. With
+      // none in the session (here: a social wallet), tapping verify must NOT
+      // pop the sheet — it can never succeed for a social/watch-only address —
+      // so no verification is requested.
+      // Seed Vault is the second hardware wallet, and it reaches this CTA the
+      // same way Ledger does: nothing in the session can sign silently, but the
+      // user can still approve one interactively. A Ledger-only gate would have
+      // hidden the CTA and left the private curations unreachable with no
+      // affordance at all.
       blocTest<UserProfileBloc, UserProfileState>(
-        'verify event with no Ledger session wallet → no Ledger request',
+        'only Seed Vault session wallets (none verified) → CTA shown',
+        setUp: () {
+          stubLoadHappyPath(loadedProfile: profile());
+          when(mockSessionManager.sessionAddresses).thenReturn({testAddress});
+          when(
+            mockSessionManager.sessionWallets,
+          ).thenReturn([wallet(testAddress, WalletType.seedVault)]);
+          when(
+            mockAuthService.hasValidWalletSigForAny(any),
+          ).thenAnswer((_) async => false);
+        },
+        build: () => UserProfileBloc(
+          mockRepository,
+          mockCurationRepository,
+          mockAuthService,
+          mockHardwareVerifyController,
+        ),
+        act: (bloc) =>
+            bloc.add(const UserProfileEvent.load(address: testAddress)),
+        wait: const Duration(milliseconds: 50),
+        verify: (bloc) {
+          final state = bloc.state as UserProfileLoaded;
+          expect(state.showVerifyPrivateCurationsCta, isTrue);
+          verifyNever(mockAuthService.verifySessionWallet(any));
+        },
+      );
+
+      // Tapping the CTA must name the device the user actually holds: the sheet
+      // renders a different flow per type, and a Seed Vault owner told to
+      // connect a Ledger over Bluetooth is sent somewhere they cannot go.
+      blocTest<UserProfileBloc, UserProfileState>(
+        'verify event on a Seed Vault wallet requests it as a Seed Vault',
+        setUp: () {
+          stubLoadHappyPath(loadedProfile: profile());
+          when(mockSessionManager.sessionAddresses).thenReturn({testAddress});
+          when(
+            mockSessionManager.sessionWallets,
+          ).thenReturn([wallet(testAddress, WalletType.seedVault)]);
+          when(
+            mockAuthService.hasValidWalletSigForAny(any),
+          ).thenAnswer((_) async => false);
+          when(
+            mockHardwareVerifyController.requestVerification(
+              any,
+              walletType: anyNamed('walletType'),
+            ),
+          ).thenAnswer((_) async => false);
+        },
+        build: () => UserProfileBloc(
+          mockRepository,
+          mockCurationRepository,
+          mockAuthService,
+          mockHardwareVerifyController,
+        ),
+        act: (bloc) async {
+          bloc.add(const UserProfileEvent.load(address: testAddress));
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          bloc.add(const UserProfileEvent.verifyForPrivateCurations());
+        },
+        wait: const Duration(milliseconds: 50),
+        verify: (bloc) {
+          verify(
+            mockHardwareVerifyController.requestVerification(
+              testAddress,
+              walletType: WalletType.seedVault,
+            ),
+          ).called(1);
+        },
+      );
+
+      blocTest<UserProfileBloc, UserProfileState>(
+        'verify event with no hardware session wallet → no request',
         setUp: () {
           stubLoadHappyPath(loadedProfile: profile());
           when(mockSessionManager.sessionAddresses).thenReturn({testAddress});
@@ -1630,7 +1834,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -1640,7 +1844,7 @@ void main() {
         },
         wait: const Duration(milliseconds: 50),
         verify: (bloc) {
-          verifyNever(mockLedgerVerifyController.requestVerification(any));
+          verifyNever(mockHardwareVerifyController.requestVerification(any));
           final state = bloc.state as UserProfileLoaded;
           expect(state.isVerifyingCurations, isFalse);
         },
@@ -1668,7 +1872,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1699,7 +1903,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -1736,7 +1940,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -1800,7 +2004,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -1837,7 +2041,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.loadByUsername(username: 'alice')),
@@ -1862,7 +2066,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.loadByUsername(username: 'ghost')),
@@ -1895,7 +2099,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         );
         await settle(bloc);
 
@@ -1915,7 +2119,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         );
         await settle(bloc);
 
@@ -1950,7 +2154,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         );
         await settle(bloc);
 
@@ -1970,7 +2174,7 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockLedgerVerifyController,
+          mockHardwareVerifyController,
         );
         await settle(bloc);
 

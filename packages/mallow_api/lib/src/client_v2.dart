@@ -28,8 +28,9 @@ part 'client_v2.g.dart';
 /// [EditNftV2Request]) because the mint body is an `allOf` + discriminated
 /// union the swagger generator flattens lossily.
 ///
-/// Every tx-builder wraps its payload in the standard `{ result }` envelope
-/// ([ApiResponse]); callers read `.result.tx`.
+/// Transaction builders normally wrap their payload in the standard
+/// `{ result }` envelope ([ApiResponse]). [buyEditionTx] is the exception:
+/// its optional setup transaction is a sibling of the result array.
 @RestApi()
 abstract class MallowApiV2Client {
   factory MallowApiV2Client(Dio dio, {String baseUrl, ParseErrorLogger? errorLogger}) =
@@ -77,8 +78,13 @@ abstract class MallowApiV2Client {
   /// plumbing.
   ///
   /// Finalization stays on v1 (`POST /v1/edit/finalize?type=editNft`).
+  ///
+  /// A compressed NFT's edit can need an address lookup table that does not
+  /// exist yet, in which case the response carries
+  /// [UnsignedTxWithSetupResponse.setupTx] — sign and confirm it *before*
+  /// broadcasting `tx`, which is compiled against the table it creates.
   @POST('/tx/nft/edit')
-  Future<ApiResponse<UnsignedTxResponse>> editNftTx(@Body() EditNftV2Request request);
+  Future<ApiResponse<UnsignedTxWithSetupResponse>> editNftTx(@Body() EditNftV2Request request);
 
   /// Build the transaction(s) that add/remove members of a parent collection.
   /// The backend returns a batch ([EditCollectionArtworksResponse.txs]) — one
@@ -97,8 +103,17 @@ abstract class MallowApiV2Client {
   /// Handles both native SOL and SPL-token (e.g. USDC) listings.
   ///
   /// 1/1-only server-side — edition (multi-print) buys use [buyEditionTx].
+  ///
+  /// Exactly one of [BuyFixedPriceTxResponse.tx] and
+  /// [BuyFixedPriceTxResponse.swapTx] is present: `swapTx` means the Jupiter
+  /// swap has to land on its own first, after which the caller re-requests
+  /// without a quote. A compressed NFT's purchase can additionally carry
+  /// [BuyFixedPriceTxResponse.setupTx] — an address-lookup-table transaction
+  /// to sign and confirm before `tx`.
   @POST('/tx/fixed-price/buy')
-  Future<ApiResponse<UnsignedTxResponse>> buyFixedPriceTx(@Body() BuyFixedPriceTxRequest request);
+  Future<ApiResponse<BuyFixedPriceTxResponse>> buyFixedPriceTx(
+    @Body() BuyFixedPriceTxRequest request,
+  );
 
   /// Build unsigned "buy now" transactions for `quantity` prints of a master
   /// edition — one partial-signed tx per print. Replaces v1
@@ -109,8 +124,10 @@ abstract class MallowApiV2Client {
   /// listing's `walletsRoot` itself and, when the buyer's `proofs` PDA is
   /// missing, returns [BuyEditionTxsResponse.setupTx] — an `initProofs`
   /// transaction the caller must confirm *before* broadcasting `result`.
-  /// Off-chain Merkle denial still yields a `400`, and non-native currency
-  /// without a swap quote is deferred, so the caller keeps the v1 fallback.
+  /// Off-chain Merkle denial still yields a `400` ("User is not whitelisted"),
+  /// which is why the caller keeps the v1 fallback. A non-native currency is
+  /// NOT deferred: with no swap quote the buy simply settles in the listing's
+  /// own currency.
   ///
   /// Returns the raw envelope rather than [ApiResponse] because `setupTx` is a
   /// sibling of `result`, not a member of it — see [BuyEditionTxsResponse].
@@ -201,8 +218,14 @@ abstract class MallowApiV2Client {
   /// Build an unsigned seller-signed accept-offer transaction. The seller is
   /// verified server-side as the asset owner; the body carries the offer's
   /// buyer. A mallow listing on the asset is delisted in the same tx.
+  ///
+  /// A compressed NFT's accept can need an address lookup table that does not
+  /// exist yet — see [UnsignedTxWithSetupResponse.setupTx], which must be
+  /// signed and confirmed before `tx`.
   @POST('/tx/offers/accept')
-  Future<ApiResponse<UnsignedTxResponse>> acceptOfferTx(@Body() AcceptOfferTxRequest request);
+  Future<ApiResponse<UnsignedTxWithSetupResponse>> acceptOfferTx(
+    @Body() AcceptOfferTxRequest request,
+  );
 
   // ── Fixed-price (listing) tx-builders ────────────────────────────────
 
@@ -210,16 +233,20 @@ abstract class MallowApiV2Client {
   /// [CreateFixedPriceTxResponse.setupTx] (the LUT-bootstrap tx for non-Core
   /// master editions), which the caller must sign first.
   ///
-  /// Non-native currency listings are not yet ported to v2 — the backend
-  /// rejects them with a `BadRequest` ("use v1").
+  /// Non-native currency listings go through this route unchanged — the
+  /// handler threads `currencyMint` into the listing ix and defaults to SOL
+  /// when it is omitted. Only an unregistered mint is refused, with a
+  /// `BadRequest` ("Unsupported currency mint: …").
   @POST('/tx/fixed-price/create')
   Future<ApiResponse<CreateFixedPriceTxResponse>> createFixedPriceTx(
     @Body() CreateFixedPriceTxRequest request,
   );
 
-  /// Build an unsigned cancel-listing transaction.
+  /// Build an unsigned cancel-listing transaction. A compressed NFT's delist
+  /// can carry [UnsignedTxWithSetupResponse.setupTx] — sign and confirm it
+  /// before `tx`.
   @POST('/tx/fixed-price/cancel')
-  Future<ApiResponse<UnsignedTxResponse>> cancelFixedPriceTx(
+  Future<ApiResponse<UnsignedTxWithSetupResponse>> cancelFixedPriceTx(
     @Body() CancelFixedPriceTxRequest request,
   );
 
@@ -232,25 +259,43 @@ abstract class MallowApiV2Client {
   // ── Auction tx-builders ──────────────────────────────────────────────
 
   /// Build an unsigned create-auction transaction. 1/1-only (parity with v1).
+  ///
+  /// A compressed NFT's auction can carry
+  /// [UnsignedTxWithSetupResponse.setupTx] — the lookup table the eventual
+  /// settle is compiled against. Sign and confirm it before `tx`.
   @POST('/tx/auctions/create')
-  Future<ApiResponse<UnsignedTxResponse>> createAuctionTx(@Body() CreateAuctionTxRequest request);
+  Future<ApiResponse<UnsignedTxWithSetupResponse>> createAuctionTx(
+    @Body() CreateAuctionTxRequest request,
+  );
 
-  /// Build an unsigned cancel-auction (also reclaim-no-bids) transaction.
+  /// Build an unsigned cancel-auction (also reclaim-no-bids) transaction. A
+  /// compressed NFT's cancel can carry [UnsignedTxWithSetupResponse.setupTx] —
+  /// sign and confirm it before `tx`.
   @POST('/tx/auctions/cancel')
-  Future<ApiResponse<UnsignedTxResponse>> cancelAuctionTx(@Body() CancelAuctionTxRequest request);
+  Future<ApiResponse<UnsignedTxWithSetupResponse>> cancelAuctionTx(
+    @Body() CancelAuctionTxRequest request,
+  );
 
   /// Build an unsigned settle-auction transaction (covers both
   /// seller-payout and winner-NFT-transfer).
   ///
-  /// Non-native bid mints are not yet ported to v2 — the backend rejects
-  /// them with a `BadRequest` ("use v1").
+  /// Non-native bid mints settle on this route — the handler shapes the
+  /// payout accounts from the auction's own `bidMint`, native or SPL, and
+  /// never checks it.
+  ///
+  /// A compressed NFT's settle can carry
+  /// [UnsignedTxWithSetupResponse.setupTx] — sign and confirm it before `tx`.
   @POST('/tx/auctions/settle')
-  Future<ApiResponse<UnsignedTxResponse>> settleAuctionTx(@Body() SettleAuctionTxRequest request);
+  Future<ApiResponse<UnsignedTxWithSetupResponse>> settleAuctionTx(
+    @Body() SettleAuctionTxRequest request,
+  );
 
   /// Build an unsigned bid transaction. Takes an explicit [BidTxRequest.bidder].
   ///
-  /// Non-native bid mints and off-chain-whitelisted auctions are not yet
-  /// ported to v2 — the backend rejects them with a `BadRequest` ("use v1").
+  /// Non-native bid mints ride this route too — the handler derives the
+  /// currency accounts from the auction's `bidMint`. Off-chain-whitelisted
+  /// auctions are enforced here, not deferred: a bidder outside the allowlist
+  /// gets a final `BadRequest` ("User is not allowlisted").
   @POST('/tx/auctions/bid')
   Future<ApiResponse<UnsignedTxResponse>> bidTx(@Body() BidTxRequest request);
 

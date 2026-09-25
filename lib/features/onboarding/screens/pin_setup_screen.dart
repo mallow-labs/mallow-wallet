@@ -216,14 +216,17 @@ class _PinSetupScreenState extends State<PinSetupScreen> {
       // would bounce them to the lock screen on the way out of onboarding.
       appLock.add(AppLockEvent.setPin(_pin));
 
-      // Notify auth state that onboarding is complete
+      // Notify auth state that onboarding is complete. This has to happen
+      // BEFORE the navigation below: the push step is not an onboarding route,
+      // so the router's "continue onboarding" guard would bounce it back to
+      // biometric setup while the flag is still false.
       final authNotifier = sl<AuthStateNotifier>();
       await authNotifier.onOnboardingCompleted();
 
-      // Explicitly navigate to home - refreshListenable doesn't work reliably
+      // Explicitly navigate - refreshListenable doesn't work reliably
       // with push() navigation stacks (see: github.com/flutter/flutter/issues/133985)
       if (mounted) {
-        context.go('/');
+        context.go(AppRoutes.pushSetup);
       }
     } catch (e) {
       if (mounted) {
@@ -243,6 +246,6 @@ class _PinSetupScreenState extends State<PinSetupScreen> {
       return;
     }
     await sl<AuthStateNotifier>().onOnboardingCompleted();
-    if (mounted) context.go('/');
+    if (mounted) context.go(AppRoutes.pushSetup);
   }
 }

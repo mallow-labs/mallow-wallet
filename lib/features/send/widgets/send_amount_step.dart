@@ -137,7 +137,10 @@ class SendAmountStep extends StatelessWidget {
 
   static String _formatBalance(double value) {
     if (value == 0) return '0';
-    if (value >= 1000000) return '${(value / 1000000).toStringAsFixed(2)}M';
+    if (value >= 1000000) {
+      final millions = stripTrailingZeros((value / 1000000).toStringAsFixed(2));
+      return '${millions}M';
+    }
     final digits = value >= 1 ? 2 : 6;
     return stripTrailingZeros(value.toStringAsFixed(digits));
   }

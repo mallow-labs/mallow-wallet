@@ -216,6 +216,51 @@ void main() {
         verifyNever(mockSession.switchToWallet(any));
       },
     );
+
+    blocTest<LedgerConnectBloc, LedgerConnectState>(
+      'a refused recovery-graph prune reads as a reason, not a keystore error',
+      build: () {
+        // A Ledger import supersedes a view-only wallet already watching the
+        // address, and pruning that wallet from the recovery graph is the
+        // commit point of its removal — the one way addLedgerWallet throws
+        // GraphSyncException.
+        when(
+          mockRepo.addLedgerWallet(
+            any,
+            any,
+            derivationIndex: anyNamed('derivationIndex'),
+            derivationScheme: anyNamed('derivationScheme'),
+            ledgerDeviceId: anyNamed('ledgerDeviceId'),
+          ),
+        ).thenThrow(GraphSyncException(Exception('keystore write refused')));
+
+        return LedgerConnectBloc(
+          mockLedger,
+          mockRepo,
+          mockTokens,
+          mockPortfolio,
+          mockPrefs,
+        );
+      },
+      act: (bloc) async {
+        bloc.add(const LedgerConnectEvent.loadAccounts());
+        await Future<void>.delayed(Duration.zero);
+        bloc.add(const LedgerConnectEvent.toggleAccount(0));
+        await Future<void>.delayed(Duration.zero);
+        bloc.add(const LedgerConnectEvent.importAccounts());
+      },
+      verify: (bloc) {
+        // Unclassified errors fall through to AppFailure.from, whose message
+        // for an unknown type is the throwable's toString — here the keystore
+        // failure text. The user gets the reason instead.
+        expect(
+          bloc.state,
+          const LedgerConnectState.error(
+            'Could not update recovery data. Please try again.',
+          ),
+        );
+      },
+    );
   });
 
   group('LedgerConnectBloc Ethereum routing', () {

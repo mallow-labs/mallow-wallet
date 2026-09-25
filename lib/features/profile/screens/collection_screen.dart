@@ -42,6 +42,7 @@ import '../../../shared/widgets/tap_target_expander.dart';
 import '../../../shared/widgets/user_handle_text.dart';
 import '../../../shared/widgets/verified_badge.dart';
 import '../../../shared/widgets/view_only_prompt.dart';
+import '../../artwork/models/on_chain_asset.dart';
 import '../../artwork/services/artwork_download_actions.dart';
 import '../../artwork/services/artwork_hidden_signal.dart';
 import '../../artwork/services/artwork_hide_actions.dart';
@@ -105,6 +106,12 @@ class _CollectionScreenState extends State<CollectionScreen> {
 
   UserProfile? _profile;
   api.CollectionFullRender? _collection;
+
+  /// Cached per-screen so the collection options sheet can reuse a permission
+  /// read started before the kebab is tapped. Per-artwork menus stay on-demand
+  /// because this screen is itself a scrolling list of unrelated mints.
+  Future<ArtworkPermissions>? _collectionPermissionsFuture;
+  String? _collectionPermissionsMint;
 
   /// First page of the viewer-owned slice — thumbnails for the "You own"
   /// banner and the non-empty check that shows it. NOT the count: it is capped
@@ -225,6 +232,7 @@ class _CollectionScreenState extends State<CollectionScreen> {
     )..attach();
 
     _bloc.add(const PaginationLoadRequested());
+    _prefetchCollectionPermissions();
 
     loadArtworkViewMode().then((mode) {
       if (mounted) setState(() => _viewMode = mode);
@@ -252,6 +260,7 @@ class _CollectionScreenState extends State<CollectionScreen> {
     if (sl.isRegistered<ArtworkEditedSignal>()) {
       _editedSignalSub = sl<ArtworkEditedSignal>().stream.listen((_) {
         if (!mounted) return;
+        _invalidateCollectionPermissions();
         _bloc.add(const PaginationRefreshRequested());
         unawaited(_fetchCollectionDetail());
       });
@@ -262,6 +271,7 @@ class _CollectionScreenState extends State<CollectionScreen> {
     if (sl.isRegistered<ArtworkRemovalSignal>()) {
       _removalSignalSub = sl<ArtworkRemovalSignal>().stream.listen((mint) {
         if (!mounted) return;
+        _invalidateCollectionPermissions();
         _bloc.removeWhere((a) => a.mintAccount == mint);
         final youOwn = _youOwnArtworks;
         if (youOwn != null && youOwn.any((a) => a.mintAccount == mint)) {
@@ -333,7 +343,10 @@ class _CollectionScreenState extends State<CollectionScreen> {
   Future<void> _fetchProfile(String address) async {
     try {
       final profile = await sl<UserProfileRepository>().getUserProfile(address);
-      if (mounted) setState(() => _profile = profile);
+      if (mounted) {
+        setState(() => _profile = profile);
+        _prefetchCollectionPermissions();
+      }
     } catch (_) {
       // Profile fetch failure is non-fatal — header falls back to group.creatorName.
     }
@@ -356,6 +369,7 @@ class _CollectionScreenState extends State<CollectionScreen> {
         _collection = collection;
         _isUserHidden = collection?.isCreatorHidden;
       });
+      _prefetchCollectionPermissions();
     }
   }
 
@@ -434,6 +448,7 @@ class _CollectionScreenState extends State<CollectionScreen> {
   /// creator profile, you-own slice) in parallel, holding the indicator until
   /// the pagination refetch settles.
   Future<void> _refresh() {
+    _invalidateCollectionPermissions();
     _bloc.add(const PaginationRefreshRequested());
     final artistAddress = widget.group.artistAddress;
     return Future.wait<void>([
@@ -582,6 +597,32 @@ class _CollectionScreenState extends State<CollectionScreen> {
       widget.group.collectionMint ??
       widget.group.id;
 
+  Future<ArtworkPermissions> _ensureCollectionPermissions() {
+    final mint = _collectionMint;
+    final existing = _collectionPermissionsFuture;
+    if (existing != null && _collectionPermissionsMint == mint) {
+      return existing;
+    }
+    _collectionPermissionsMint = mint;
+    return _collectionPermissionsFuture = sl<ArtworkPermissionService>()
+        .checkPermissions(mint)
+        .onError(
+          (Object _, StackTrace _) => const UnresolvedArtworkPermissions(),
+        );
+  }
+
+  void _prefetchCollectionPermissions() {
+    if (_isCollectionCreator) {
+      unawaited(_ensureCollectionPermissions());
+    }
+  }
+
+  void _invalidateCollectionPermissions() {
+    _collectionPermissionsFuture = null;
+    _collectionPermissionsMint = null;
+    _prefetchCollectionPermissions();
+  }
+
   Future<void> _showOptionsSheet() async {
     // Download visibility spans every wallet the user controls (local DB
     // lookup, no network) — unlike cast, which stays active-wallet-scoped.
@@ -604,7 +645,7 @@ class _CollectionScreenState extends State<CollectionScreen> {
           // authority + mutability, burn additionally needs the collection
           // to be empty (Core) or the supply-0 token in the wallet (legacy).
           permissionsFuture: _isCollectionCreator
-              ? sl<ArtworkPermissionService>().checkPermissions(_collectionMint)
+              ? _ensureCollectionPermissions()
               : null,
         );
       },
@@ -646,7 +687,10 @@ class _CollectionScreenState extends State<CollectionScreen> {
       '?name=${Uri.encodeQueryComponent(widget.group.name)}',
     );
     // Best-effort refresh on return — the collection gained members.
-    if (mounted) unawaited(_fetchCollectionDetail());
+    if (mounted) {
+      _invalidateCollectionPermissions();
+      unawaited(_fetchCollectionDetail());
+    }
   }
 
   Future<void> _editCollection() async {
@@ -655,7 +699,10 @@ class _CollectionScreenState extends State<CollectionScreen> {
     await context.push(AppRoutes.editCollectionPath(_collectionMint));
     // Best-effort refresh on return — name/image/description may have
     // changed (subject to indexer lag, same as the webapp).
-    if (mounted) unawaited(_fetchCollectionDetail());
+    if (mounted) {
+      _invalidateCollectionPermissions();
+      unawaited(_fetchCollectionDetail());
+    }
   }
 
   Future<void> _burnCollection() async {

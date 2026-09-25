@@ -10,7 +10,7 @@ import UIKit
 ///
 /// Event channel: com.mallow.wallet/cast_ios_events
 /// Events: {type: 'devices', devices: [{id, name}]}
-///         {type: 'session', state: 'connecting'|'connected'|'disconnected'|'error'}
+///         {type: 'session', state: 'connecting'|'connected'|'suspended'|'disconnected'|'error'}
 ///
 /// Mirrors the Android `CastPlugin.kt` 1:1 — same receiver app id, same
 /// custom namespace, same JSON message shape — so a single HTML receiver
@@ -324,7 +324,13 @@ class IosChromecastPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
         didSuspend session: GCKSession,
         with reason: GCKConnectionSuspendReason
     ) {
-        emitSession(state: "disconnected")
+        // NOT "disconnected". `GCKCastOptions.suspendSessionsWhenBackgrounded`
+        // defaults to true, so this fires every time the app is backgrounded
+        // or the phone locks, and the SDK resumes the same session on the way
+        // back (didResumeCastSession). Calling it a disconnect ends the
+        // session in CastBloc, leaving that resume nothing to resume into —
+        // which is why casting used to die on every lock-screen round trip.
+        emitSession(state: "suspended")
     }
 
     func sessionManager(
@@ -336,10 +342,16 @@ class IosChromecastPlugin: NSObject, FlutterPlugin, FlutterStreamHandler,
     }
 
     private func attachChannel(to session: GCKSession) {
-        let channel = GCKCastChannel(namespace: Self.namespace)
-        if let castSession = session as? GCKCastSession {
-            castSession.add(channel)
+        let castSession = session as? GCKCastSession
+        // A resumed session hands back the *same* GCKCastSession, and `add`
+        // refuses a second channel on a namespace that already has one. The
+        // replacement would then never connect and every slide after the
+        // resume would be dropped silently by `sendNamespaceMessage`.
+        if let existing = castChannel {
+            castSession?.remove(existing)
         }
+        let channel = GCKCastChannel(namespace: Self.namespace)
+        castSession?.add(channel)
         self.castChannel = channel
     }
 

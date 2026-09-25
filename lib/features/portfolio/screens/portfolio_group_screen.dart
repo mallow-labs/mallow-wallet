@@ -30,8 +30,9 @@ import '../../../shared/widgets/mallow_sheet.dart';
 import '../../../shared/widgets/sheet_menu_row.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
 import '../../../shared/widgets/view_only_prompt.dart';
-import '../../artwork/services/artwork_permission_service.dart';
+import '../../artwork/models/on_chain_asset.dart';
 import '../../artwork/services/artwork_hidden_signal.dart';
+import '../../artwork/services/artwork_permission_service.dart';
 import '../../artwork/services/artwork_removal_signal.dart';
 import '../../artwork/services/bulk_artwork_download.dart';
 import '../../artwork/widgets/artwork_context_menu_actions.dart';
@@ -81,6 +82,13 @@ class _PortfolioGroupScreenState extends State<PortfolioGroupScreen> {
   /// (see [_resolveCollectionImage]). Null until it lands, or when the
   /// collection has no image of its own.
   String? _collectionImageUrl;
+
+  /// Starts the collection's on-chain permission read while this single-
+  /// collection screen is settling, so its options sheet usually opens with a
+  /// resolved verdict. Artwork rows remain on-demand because prefetching every
+  /// mint in a scrolling list would multiply DAS/RPC traffic.
+  Future<ArtworkPermissions>? _collectionPermissionsFuture;
+  String? _collectionCreatorAddress;
 
   /// Follow state for this group's artist/creator, seeded from the cached
   /// login result and toggled optimistically. Hidden entirely when there's
@@ -153,6 +161,7 @@ class _PortfolioGroupScreenState extends State<PortfolioGroupScreen> {
     _repository = repository;
     _bloc = PaginationBloc<PortfolioArtwork>(fetchPage: _fetchArtworkPage)
       ..add(const PaginationLoadRequested());
+    _prefetchCollectionPermissions();
     unawaited(_resolveCollectionImage());
 
     _paginationListener = PaginationScrollListener(
@@ -169,6 +178,7 @@ class _PortfolioGroupScreenState extends State<PortfolioGroupScreen> {
     if (sl.isRegistered<PortfolioRefreshSignal>()) {
       _refreshSignalSub = sl<PortfolioRefreshSignal>().stream.listen((_) {
         if (!mounted) return;
+        _invalidateCollectionPermissions();
         _popIfEmptyAfterRefresh = true;
         _bloc.add(const PaginationRefreshRequested());
       });
@@ -177,6 +187,7 @@ class _PortfolioGroupScreenState extends State<PortfolioGroupScreen> {
     if (sl.isRegistered<ArtworkRemovalSignal>()) {
       _removalSignalSub = sl<ArtworkRemovalSignal>().stream.listen((mint) {
         if (!mounted) return;
+        _invalidateCollectionPermissions();
         _bloc.removeWhere((a) => a.mintAccount == mint);
       });
     }
@@ -246,6 +257,7 @@ class _PortfolioGroupScreenState extends State<PortfolioGroupScreen> {
   /// set [_popIfEmptyAfterRefresh] — a user-initiated refresh that empties
   /// the group should show the empty state, not yank the screen away.
   Future<void> _refresh() {
+    _invalidateCollectionPermissions();
     _bloc.add(const PaginationRefreshRequested());
     return _bloc.stream.firstWhere(
       (s) => s is! PaginationLoaded<PortfolioArtwork> || !s.isRefreshing,
@@ -377,10 +389,58 @@ class _PortfolioGroupScreenState extends State<PortfolioGroupScreen> {
     return sl<SessionManager>().ownsAddress(group.artistAddress);
   }
 
+  bool _ownsCollectionCreator([String? creatorAddress]) =>
+      _isCollectionCreator ||
+      sl<SessionManager>().ownsAddress(
+        creatorAddress ?? _collectionCreatorAddress,
+      );
+
+  Future<ArtworkPermissions> _ensureCollectionPermissions(String mint) =>
+      _collectionPermissionsFuture ??= sl<ArtworkPermissionService>()
+          .checkPermissions(mint)
+          .onError(
+            (Object _, StackTrace _) => const UnresolvedArtworkPermissions(),
+          );
+
+  void _prefetchCollectionPermissions({String? creatorAddress}) {
+    final mint = widget.group.collectionMint;
+    if (mint == null || mint.isEmpty) return;
+    if (creatorAddress != null && creatorAddress.isNotEmpty) {
+      _collectionCreatorAddress = creatorAddress;
+    }
+    if (_ownsCollectionCreator(creatorAddress)) {
+      unawaited(_ensureCollectionPermissions(mint));
+    }
+  }
+
+  void _invalidateCollectionPermissions() {
+    _collectionPermissionsFuture = null;
+    _prefetchCollectionPermissions();
+  }
+
   /// The owned slice already loaded in the drilldown — what Cast/Download act
   /// on for both collection and artist groups (a held-art view, so casting or
   /// downloading exactly what the user holds is the right semantic).
   List<PortfolioArtwork> get _ownedItems => _bloc.state.items;
+
+  /// Null once the first page has settled, preserving the sheet's synchronous
+  /// path for already-loaded groups. While the initial request is unresolved,
+  /// the sheet observes this future instead of treating the bloc's empty
+  /// loading-state list as a genuinely empty group.
+  Future<bool>? get _ownedItemsAvailableFuture {
+    final state = _bloc.state;
+    if (state is! PaginationInitial<PortfolioArtwork> &&
+        state is! PaginationLoading<PortfolioArtwork>) {
+      return null;
+    }
+    return _bloc.stream
+        .firstWhere(
+          (next) =>
+              next is PaginationLoaded<PortfolioArtwork> ||
+              next is PaginationError<PortfolioArtwork>,
+        )
+        .then((next) => next.items.isNotEmpty);
+  }
 
   Future<void> _showGroupMenu() async {
     switch (widget.group.type) {
@@ -412,11 +472,13 @@ class _PortfolioGroupScreenState extends State<PortfolioGroupScreen> {
           mint,
         );
         if (!mounted) return null;
+        _prefetchCollectionPermissions(creatorAddress: detail?.creatorAddress);
         _isUserHidden = detail?.isCreatorHidden;
         // Same record the header resolves from on entry — reuse it rather than
         // let the sheet show the owned-artwork thumbnail the header rejected.
         _applyCollectionImage(detail);
         final items = _ownedItems;
+        final ownedItemsAvailableFuture = _ownedItemsAvailableFuture;
         final isCreator =
             _isCollectionCreator || owned.contains(detail?.creatorAddress);
         final creator = widget.group.creatorName;
@@ -430,12 +492,13 @@ class _PortfolioGroupScreenState extends State<PortfolioGroupScreen> {
           isCreator: isCreator,
           canCast: items.isNotEmpty,
           canDownload: items.isNotEmpty,
+          ownedArtworksAvailableFuture: ownedItemsAvailableFuture,
           isUserHidden: detail?.isCreatorHidden,
           // Edit/Burn share the artwork permission rules: edit needs update
           // authority + mutability, burn additionally needs the collection to
           // be empty (Core) or the supply-0 token in the wallet (legacy).
           permissionsFuture: isCreator
-              ? sl<ArtworkPermissionService>().checkPermissions(mint)
+              ? _ensureCollectionPermissions(mint)
               : null,
           // The drilldown isn't the collection screen — keep a way in.
           showViewCollection: true,
@@ -477,6 +540,7 @@ class _PortfolioGroupScreenState extends State<PortfolioGroupScreen> {
     final address = widget.group.artistAddress;
     if (address == null || address.isEmpty) return;
     final items = _ownedItems;
+    final ownedItemsAvailableFuture = _ownedItemsAvailableFuture;
     final choice = await runGuardedSheet<_ArtistMenuChoice>(
       'portfolioGroupMenu',
       () => showMallowSheet<_ArtistMenuChoice>(
@@ -484,6 +548,7 @@ class _PortfolioGroupScreenState extends State<PortfolioGroupScreen> {
         builder: (_) => _ArtistGroupSheet(
           canCast: items.isNotEmpty,
           canDownload: items.isNotEmpty,
+          ownedItemsAvailableFuture: ownedItemsAvailableFuture,
         ),
       ),
     );
@@ -632,6 +697,7 @@ class _PortfolioGroupScreenState extends State<PortfolioGroupScreen> {
       '${AppRoutes.collectionArtworksPath(widget.group.collectionMint!)}'
       '?name=${Uri.encodeQueryComponent(widget.group.name)}',
     );
+    if (mounted) _invalidateCollectionPermissions();
   }
 
   Future<void> _editCollection() async {
@@ -642,6 +708,7 @@ class _PortfolioGroupScreenState extends State<PortfolioGroupScreen> {
     await context.push(
       AppRoutes.editCollectionPath(widget.group.collectionMint!),
     );
+    if (mounted) _invalidateCollectionPermissions();
   }
 
   Future<void> _burnCollection() async {
@@ -719,9 +786,9 @@ class _PortfolioGroupScreenState extends State<PortfolioGroupScreen> {
     final mint = group.collectionMint;
     if (mint == null || mint.isEmpty) return;
     // Swallows its own errors → null.
-    _applyCollectionImage(
-      await sl<UserProfileRepository>().getCollectionByMint(mint),
-    );
+    final detail = await sl<UserProfileRepository>().getCollectionByMint(mint);
+    _prefetchCollectionPermissions(creatorAddress: detail?.creatorAddress);
+    _applyCollectionImage(detail);
   }
 
   /// Take the collection's own image out of a fetched collection record. The
@@ -1151,10 +1218,15 @@ enum _ArtistMenuChoice { view, share, cast, addToCast, download }
 /// so this small one mirrors the same row styling. Cast/Download act on the
 /// owned-by-this-artist slice already loaded in the drilldown.
 class _ArtistGroupSheet extends StatelessWidget {
-  const _ArtistGroupSheet({required this.canCast, required this.canDownload});
+  const _ArtistGroupSheet({
+    required this.canCast,
+    required this.canDownload,
+    this.ownedItemsAvailableFuture,
+  });
 
   final bool canCast;
   final bool canDownload;
+  final Future<bool>? ownedItemsAvailableFuture;
 
   @override
   Widget build(BuildContext context) {
@@ -1181,43 +1253,102 @@ class _ArtistGroupSheet extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 12),
-          SheetMenuRow(
-            assetPath: 'assets/icons/profile.svg',
-            label: 'View artist',
-            onTap: () => Navigator.of(context).pop(_ArtistMenuChoice.view),
-          ),
-          SheetMenuRow(
-            assetPath: 'assets/icons/export.svg',
-            label: 'Share artist',
-            onTap: () => Navigator.of(context).pop(_ArtistMenuChoice.share),
-          ),
-          if (canCast)
-            SheetMenuRow(
-              assetPath: 'assets/icons/cast.svg',
-              label: 'Cast to screen',
-              onTap: () => Navigator.of(context).pop(_ArtistMenuChoice.cast),
-            ),
-          // "Add to cast" only makes sense when there's already a queue to
-          // append to.
-          if (canCast && isCastActive)
-            SheetMenuRow(
-              assetPath: 'assets/icons/add_to_cast.svg',
-              label: 'Add to cast',
-              onTap: () =>
-                  Navigator.of(context).pop(_ArtistMenuChoice.addToCast),
-            ),
-          if (canDownload)
-            SheetMenuRow(
-              assetPath: 'assets/icons/download.svg',
-              label: 'Download artworks',
-              onTap: () =>
-                  Navigator.of(context).pop(_ArtistMenuChoice.download),
-            ),
+          _buildActions(context),
           SizedBox(height: MediaQuery.of(context).padding.bottom + 16),
         ],
       ),
     );
   }
+
+  Widget _buildActions(BuildContext context) {
+    final future = ownedItemsAvailableFuture;
+    if (future == null) {
+      return _buildActionList(
+        context,
+        canCast: canCast,
+        canDownload: canDownload,
+      );
+    }
+    return FutureBuilder<bool>(
+      future: future,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData && !snapshot.hasError) {
+          return _ArtistActionsShimmer(rowCount: 4 + (isCastActive ? 1 : 0));
+        }
+        final available = snapshot.data ?? false;
+        return _buildActionList(
+          context,
+          canCast: available,
+          canDownload: available,
+        );
+      },
+    );
+  }
+
+  Widget _buildActionList(
+    BuildContext context, {
+    required bool canCast,
+    required bool canDownload,
+  }) => Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      SheetMenuRow(
+        assetPath: 'assets/icons/profile.svg',
+        label: 'View artist',
+        onTap: () => Navigator.of(context).pop(_ArtistMenuChoice.view),
+      ),
+      SheetMenuRow(
+        assetPath: 'assets/icons/export.svg',
+        label: 'Share artist',
+        onTap: () => Navigator.of(context).pop(_ArtistMenuChoice.share),
+      ),
+      if (canCast)
+        SheetMenuRow(
+          assetPath: 'assets/icons/cast.svg',
+          label: 'Cast to screen',
+          onTap: () => Navigator.of(context).pop(_ArtistMenuChoice.cast),
+        ),
+      // "Add to cast" only makes sense when there's already a queue to append
+      // to.
+      if (canCast && isCastActive)
+        SheetMenuRow(
+          assetPath: 'assets/icons/add_to_cast.svg',
+          label: 'Add to cast',
+          onTap: () => Navigator.of(context).pop(_ArtistMenuChoice.addToCast),
+        ),
+      if (canDownload)
+        SheetMenuRow(
+          assetPath: 'assets/icons/download.svg',
+          label: 'Download artworks',
+          onTap: () => Navigator.of(context).pop(_ArtistMenuChoice.download),
+        ),
+    ],
+  );
+}
+
+class _ArtistActionsShimmer extends StatelessWidget {
+  const _ArtistActionsShimmer({required this.rowCount});
+
+  final int rowCount;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    key: const ValueKey('artist-actions-loading'),
+    mainAxisSize: MainAxisSize.min,
+    children: List.generate(
+      rowCount,
+      (_) => const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+        child: Row(
+          children: [
+            ShimmerBox(width: 24, height: 24),
+            SizedBox(width: 16),
+            Expanded(child: ShimmerBox(height: 16)),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 /// Webapp-parity CSV builder. Matches the conditional shape used by the

@@ -15,7 +15,18 @@ import '../services/cast_bloc.dart';
 import '../services/cast_service.dart';
 import 'cast_animated_artwork.dart';
 
-const double _kBarHeight = 220;
+const double _kBarHeight = 110;
+
+/// Gutter between the artwork and the stage edges in fit-to-screen and tile
+/// mode, so the art never sits flush against the top of the screen or the top
+/// of the bottom bar. Fill-screen is deliberately edge-to-edge — cropping to
+/// cover is the whole point of that mode — and tile takes it vertically only,
+/// because its peek slides are *meant* to run off the left and right edges.
+///
+/// Fixed rather than proportional for the same reason [_kBarHeight] is: the
+/// receiver spans a macOS preview window to a 4K TV and a scaling gutter read
+/// differently on each.
+const double _kMediaPadding = 48;
 
 /// Renders a single [CastQueueItem] with an optional QR + caption overlay.
 ///
@@ -111,14 +122,22 @@ class _MediaArea extends StatelessWidget {
     // sits behind the cover-fit artwork in fill-screen (invisible until the
     // image loads — at which point shimmer hands off to the cover image).
     final foreground = switch (overlay.displayType) {
-      CastDisplayType.fitToScreen => Center(
-        child: CastAnimatedArtwork(item: item, fit: BoxFit.contain),
+      CastDisplayType.fitToScreen => Padding(
+        padding: const EdgeInsets.all(_kMediaPadding),
+        child: Center(
+          child: CastAnimatedArtwork(item: item, fit: BoxFit.contain),
+        ),
       ),
       CastDisplayType.fillScreen => CastAnimatedArtwork(item: item),
-      CastDisplayType.tile => _TileCarousel(
-        prevUrl: overlay.prevImageUrl,
-        currUrl: item.imageUrl,
-        nextUrl: overlay.nextImageUrl,
+      CastDisplayType.tile => Padding(
+        // Vertical only — see [_kMediaPadding]. The carousel clips to this
+        // box, so an inset here is also what keeps the peeks off the bar.
+        padding: const EdgeInsets.symmetric(vertical: _kMediaPadding),
+        child: _TileCarousel(
+          prevUrl: overlay.prevImageUrl,
+          currUrl: item.imageUrl,
+          nextUrl: overlay.nextImageUrl,
+        ),
       ),
     };
     return Stack(
@@ -131,27 +150,61 @@ class _MediaArea extends StatelessWidget {
   }
 }
 
-class _BlurredBackground extends StatelessWidget {
+/// Blurred artwork behind everything else, crossfaded across slide changes.
+///
+/// The outgoing artwork stays painted underneath the incoming one until the
+/// latter has decoded. Without that, a slide advance swaps the URL out from
+/// under a single image layer, whose loading placeholder then flashes across
+/// the whole stage — the blink the tile carousel's own image reuse exists to
+/// avoid, arriving through the back door.
+class _BlurredBackground extends StatefulWidget {
   const _BlurredBackground({required this.imageUrl});
 
   final String imageUrl;
 
   @override
+  State<_BlurredBackground> createState() => _BlurredBackgroundState();
+}
+
+class _BlurredBackgroundState extends State<_BlurredBackground> {
+  /// The artwork this layer was showing before the current one. Held for the
+  /// life of the next slide only — at most two images are ever retained.
+  String? _previousUrl;
+
+  @override
+  void didUpdateWidget(_BlurredBackground oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.imageUrl != widget.imageUrl &&
+        oldWidget.imageUrl.isNotEmpty) {
+      _previousUrl = oldWidget.imageUrl;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    if (imageUrl.isEmpty) return const SizedBox.shrink();
+    final url = widget.imageUrl;
+    final previous = _previousUrl;
+    if (url.isEmpty && previous == null) return const SizedBox.shrink();
     return Stack(
       fit: StackFit.expand,
       children: [
         // TileMode.clamp made explicit: extends edge pixels into the blur
         // kernel so the visible edges don't read as a darker fade-out
-        // halo against the surrounding stage.
+        // halo against the surrounding stage. One filter over both layers,
+        // so the crossfade costs a single blur pass rather than two.
         ImageFiltered(
           imageFilter: ImageFilter.blur(
             sigmaX: 40,
             sigmaY: 40,
             tileMode: TileMode.clamp,
           ),
-          child: MallowNetworkImage(imageUrl: imageUrl, logicalSize: 200),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              if (previous != null && previous != url) _layer(previous),
+              if (url.isNotEmpty) _layer(url),
+            ],
+          ),
         ),
         // 40% black scrim — pushes the bg back so the cover-fit image,
         // tile peeks, and captions read strongly. Matches the HTML
@@ -161,6 +214,17 @@ class _BlurredBackground extends StatelessWidget {
       ],
     );
   }
+
+  /// One blur source. Both placeholder and error render nothing on purpose:
+  /// this layer is stacked, so whatever is beneath it — the outgoing artwork,
+  /// or the black stage — is the right answer while it loads or if it fails.
+  Widget _layer(String url) => MallowNetworkImage(
+    key: ValueKey<String>(url),
+    imageUrl: url,
+    logicalSize: 200,
+    placeholderBuilder: (_) => const SizedBox.shrink(),
+    errorBuilder: (_) => const SizedBox.shrink(),
+  );
 }
 
 /// Fully opaque black bar pinned to the bottom: caption on the left,
@@ -179,24 +243,39 @@ class _BottomBar extends StatelessWidget {
     return Container(
       // Fixed height — the receiver renders on screens that range from a
       // macOS preview window to a 4K TV, and a scaling bar was producing
-      // visibly different layouts across them. 220 fits the 144px QR with
-      // 24px vertical padding and leaves room for two-line captions.
+      // visibly different layouts across them. 110 fits the 84px QR with
+      // 12px vertical padding and still leaves room for two-line captions
+      // at the type sizes below; every one of those numbers moves together.
       height: _kBarHeight,
       color: Colors.black,
-      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
-      child: Row(
-        children: [
-          if (hasCaption)
-            Expanded(
-              child: _Caption(title: overlay.title, subtitle: overlay.subtitle),
-            )
-          else
-            const Spacer(),
-          if (hasQr) ...[
-            const SizedBox(width: 24),
-            _QrCard(url: overlay.qrUrl!),
+      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
+      // 🛑 The bar is a fixed-height surface, so it cannot also honour the
+      // phone's accessibility text scale: two lines of 24px title plus a 14px
+      // subtitle need 80 of the 86px available at 1.0, and the hosts clamp
+      // scaling to 1.3 — which overflows by 16px. That scale is a phone
+      // reading-distance setting and this type is already sized for a TV
+      // across the room, so pinning it here is also the right answer on the
+      // merits. It keeps the Flutter receivers matching the HTML one, which
+      // has no text scaling at all.
+      child: MediaQuery.withClampedTextScaling(
+        maxScaleFactor: 1,
+        child: Row(
+          children: [
+            if (hasCaption)
+              Expanded(
+                child: _Caption(
+                  title: overlay.title,
+                  subtitle: overlay.subtitle,
+                ),
+              )
+            else
+              const Spacer(),
+            if (hasQr) ...[
+              const SizedBox(width: 24),
+              _QrCard(url: overlay.qrUrl!),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }
@@ -224,7 +303,7 @@ class _Caption extends StatelessWidget {
             style: MallowTheme.editorialHero.copyWith(
               color: Colors.white,
               fontWeight: FontWeight.w500,
-              fontSize: 36,
+              fontSize: 24,
               height: 1.2,
             ),
             maxLines: 2,
@@ -232,12 +311,12 @@ class _Caption extends StatelessWidget {
           ),
         if (subtitle != null && subtitle!.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.only(top: 6),
+            padding: const EdgeInsets.only(top: 4),
             child: Text(
               subtitle!,
               style: TextStyle(
                 color: Colors.white.withValues(alpha: 0.85),
-                fontSize: 18,
+                fontSize: 14,
                 height: 1.3,
               ),
               maxLines: 1,
@@ -254,13 +333,13 @@ class _QrCard extends StatelessWidget {
 
   final String url;
 
-  static const double _size = 144;
+  static const double _size = 84;
   // Logo pad is sized so the icon (1.26:1 aspect, letterboxed vertically by
   // BoxFit.contain) has visible breathing room on all four sides — a tighter
   // pad reads as off-centre because the wider-than-tall icon sits flush
   // against the left and right edges.
-  static const double _logoSize = 36;
-  static const double _logoPadding = 4;
+  static const double _logoSize = 24;
+  static const double _logoPadding = 3;
 
   @override
   Widget build(BuildContext context) {
@@ -421,6 +500,30 @@ class _TileCarouselState extends State<_TileCarousel>
     super.dispose();
   }
 
+  /// One key per slide, keeping the loaded image state pinned to a slide as
+  /// the row shrinks from 4→3 after an animation. Without it slots shift
+  /// positionally and the image refetches and re-runs its load fade, which
+  /// reads as a flicker. Nulls fall back to positional reuse.
+  ///
+  /// 🛑 The URL alone is not a key: it repeats. A 3-item repeat-all queue —
+  /// the *smallest* queue tile mode renders at all — wraps, so a forward
+  /// advance lays out `[prev, curr, next, next-after]` as `[A, B, C, A]`, and
+  /// two children under the same [ValueKey] are a hard assertion failure.
+  /// Editions do it too: distinct mints can share one image. Suffixing the
+  /// occurrence keeps every key unique, and because the collided slides are by
+  /// definition the same artwork, whichever element a reshuffle hands to which
+  /// slot paints identically.
+  List<Key?> _slideKeys() {
+    final seen = <String, int>{};
+    return [
+      for (final url in _slides)
+        if (url == null)
+          null
+        else
+          ValueKey<String>('${(seen[url] = (seen[url] ?? -1) + 1)}:$url'),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     return ClipRect(
@@ -438,21 +541,17 @@ class _TileCarouselState extends State<_TileCarousel>
           // animation value — only its horizontal offset does. Build it once
           // and pass it as the cached `child` so each frame rebuilds only the
           // Positioned wrapper, not every slide.
+          final keys = _slideKeys();
           final row = Row(
             children: [
               for (var i = 0; i < _slides.length; i++) ...[
                 SizedBox(
-                  // Keying by URL keeps the loaded image state
-                  // pinned to the slide as the list shrinks
-                  // from 4→3 after animation — without it, slots
-                  // shift positionally and the image refetches /
-                  // re-runs its load fade, which reads as a
-                  // flicker. Nulls fall back to positional reuse.
-                  key: _slides[i] != null
-                      ? ValueKey<String>(_slides[i]!)
-                      : null,
+                  key: keys[i],
                   width: sw,
-                  height: h * 0.92,
+                  // Full height of the padded box: the gutter is now
+                  // [_kMediaPadding] on the media area, so a second inset
+                  // here would double it.
+                  height: h,
                   child: _SlideContent(
                     url: _slides[i],
                     isCurrent: _slides[i] == widget.currUrl,
@@ -488,7 +587,7 @@ class _TileCarouselState extends State<_TileCarousel>
   }
 }
 
-class _SlideContent extends StatelessWidget {
+class _SlideContent extends StatefulWidget {
   const _SlideContent({required this.url, required this.isCurrent});
 
   /// Raw source URL — [CastProgressiveArtwork] resolves the poster and the
@@ -503,23 +602,58 @@ class _SlideContent extends StatelessWidget {
   final bool isCurrent;
 
   @override
+  State<_SlideContent> createState() => _SlideContentState();
+}
+
+class _SlideContentState extends State<_SlideContent> {
+  /// Full-resolution URL, kept once this slide has been the centred one.
+  ///
+  /// 🛑 Latched, never recomputed from [_SlideContent.isCurrent] per build.
+  /// An advance flips the outgoing slide to `isCurrent: false` on the very
+  /// frame the animation starts, and dropping the upgrade there swaps a
+  /// full-resolution image for its poster in place — which reads as the
+  /// artwork blinking exactly as it begins to move. It is already
+  /// downloaded and decoded; keeping it costs nothing the peek didn't
+  /// already pay for.
+  String? _fullUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _latchFullUrl();
+  }
+
+  @override
+  void didUpdateWidget(_SlideContent oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // A different artwork in the same slot invalidates the latch. Slides are
+    // keyed by URL, so this is the fallback path for the unkeyed empty slots.
+    if (oldWidget.url != widget.url) _fullUrl = null;
+    _latchFullUrl();
+  }
+
+  void _latchFullUrl() {
+    final u = widget.url;
+    if (!widget.isCurrent || u == null || u.isEmpty) return;
+    // Slides are always stills — `_MediaArea` only routes here for the
+    // carousel — so the upgrade is the image original regardless of the
+    // item's media type.
+    _fullUrl = ArtworkMediaResolver.originalCastUrl(imageUrl: u);
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final u = url;
+    final u = widget.url;
     // Transparent fallback so the blurred background layer shows through
     // the slide's letterbox (BoxFit.contain) and the empty peek slots at
     // the ends of an unwrapped queue.
     if (u == null || u.isEmpty) {
       return const SizedBox.shrink();
     }
-    // Slides are always stills — `_MediaArea` only routes here for the
-    // carousel — so the upgrade is the image original regardless of the
-    // item's media type.
     return CastProgressiveArtwork(
       imageUrl: u,
       fit: BoxFit.contain,
-      fullUrl: isCurrent
-          ? ArtworkMediaResolver.originalCastUrl(imageUrl: u)
-          : null,
+      fullUrl: _fullUrl,
     );
   }
 }

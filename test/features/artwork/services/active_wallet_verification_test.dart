@@ -85,7 +85,7 @@ void main() {
 
     // A hide/download tap is user-initiated, so the interactive Ledger
     // connect+verify sheet is the correct response — the gate must hand off to
-    // signAndVerifyForWallet (which routes hardware to LedgerVerifyController)
+    // signAndVerifyForWallet (which routes hardware to HardwareVerifyController)
     // rather than dead-ending on a "verify first" message. The BLE sheet is
     // suppressed for *background* paths only, and that guard lives in
     // AuthService._verifySignatureIfPossible, not here.
@@ -106,11 +106,27 @@ void main() {
       stubUnverifiedActive(WalletType.ledger);
       when(
         () => auth.signAndVerifyForWallet(any(), any()),
-      ).thenThrow(LedgerVerificationCancelledException());
+      ).thenThrow(HardwareVerificationCancelledException());
 
       final error = await ensureActiveWalletVerified();
       expect(error, 'Hardware wallet not verified');
       expect(error, isNot(contains('Exception')));
+    });
+
+    // The same typed cancellation covers the second hardware wallet, which is
+    // why the exception is one hardware-generic type rather than a hierarchy:
+    // this catch site cannot act on the difference between a dismissed Ledger
+    // sheet and a declined Seed Vault approval, and neither can the user.
+    test('cancelled Seed Vault approval → the same readable copy', () async {
+      stubUnverifiedActive(WalletType.seedVault);
+      when(
+        () => auth.signAndVerifyForWallet(any(), any()),
+      ).thenThrow(HardwareVerificationCancelledException());
+
+      expect(
+        await ensureActiveWalletVerified(),
+        'Hardware wallet not verified',
+      );
     });
 
     // The gate keys the "not verified" copy off the TYPED cancellation, not off

@@ -496,7 +496,8 @@ class _CurrentListingPrice extends StatelessWidget {
                         ? ' (\$${usd.toStringAsFixed(2)})'
                         : '';
                     return Text(
-                      '${display.toStringAsFixed(token.inputDecimals)} ${token.symbol}'
+                      '${_UpdateListingSheetState._stripTrailing(display, token.inputDecimals)} '
+                      '${token.symbol}'
                       '$usdSuffix',
                       style: MallowTheme.uiBody,
                     );

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../../core/utils/address_format.dart';
 import '../../../shared/theme/mallow_theme.dart';
+import '../../../shared/utils/price_format.dart' show stripTrailingZeros;
 import '../../../shared/utils/token_image_utils.dart';
 import '../../../shared/widgets/mallow_pill_field.dart';
 import '../../../shared/widgets/mallow_sheet.dart';
@@ -403,13 +404,15 @@ class _TokenListTile extends StatelessWidget {
 
   String _formatBalance(double balance) {
     if (balance >= 1000000) {
-      return '${(balance / 1000000).toStringAsFixed(2)}M';
+      final value = stripTrailingZeros((balance / 1000000).toStringAsFixed(2));
+      return '${value}M';
     } else if (balance >= 1000) {
-      return '${(balance / 1000).toStringAsFixed(2)}K';
+      final value = stripTrailingZeros((balance / 1000).toStringAsFixed(2));
+      return '${value}K';
     } else if (balance >= 1) {
-      return balance.toStringAsFixed(2);
+      return stripTrailingZeros(balance.toStringAsFixed(2));
     } else {
-      return balance.toStringAsFixed(4);
+      return stripTrailingZeros(balance.toStringAsFixed(4));
     }
   }
 }

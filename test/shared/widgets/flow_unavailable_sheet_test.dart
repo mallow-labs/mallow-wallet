@@ -1,7 +1,12 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mallow_wallet/core/config/remote_config.dart';
+import 'package:mallow_wallet/core/config/remote_config_service.dart';
+import 'package:mallow_wallet/core/config/store_build.dart';
 import 'package:mallow_wallet/core/security/transaction_auth_gate.dart'
-    show kFlowDisabledFallbackMessage;
+    show kFlowDisabledFallbackMessage, kStoreGatedFlowMessage;
+import 'package:mallow_wallet/di.dart';
 import 'package:mallow_wallet/shared/theme/mallow_theme.dart';
 import 'package:mallow_wallet/shared/widgets/flow_unavailable_sheet.dart';
 
@@ -37,6 +42,33 @@ Future<void> _openSheet(WidgetTester tester, String message) async {
 /// Comfortably past `_sheetSettleBuffer`.
 const _entranceGuard = Duration(milliseconds: 250);
 
+/// Nothing killed. The route gate reads it for every non-store cell, and the
+/// entry nudge calls [refreshIfStale], so both must exist.
+class _PermissiveRemoteConfigService extends Fake
+    implements RemoteConfigService {
+  final ValueNotifier<RemoteConfig> _config = ValueNotifier(
+    RemoteConfig.permissive,
+  );
+
+  @override
+  ValueListenable<RemoteConfig> get config => _config;
+
+  @override
+  Future<void> refreshIfStale() async {}
+}
+
+Future<void> _pumpGated(WidgetTester tester, List<FlowKey> flows) async {
+  await tester.pumpWidget(
+    MaterialApp(
+      theme: MallowTheme.lightTheme,
+      home: FlowGatedScreen(flows: flows, builder: () => const Text('real')),
+    ),
+  );
+  // `FlowUnavailableScreen` presents its sheet after the first frame.
+  await tester.pumpAndSettle();
+  await tester.pump(_entranceGuard);
+}
+
 void main() {
   testWidgets('renders the server message verbatim', (tester) async {
     // The operator's copy is the only thing that can tell a user mid-incident
@@ -70,5 +102,55 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Paused.'), findsNothing);
+  });
+
+  group('FlowGatedScreen store gate', () {
+    setUpAll(() {
+      if (!sl.isRegistered<RemoteConfigService>()) {
+        sl.registerSingleton<RemoteConfigService>(
+          _PermissiveRemoteConfigService(),
+        );
+      }
+    });
+    tearDown(() => debugShowNftCommerceOverride = null);
+
+    testWidgets('a route fronting only commerce cells is closed with the '
+        'neutral store copy when commerce is hidden', (tester) async {
+      debugShowNftCommerceOverride = false;
+
+      await _pumpGated(tester, const [
+        FlowKey.solana(AppFlow.nftMint),
+        FlowKey.solana(AppFlow.editionMint),
+        FlowKey.solana(AppFlow.collectionMint),
+      ]);
+
+      expect(find.text('real'), findsNothing);
+      // Neutral on purpose: no platform, no policy, nothing that reads as a
+      // feature waiting to be switched on.
+      expect(find.text(kStoreGatedFlowMessage), findsOneWidget);
+    });
+
+    testWidgets('a route with one non-commerce cell stays open — the '
+        'every-cell rule, same as for kills', (tester) async {
+      debugShowNftCommerceOverride = false;
+
+      await _pumpGated(tester, const [
+        FlowKey.solana(AppFlow.fixedPriceCreate),
+        FlowKey.solana(AppFlow.nftTransfer),
+      ]);
+
+      expect(find.text('real'), findsOneWidget);
+      expect(find.text(kStoreGatedFlowMessage), findsNothing);
+    });
+
+    testWidgets('with commerce shown a commerce route renders normally', (
+      tester,
+    ) async {
+      debugShowNftCommerceOverride = true;
+
+      await _pumpGated(tester, const [FlowKey.solana(AppFlow.nftMint)]);
+
+      expect(find.text('real'), findsOneWidget);
+    });
   });
 }

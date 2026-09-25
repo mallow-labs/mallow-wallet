@@ -94,8 +94,9 @@ void main() {
 
       await storage.getOrCreateDbEncryptionKey(dbFileExists: true);
 
-      // The iOS vault write is delete-then-add, so a boot-path rewrite of a
-      // valid backup would itself be a loss window.
+      // The backup must never be *replaced*: a transient null on the backup
+      // read at mint time would otherwise overwrite the key that still opens
+      // the quarantined file.
       verifyNever(() => vault.write(any(), any()));
     });
   });

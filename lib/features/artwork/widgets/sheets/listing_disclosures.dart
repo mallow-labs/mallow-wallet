@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../../core/config/store_build.dart';
 import '../../../../shared/theme/mallow_theme.dart';
 import '../../../../shared/widgets/mallow_network_image.dart';
 import '../../../../shared/widgets/mallow_svg_icon.dart';
@@ -62,7 +63,12 @@ class _ListingDisclosuresState extends State<ListingDisclosures> {
     // no order record and the seller has nothing to ship to. The buy is
     // deliberately still allowed — this disclosure is what keeps it honest, so
     // the buyer knows to reach the seller themselves.
-    final asksForShipping = artwork.rewardsInfo?.askForShippingAddress ?? false;
+    // A store build that hides commerce has no in-app purchase for the
+    // tail to be honest about, and the tail itself points at the web
+    // checkout, so it goes with `kShowNftCommerce`.
+    final asksForShipping =
+        showNftCommerce &&
+        (artwork.rewardsInfo?.askForShippingAddress ?? false);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

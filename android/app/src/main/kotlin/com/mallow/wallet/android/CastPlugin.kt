@@ -30,7 +30,7 @@ import org.json.JSONObject
  *
  * Event channel: com.mallow.wallet/cast_events
  * Events: {type: 'devices', devices: [{id, name}]}
- *         {type: 'session', state: 'connecting'|'connected'|'disconnected'|'error'}
+ *         {type: 'session', state: 'connecting'|'connected'|'suspended'|'disconnected'|'error'}
  *
  * Drives the mallow custom HTML receiver via [NAMESPACE]. The default media
  * receiver and `RemoteMediaClient.load` path are intentionally not used —
@@ -97,7 +97,12 @@ class CastPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
 
         override fun onSessionSuspended(session: CastSession, reason: Int) {
             Log.w(TAG, "session: suspended reason=$reason")
-            sendSessionState("disconnected")
+            // NOT "disconnected". A suspend is the framework parking a session
+            // it intends to resume (app backgrounded, screen locked, Wi-Fi
+            // blip) and it reports onSessionResumed on the way back. Calling
+            // it a disconnect ends the session in CastBloc, so that resume has
+            // nothing left to resume into and casting dies on every lock.
+            sendSessionState("suspended")
         }
 
         override fun onSessionStartFailed(session: CastSession, error: Int) {

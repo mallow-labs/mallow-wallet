@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:ledger_flutter_plus/ledger_flutter_plus.dart';
 
+import '../../../core/models/account.dart';
 import '../../../core/services/ledger_service.dart';
 import '../../../di.dart';
 import '../../../shared/widgets/loading_indicator.dart';
@@ -20,34 +21,57 @@ import '../services/ledger_auth_service.dart';
 /// device is ready and the user taps "Sign transaction".
 enum _VerifyPhase { idle, signing, success, errored }
 
-/// Bottom sheet shown when a Ledger wallet receives a 401 "Signature required".
+/// Bottom sheet shown when a hardware wallet needs interactive verification —
+/// a 401 "Signature required", or an action that implies wallet identity.
 ///
-/// Delegates scan → connect → ready to [LedgerAuthService.sessionState] and
-/// the memo-sign + backend verify + JWT cache to
-/// [LedgerAuthService.verifyOwnership].
-class LedgerVerifySheet extends StatefulWidget {
-  const LedgerVerifySheet({
+/// It serves both hardware wallets, and does a different job for each:
+///
+/// - **Ledger** — it *is* the verification. Scan → connect → ready comes from
+///   [LedgerAuthService.sessionState]; the memo-sign + backend verify + JWT
+///   cache from [LedgerAuthService.verifyOwnership]. Nothing happens outside
+///   this sheet.
+/// - **Seed Vault** — it is consent, and nothing else. Approval happens in
+///   Seed Vault's own full-screen Activity, which the caller launches after
+///   this sheet returns true. A prompt with no user action behind it reads as
+///   a system-level security event, so the sheet exists to put a deliberate
+///   tap in front of it.
+///
+/// [walletType] therefore picks the whole flow, not just the wording — but the
+/// wording matters too: a Seed Vault user told to switch on Bluetooth and open
+/// the Solana app has been sent somewhere they cannot go.
+class HardwareVerifySheet extends StatefulWidget {
+  const HardwareVerifySheet({
     required this.address,
+    required this.walletType,
     required this.completer,
     super.key,
   });
 
   final String address;
+
+  /// [WalletType.ledger] or [WalletType.seedVault].
+  final WalletType walletType;
+
   final Completer<bool> completer;
 
   @override
-  State<LedgerVerifySheet> createState() => _LedgerVerifySheetState();
+  State<HardwareVerifySheet> createState() => _HardwareVerifySheetState();
 }
 
-class _LedgerVerifySheetState extends State<LedgerVerifySheet> {
-  final _auth = sl<LedgerAuthService>();
+class _HardwareVerifySheetState extends State<HardwareVerifySheet> {
+  /// Lazy: the Seed Vault arm never touches the Ledger session at all, and
+  /// resolving it eagerly would drag BLE machinery into a sheet that only
+  /// collects a tap.
+  late final _auth = sl<LedgerAuthService>();
 
-  late StreamSubscription<LedgerSessionState> _sessionSub;
+  StreamSubscription<LedgerSessionState>? _sessionSub;
   StreamSubscription<LedgerSigningState>? _signingSub;
 
-  late LedgerSessionState _session;
+  LedgerSessionState? _session;
   _VerifyPhase _phase = _VerifyPhase.idle;
   String? _errorMessage;
+
+  bool get _isSeedVault => widget.walletType == WalletType.seedVault;
 
   /// The Ledger app the user must open for this wallet, inferred from the
   /// address shape.
@@ -64,6 +88,11 @@ class _LedgerVerifySheetState extends State<LedgerVerifySheet> {
   @override
   void initState() {
     super.initState();
+    // Seed Vault has no transport to bring up: its approval Activity is
+    // launched by the caller once this sheet returns. Starting a BLE scan here
+    // would ask for Bluetooth the user never needs.
+    if (_isSeedVault) return;
+
     _session = _auth.currentState;
     _sessionSub = _auth.sessionState.listen(_onSession);
 
@@ -74,12 +103,14 @@ class _LedgerVerifySheetState extends State<LedgerVerifySheet> {
 
   @override
   void dispose() {
-    _sessionSub.cancel();
+    _sessionSub?.cancel();
     _signingSub?.cancel();
-    // Drop the in-memory device list so a re-opened sheet starts with a
-    // fresh scan instead of showing devices from the previous session.
-    // LedgerAuthService is a singleton, so without this the list survives.
-    _auth.clearDevices();
+    if (!_isSeedVault) {
+      // Drop the in-memory device list so a re-opened sheet starts with a
+      // fresh scan instead of showing devices from the previous session.
+      // LedgerAuthService is a singleton, so without this the list survives.
+      _auth.clearDevices();
+    }
     if (!widget.completer.isCompleted) {
       widget.completer.complete(false);
     }
@@ -199,6 +230,7 @@ class _LedgerVerifySheetState extends State<LedgerVerifySheet> {
   }
 
   Widget _buildBody(BuildContext context) {
+    if (_isSeedVault) return _buildSeedVaultConsentView(context);
     switch (_phase) {
       case _VerifyPhase.signing:
         return _buildSigningView(context);
@@ -209,6 +241,39 @@ class _LedgerVerifySheetState extends State<LedgerVerifySheet> {
       case _VerifyPhase.idle:
         return _buildSessionView(context);
     }
+  }
+
+  /// Seed Vault's consent step: what is about to happen, and one tap to allow
+  /// it. Completing the request is all this does — the signature, and with it
+  /// the OS approval screen, is the caller's next move.
+  Widget _buildSeedVaultConsentView(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          'Seed Vault will ask you to approve a signature that proves you own '
+          'this wallet. Nothing is sent to the Solana network.',
+          textAlign: TextAlign.center,
+          style: MallowTheme.uiBodyRelaxed.copyWith(
+            color: context.mallowColors.textSecondary,
+          ),
+        ),
+        const SizedBox(height: 24),
+        MallowButton(
+          label: 'Continue in Seed Vault',
+          onPressed: _consentToSeedVault,
+          isFullWidth: true,
+        ),
+        const SizedBox(height: 8),
+      ],
+    );
+  }
+
+  void _consentToSeedVault() {
+    if (!widget.completer.isCompleted) {
+      widget.completer.complete(true);
+    }
+    Navigator.of(context).pop();
   }
 
   Widget _buildSessionView(BuildContext context) {

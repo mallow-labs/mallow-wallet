@@ -174,6 +174,9 @@ class IosChromecastCastService implements CastService {
         final sessionState = switch (state) {
           'connecting' => CastSessionState.connecting,
           'connected' => CastSessionState.connected,
+          // Not folded into the default: a suspend is a session that is
+          // coming back, and mapping it to `disconnected` ends the session.
+          'suspended' => CastSessionState.suspended,
           'error' => CastSessionState.error,
           _ => CastSessionState.disconnected,
         };

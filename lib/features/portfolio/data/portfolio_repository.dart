@@ -234,7 +234,7 @@ class PortfolioRepository {
       nsfw: p.nsfw ?? false,
       chain: p.chain?.value,
       tokenStandard: p.tokenStandard,
-      isHidden: p.isOwnerHidden ?? false,
+      isHidden: (p.isOwnerHidden ?? false) || (p.isCreatorHidden ?? false),
     );
   }
 

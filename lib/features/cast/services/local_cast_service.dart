@@ -1,5 +1,9 @@
 import 'dart:async';
 
+// `extended_image` only to warm the cache `CastProgressiveArtwork` reads —
+// the same narrow receiver-side exception `cast_receiver_app.dart` takes for
+// the AirPlay engine. Nothing here renders.
+import 'package:extended_image/extended_image.dart';
 import 'package:flutter/painting.dart';
 
 import '../models/cast_media_type.dart';
@@ -77,9 +81,7 @@ class LocalCastService implements CastService {
   @override
   Future<void> preloadItems(List<CastQueueItem> items) async {
     // Warm both the media-type probe cache and the painting image cache so
-    // the next slide renders without a fetch. Local rendering uses Flutter's
-    // ImageProvider chain, so resolving NetworkImage seeds PaintingBinding's
-    // imageCache transparently.
+    // the next slide renders without a fetch.
     for (final item in items) {
       unawaited(
         ArtworkMediaResolver.resolveAsync(
@@ -88,7 +90,20 @@ class LocalCastService implements CastService {
         ),
       );
       if (item.imageUrl.isNotEmpty) {
-        NetworkImage(item.imageUrl).resolve(ImageConfiguration.empty);
+        // 🛑 Every field the renderer's provider is built with has to match
+        // here, because `ExtendedNetworkImageProvider` puts them all in its
+        // `operator ==` / `hashCode` and returns *itself* from `obtainKey` —
+        // so any difference warms a cache entry the renderer will never look
+        // up, which is a preload that silently does nothing.
+        //   * the *poster* URL, not the raw source: the raw one is usually an
+        //     unfetchable `ipfs://` URI, and it is not what gets rendered.
+        //   * `cache: true`, because `ExtendedImage.network` defaults to true
+        //     while this constructor defaults to **false**.
+        // Keep this in step with `_CastImageLayer` in cast_animated_artwork.dart.
+        ExtendedNetworkImageProvider(
+          ArtworkMediaResolver.posterUrl(item.imageUrl),
+          cache: true,
+        ).resolve(ImageConfiguration.empty);
       }
     }
   }

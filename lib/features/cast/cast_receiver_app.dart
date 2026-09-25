@@ -93,16 +93,23 @@ class _CastReceiverHostState extends State<CastReceiverHost> {
               // Resolve into the painting cache so the next 'show' renders
               // without a fetch — same trick LocalCastService uses.
               //
-              // It must be the *poster* URL through
-              // `ExtendedNetworkImageProvider`, matching what
-              // `CastProgressiveArtwork` renders exactly: the raw source is
-              // often an unfetchable `ipfs://` URI, and a `NetworkImage` of
-              // it would key a different cache entry than the one the
-              // receiver reads, warming nothing. Only the poster is warmed —
-              // the originals are multi-megabyte and the slideshow interval
-              // is long enough to fetch them on show.
+              // 🛑 Every field the renderer's provider is built with has to
+              // match here, because `ExtendedNetworkImageProvider` puts them
+              // all in its `operator ==` / `hashCode` and returns *itself*
+              // from `obtainKey` — so any difference warms a cache entry the
+              // receiver will never look up, which is a preload that silently
+              // does nothing.
+              //   * the *poster* URL, not the raw source: the raw one is
+              //     often an unfetchable `ipfs://` URI, and it is not what
+              //     gets rendered. Only the poster is warmed — the originals
+              //     are multi-megabyte and the slideshow interval is long
+              //     enough to fetch them on show.
+              //   * `cache: true`, because `ExtendedImage.network` defaults
+              //     to true while this constructor defaults to **false**.
+              // Keep in step with `_CastImageLayer` in cast_animated_artwork.
               ExtendedNetworkImageProvider(
                 ArtworkMediaResolver.posterUrl(item.imageUrl),
+                cache: true,
               ).resolve(ImageConfiguration.empty);
             }
           }

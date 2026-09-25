@@ -234,6 +234,7 @@ e2e::run_flutter_test() {
   # flag lists, not single arguments.
   # shellcheck disable=SC2086
   flutter test "$target" ${E2E_EXTRA_FLAGS:-} \
+    --flavor play \
     -d "$DEVICE" \
     $E2E_DART_DEFINES 9>&- &
   E2E_TEST_PID=$!

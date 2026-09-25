@@ -74,6 +74,7 @@ export '../generated/openapi.models.swagger.dart'
         BurnTxRequest,
         TransferTxRequest,
         BuyFixedPriceTxRequest,
+        BuyFixedPriceTxResponse,
         BuyEditionTxsRequest,
         BuyEditionTxItem,
         BuyEditionTxsResponse,
@@ -95,6 +96,7 @@ export '../generated/openapi.models.swagger.dart'
         EditCollectionArtworksRequest,
         EditCollectionArtworksResponse,
         UnsignedTxResponse,
+        UnsignedTxWithSetupResponse,
         EvmUnsignedTx,
         TransferTxResponse;
 

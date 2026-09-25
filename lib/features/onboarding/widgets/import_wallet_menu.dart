@@ -12,6 +12,7 @@ class ImportWalletMenu extends StatelessWidget {
     required this.onPrivateKeyTap,
     required this.onHardwareWalletTap,
     required this.onRecoveryPhraseTap,
+    this.onSeedVaultTap,
     super.key,
   });
 
@@ -26,6 +27,12 @@ class ImportWalletMenu extends StatelessWidget {
   final VoidCallback onHardwareWalletTap;
   final VoidCallback onRecoveryPhraseTap;
 
+  /// Seed Vault import. Null on every device without a Seed Vault
+  /// implementation — which is every iPhone and every Android phone that is not
+  /// a Solana Mobile device — and the row is then not rendered at all. The
+  /// caller owns that check, so this widget never probes the platform itself.
+  final VoidCallback? onSeedVaultTap;
+
   /// Shows the menu and resolves with the [SocialAuthResult] when the user
   /// completes a social sign-in, or null if they dismiss / pick another path.
   static Future<SocialAuthResult?> show(
@@ -35,6 +42,7 @@ class ImportWalletMenu extends StatelessWidget {
     required VoidCallback onPrivateKeyTap,
     required VoidCallback onHardwareWalletTap,
     required VoidCallback onRecoveryPhraseTap,
+    VoidCallback? onSeedVaultTap,
   }) {
     return showMallowSheet<SocialAuthResult?>(
       context: context,
@@ -45,6 +53,7 @@ class ImportWalletMenu extends StatelessWidget {
         onPrivateKeyTap: onPrivateKeyTap,
         onHardwareWalletTap: onHardwareWalletTap,
         onRecoveryPhraseTap: onRecoveryPhraseTap,
+        onSeedVaultTap: onSeedVaultTap,
       ),
     );
   }
@@ -81,6 +90,17 @@ class ImportWalletMenu extends StatelessWidget {
           onPressed: onHardwareWalletTap,
           isFullWidth: true,
         ),
+        // Seed Vault button (outline) — only on a device that has one.
+        if (onSeedVaultTap case final onTap?) ...[
+          const SizedBox(height: 12),
+          MallowButton(
+            label: 'Use Seed Vault',
+            variant: MallowButtonVariant.secondary,
+            enabled: !busy,
+            onPressed: onTap,
+            isFullWidth: true,
+          ),
+        ],
         const SizedBox(height: 12),
         // Recovery phrase button (primary)
         MallowButton(

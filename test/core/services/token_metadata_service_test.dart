@@ -100,6 +100,25 @@ void main() {
     );
 
     test(
+      'a registered mint can fetch its logo without replacing metadata',
+      () async {
+        when(() => das.getAssetRaw(test22Mint)).thenAnswer(
+          (_) async => dasResponse(image: 'https://cdn.example/test22.png'),
+        );
+        final service = await build();
+
+        final imageUrl = await service.resolveImageUrl(test22Mint);
+        final cachedImageUrl = await service.resolveImageUrl(test22Mint);
+
+        expect(imageUrl, 'https://cdn.example/test22.png');
+        expect(cachedImageUrl, imageUrl);
+        expect(tokenByMint(test22Mint)?.symbol, 'TEST22');
+        expect(tokenByMint(test22Mint)?.inputDecimals, 3);
+        verify(() => das.getAssetRaw(test22Mint)).called(1);
+      },
+    );
+
+    test(
       'an absent mint is not a lookup — it means the native currency',
       () async {
         final service = await build();

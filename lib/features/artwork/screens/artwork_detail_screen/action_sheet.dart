@@ -30,6 +30,11 @@ Widget? _buildArtworkActionSheet({
   required ValueChanged<ArtworkDetails> onListUnlisted,
   required ValueChanged<ArtworkDetails> onSendArtwork,
   required ValueChanged<ArtworkDetails> onUpdateListing,
+
+  /// Direct delist for the owner-listed sheet. Only rendered where "Update
+  /// listing" (which otherwise hosts the cancel affordance) is hidden — a
+  /// store build with `kShowNftCommerce` off.
+  required ValueChanged<ArtworkDetails> onCancelListing,
   required ValueChanged<ArtworkDetails> onPlaceBid,
   required void Function({bool reclaim}) onCancelAuction,
   required VoidCallback onSettleAuction,
@@ -93,6 +98,7 @@ Widget? _buildArtworkActionSheet({
     ArtworkOwnerListedAction() => ArtworkOwnerListedSheet(
       artwork: artwork,
       onUpdateListing: () => onUpdateListing(artwork),
+      onCancelListing: () => onCancelListing(artwork),
       highestOffer: highestOffer,
       editionState: editionLive,
       onAcceptOffer: onAcceptHighestOffer,

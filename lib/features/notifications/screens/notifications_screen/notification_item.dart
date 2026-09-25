@@ -206,6 +206,18 @@ class _NotificationIcon extends StatelessWidget {
         return '$_icons/notif_hand-stop.svg';
       case api.NotificationType.auctionEnded:
         return '$_icons/notif_gavel.svg';
+      case api.NotificationType.subscribedCreatorListedArtwork:
+        return '$_icons/notif_badge.svg';
+      case api.NotificationType.subscribedCreatorGumballLive:
+        return '$_icons/notif_crystal-ball.svg';
+      case api.NotificationType.subscribedCreatorJellybeanLive:
+        return '$_icons/notif_jellybean.svg';
+      case api.NotificationType.subscribedCreatorPosted:
+        return '$_icons/notif_message.svg';
+      case api.NotificationType.newSubscriber:
+        return '$_icons/notif_user.svg';
+      case api.NotificationType.newSubscribers:
+        return '$_icons/notif_users.svg';
       case api.NotificationType.test:
       case api.NotificationType.unknown:
         return '$_icons/bell.svg';

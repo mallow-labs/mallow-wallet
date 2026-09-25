@@ -7,6 +7,7 @@ import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/widgets/mallow_header.dart';
 import '../../../shared/widgets/menu_row.dart';
+import '../../seed_vault/widgets/seed_vault_entry.dart';
 
 import '../../../core/models/account.dart';
 
@@ -73,6 +74,21 @@ class AddWalletScreen extends StatelessWidget {
                     onTap: () {
                       context.push(AppRoutes.ledgerScan);
                     },
+                  ),
+                  // Renders nothing unless this device actually has Seed Vault,
+                  // so a plain Android phone and iOS show no Seed Vault surface
+                  // at all.
+                  SeedVaultEntry(
+                    builder: (context) => Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: MenuRow(
+                        icon: 'assets/icons/settings.svg',
+                        label: 'Import from Seed Vault',
+                        onTap: () {
+                          context.push(AppRoutes.seedVaultImport);
+                        },
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 8),
                   MenuRow(

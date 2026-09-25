@@ -4,7 +4,7 @@ import 'package:bloc_test/bloc_test.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_wallet/core/crypto/wallet_manager.dart';
 import 'package:mallow_wallet/core/network/auth_service.dart';
-import 'package:mallow_wallet/core/network/ledger_verify_controller.dart';
+import 'package:mallow_wallet/core/network/hardware_verify_controller.dart';
 import 'package:mallow_wallet/features/artwork/widgets/add_to_curation_sheet.dart';
 import 'package:mallow_wallet/features/curations/data/curation_repository.dart';
 import 'package:mallow_wallet/features/curations/services/curations_refresh_signal.dart';
@@ -58,7 +58,7 @@ ArtGroup _group({
   WalletManager,
   CurationRepository,
   AuthService,
-  LedgerVerifyController,
+  HardwareVerifyController,
 ])
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -67,7 +67,7 @@ void main() {
   late MockWalletManager mockWalletManager;
   late MockCurationRepository mockCurationRepository;
   late MockAuthService mockAuthService;
-  late MockLedgerVerifyController mockLedgerVerifyController;
+  late MockHardwareVerifyController mockHardwareVerifyController;
 
   final artworks = [
     _artwork(mint: 'mint1', title: 'Apple'),
@@ -97,7 +97,7 @@ void main() {
     mockRepository,
     mockCurationRepository,
     mockAuthService,
-    mockLedgerVerifyController,
+    mockHardwareVerifyController,
     mockWalletManager,
   );
 
@@ -107,7 +107,7 @@ void main() {
     mockWalletManager = MockWalletManager();
     mockCurationRepository = MockCurationRepository();
     mockAuthService = MockAuthService();
-    mockLedgerVerifyController = MockLedgerVerifyController();
+    mockHardwareVerifyController = MockHardwareVerifyController();
 
     when(
       mockWalletManager.onWalletChanged,
@@ -120,7 +120,7 @@ void main() {
       ),
     ).thenAnswer((_) async => const []);
     when(
-      mockAuthService.currentWalletNeedsLedgerVerification(),
+      mockAuthService.currentWalletNeedsHardwareVerification(),
     ).thenAnswer((_) async => false);
     when(mockAuthService.currentUser).thenReturn(null);
     when(mockAuthService.currentAddress).thenReturn(null);
@@ -848,7 +848,7 @@ void main() {
       'even though the active Ledger is not',
       setUp: () {
         when(
-          mockAuthService.currentWalletNeedsLedgerVerification(),
+          mockAuthService.currentWalletNeedsHardwareVerification(),
         ).thenAnswer((_) async => true);
         when(
           mockAuthService.currentUser,
@@ -876,7 +876,7 @@ void main() {
       'shows when no wallet on the profile holds a valid signature',
       setUp: () {
         when(
-          mockAuthService.currentWalletNeedsLedgerVerification(),
+          mockAuthService.currentWalletNeedsHardwareVerification(),
         ).thenAnswer((_) async => true);
         when(mockAuthService.currentUser).thenReturn(
           const api.User(addresses: ['LedgerAddr', 'WatchOnlyAddr']),
@@ -1984,6 +1984,113 @@ void main() {
   });
 
   group('PortfolioBloc wallet change', () {
+    test(
+      'clears the previous wallet immediately while preserving UI choices',
+      () async {
+        final secondCacheRead = Completer<PortfolioSnapshot?>();
+        var cacheReadCount = 0;
+        when(mockRepository.getCachedSnapshot()).thenAnswer((_) {
+          cacheReadCount++;
+          return cacheReadCount == 1
+              ? Future<PortfolioSnapshot?>.value()
+              : secondCacheRead.future;
+        });
+
+        final bloc = buildBloc();
+        addTearDown(bloc.close);
+
+        bloc.add(const PortfolioEvent.load());
+        await bloc.stream.firstWhere(
+          (state) => state is PortfolioLoaded && !state.isRefreshing,
+        );
+
+        bloc.add(const PortfolioEvent.changeTab(tab: PortfolioTab.allArt));
+        await bloc.stream.firstWhere(
+          (state) =>
+              state is PortfolioLoaded &&
+              state.activeTab == PortfolioTab.allArt,
+        );
+        bloc.add(const PortfolioEvent.toggleViewMode());
+        await bloc.stream.firstWhere(
+          (state) =>
+              state is PortfolioLoaded &&
+              state.artworkViewMode == ArtworkViewMode.detail,
+        );
+        bloc.add(const PortfolioEvent.changeTab(tab: PortfolioTab.collections));
+        await bloc.stream.firstWhere(
+          (state) =>
+              state is PortfolioLoaded &&
+              state.activeTab == PortfolioTab.collections,
+        );
+        bloc.add(const PortfolioEvent.toggleViewMode());
+        await bloc.stream.firstWhere(
+          (state) =>
+              state is PortfolioLoaded &&
+              state.groupViewMode == PortfolioViewMode.list,
+        );
+        bloc.add(const PortfolioEvent.setSort(sort: PortfolioSortOption.name));
+        await bloc.stream.firstWhere(
+          (state) =>
+              state is PortfolioLoaded &&
+              state.activeSort == PortfolioSortOption.name,
+        );
+
+        // WHY: wallet changes happen while this bloc remains mounted. The old
+        // wallet's art must disappear before preference/cache I/O completes,
+        // while the user's current navigation and layouts remain stable so the
+        // screen can render the matching shimmer instead of flashing stale art.
+        bloc.add(const PortfolioEvent.load());
+        final reloading =
+            await bloc.stream.firstWhere(
+                  (state) => state is PortfolioLoaded && state.isRefreshing,
+                )
+                as PortfolioLoaded;
+
+        expect(reloading.allArtworks, isEmpty);
+        expect(reloading.groups, isEmpty);
+        expect(reloading.listedArtworks, isNull);
+        expect(reloading.activeTab, PortfolioTab.collections);
+        expect(reloading.activeSort, PortfolioSortOption.name);
+        expect(reloading.artworkViewMode, ArtworkViewMode.detail);
+        expect(reloading.groupViewMode, PortfolioViewMode.list);
+
+        secondCacheRead.complete(null);
+        await bloc.stream.firstWhere(
+          (state) => state is PortfolioLoaded && !state.isRefreshing,
+        );
+      },
+    );
+
+    test('a no-cache wallet reload still surfaces a fetch failure', () async {
+      var loadCount = 0;
+      when(mockRepository.getOwnedArtworks(page: anyNamed('page'))).thenAnswer((
+        _,
+      ) async {
+        loadCount++;
+        if (loadCount == 1) {
+          return PortfolioArtworksResult(
+            artworks: artworks,
+            total: artworks.length,
+          );
+        }
+        throw Exception('New wallet fetch failed');
+      });
+
+      final bloc = buildBloc();
+      addTearDown(bloc.close);
+      bloc.add(const PortfolioEvent.load());
+      await bloc.stream.firstWhere((state) => state is PortfolioLoaded);
+
+      // WHY: the refreshing loaded state is only a reload placeholder. With
+      // neither cache nor fresh data for the new wallet, silently settling it
+      // as an empty portfolio would disguise a network failure as no artwork.
+      bloc.add(const PortfolioEvent.load());
+      expect(
+        await bloc.stream.firstWhere((state) => state is PortfolioError),
+        isA<PortfolioError>(),
+      );
+    });
+
     test('reloads when the wallet manager emits a change', () async {
       final controller = StreamController<String>.broadcast();
       addTearDown(controller.close);

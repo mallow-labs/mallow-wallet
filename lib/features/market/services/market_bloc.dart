@@ -318,6 +318,7 @@ class MarketPrepData extends Equatable {
     required this.totalCost,
     required this.estimatedFeeLamports,
     this.mallowFeeLamports,
+    this.printMintAccounts = const [],
     this.settleProceeds,
     this.settleSimInputs,
     this.settleProceedsFallback,
@@ -346,6 +347,27 @@ class MarketPrepData extends Equatable {
   /// edition-buy path; null for every other action (1/1 buys, bids, offers,
   /// etc.) so the confirmation sheet only renders the extra line for editions.
   final int? mallowFeeLamports;
+
+  /// Print-mint addresses the edition builder paired its transactions with —
+  /// `result[i].mintAccount` for `result[i].tx`, in the order returned. Empty
+  /// on every other flow (1/1 buys, bids, offers, …).
+  ///
+  /// The pairing is load-bearing, not bookkeeping: each print tx is already
+  /// partially signed **for its own ephemeral mint key**, so it can only ever
+  /// land at the address it came paired with (`BuyEditionTxItem`: "entries are
+  /// not interchangeable"). That is what lets the success payload name the
+  /// copy the buyer actually got instead of the master edition. Entry `i`
+  /// belongs to `transactionsBase64[i + (hasSetupTx ? 1 : 0)]` — the setup tx
+  /// leads the batch and mints nothing — so the LAST entry is the print of the
+  /// last tx, i.e. of the signature [TransactionExecutor.execute] returns.
+  ///
+  /// This is the same list *instance* the `_onBuy` build closure fills, not a
+  /// snapshot of it. A stale-blockhash rebuild re-runs that closure and the
+  /// builder mints a fresh keypair per print, so the refill replaces the keys
+  /// this payload was emitted with — and a read after execute (which is when
+  /// [_onConfirmAndSign] takes it) names the keys that were actually signed
+  /// rather than the abandoned ones.
+  final List<String> printMintAccounts;
 
   /// Seller's settle-auction proceeds breakdown — non-null only on the
   /// seller-with-bids settle path; null for winner-claim / no-bid settles and
@@ -382,15 +404,19 @@ class MarketPrepData extends Equatable {
   final bool showDirectProceedsOption;
 
   /// True when [transactionsBase64] leads with a prerequisite **setup**
-  /// transaction rather than the action itself — today only the edition buy's
-  /// on-chain-allowlist `initProofs` tx (`BuyEditionTxsResponse.setupTx`).
+  /// transaction rather than the action itself — the edition buy's
+  /// on-chain-allowlist `initProofs` tx (`BuyEditionTxsResponse.setupTx`), or
+  /// the address-lookup-table creation a compressed NFT's trade is compiled
+  /// against (`setupTx` on the buy / delist / accept-offer / auction
+  /// cancel-and-settle responses).
   ///
   /// Only [_onSimulate] cares: neither transaction can be usefully simulated
-  /// here. The setup tx's lamport delta is rent for the `proofs` PDA, not the
-  /// purchase, and the buy tx behind it reads an account that does not exist
-  /// until the setup lands, so it fails simulation for a reason that isn't a
-  /// problem. Skipping leaves the breakdown on its static fee estimate instead
-  /// of showing a confidently wrong number or a false failure banner.
+  /// here. The setup tx's lamport delta is rent for the `proofs` PDA or the
+  /// lookup table, not the trade, and the action behind it reads an account
+  /// that does not exist until the setup lands, so it fails simulation for a
+  /// reason that isn't a problem. Skipping leaves the breakdown on its static
+  /// fee estimate instead of showing a confidently wrong number or a false
+  /// failure banner.
   final bool hasSetupTx;
 
   final bool isSimulating;
@@ -410,6 +436,7 @@ class MarketPrepData extends Equatable {
     MarketPrice? totalCost,
     int? estimatedFeeLamports,
     int? mallowFeeLamports,
+    List<String>? printMintAccounts,
     SettleProceeds? settleProceeds,
     SettleSimInputs? settleSimInputs,
     SettleProceeds? settleProceedsFallback,
@@ -427,6 +454,7 @@ class MarketPrepData extends Equatable {
     totalCost: totalCost ?? this.totalCost,
     estimatedFeeLamports: estimatedFeeLamports ?? this.estimatedFeeLamports,
     mallowFeeLamports: mallowFeeLamports ?? this.mallowFeeLamports,
+    printMintAccounts: printMintAccounts ?? this.printMintAccounts,
     settleProceeds: settleProceeds ?? this.settleProceeds,
     settleSimInputs: settleSimInputs ?? this.settleSimInputs,
     settleProceedsFallback:
@@ -454,6 +482,7 @@ class MarketPrepData extends Equatable {
     totalCost,
     estimatedFeeLamports,
     mallowFeeLamports,
+    printMintAccounts,
     settleProceeds,
     settleSimInputs,
     settleProceedsFallback,
@@ -472,12 +501,34 @@ class MarketSuccessData extends Equatable {
     required this.explorerUrl,
     required this.actionType,
     required this.mintAccount,
+    this.printMintAccounts = const [],
     this.indexed,
   });
 
   final String explorerUrl;
   final String actionType;
+
+  /// The artwork the user acted ON. For an edition buy this stays the MASTER
+  /// edition, not the copy: it is the mint every post-action consumer keys off
+  /// — `notifyArtworkEdited` (browse/collection rails re-read the master's
+  /// supply and price), the artwork screen's pending-indexer set, its
+  /// optimistic flips and its curation attribution. Repointing it at a
+  /// brand-new print would silence all of them.
   final String mintAccount;
+
+  /// The copies an edition buy minted, in broadcast order; empty for every
+  /// other action. Carried through from [MarketPrepData.printMintAccounts],
+  /// whose doc has the pairing rules — the short version is that each print tx
+  /// is partially signed for one specific mint key, so which copy the buyer
+  /// now owns is knowable from the build response alone instead of only from
+  /// the indexed sale event, and the LAST entry is the print that the reported
+  /// signature minted (the executor returns the batch's last signature).
+  ///
+  /// Success-path only, and all-or-nothing: the flow emits this payload just
+  /// when every tx in the batch confirmed. A batch that fails on print k emits
+  /// a failure with no payload at all, so this cannot report a partial buy —
+  /// reconciling that needs per-tx signatures the executor does not surface.
+  final List<String> printMintAccounts;
 
   /// Indexer-ack flag — `null` while polling, `true` on ack, `false` after
   /// retries exhaust. Listeners apply local optimistic flips immediately and
@@ -489,13 +540,20 @@ class MarketSuccessData extends Equatable {
         explorerUrl: explorerUrl,
         actionType: actionType,
         mintAccount: mintAccount,
+        printMintAccounts: printMintAccounts,
         indexed: identical(indexed, _sentinel)
             ? this.indexed
             : indexed as bool?,
       );
 
   @override
-  List<Object?> get props => [explorerUrl, actionType, mintAccount, indexed];
+  List<Object?> get props => [
+    explorerUrl,
+    actionType,
+    mintAccount,
+    printMintAccounts,
+    indexed,
+  ];
 }
 
 /// Generic alias for the unified flow state with market-specific payloads.
@@ -645,6 +703,7 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     required AppFlow flow,
     required MarketPrice totalCost,
     int? mallowFeeLamports,
+    List<String> printMintAccounts = const [],
     SettleProceeds? settleProceeds,
     SettleSimInputs? settleSimInputs,
     SettleProceeds? settleProceedsFallback,
@@ -659,6 +718,7 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     totalCost: totalCost,
     estimatedFeeLamports: _feeConfig.baseTxFeeLamports,
     mallowFeeLamports: mallowFeeLamports,
+    printMintAccounts: printMintAccounts,
     settleProceeds: settleProceeds,
     settleSimInputs: settleSimInputs,
     settleProceedsFallback: settleProceedsFallback,
@@ -719,11 +779,21 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     // its own line in the confirmation sheet. Captured inside `build` for the
     // edition path only — null for 1/1 buys, which carry no print fee.
     int? mallowFeeLamports;
-    // True when the v2 edition builder returned an `initProofs` setup tx
-    // (on-chain wallet allowlist, buyer's `proofs` PDA missing). Captured here
-    // like [mallowFeeLamports] so a stale-blockhash rebuild re-derives it from
-    // the fresh response instead of carrying a stale flag.
+    // True when the builder returned a prerequisite setup tx — the edition
+    // path's `initProofs` (on-chain wallet allowlist, buyer's `proofs` PDA
+    // missing) or the 1/1 path's address-lookup-table creation for a
+    // compressed NFT. Captured here like [mallowFeeLamports] so a
+    // stale-blockhash rebuild re-derives it from the fresh response instead of
+    // carrying a stale flag.
     var hasSetupTx = false;
+    // One ephemeral print-mint address per copy, in the order the builder
+    // returned them — the address each print tx is partially signed for. Held
+    // by reference in the prepared payload (see
+    // [MarketPrepData.printMintAccounts]) and refilled by the same closure on
+    // a stale-blockhash rebuild, so the success payload can name the copies
+    // the buyer actually got rather than the master edition. Stays empty on
+    // the 1/1 path, which mints nothing.
+    final printMintAccounts = <String>[];
     await _flow.prepare(
       sink: _sink(emit),
       tracker: _txTracker,
@@ -750,7 +820,33 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
               ),
             ),
           );
-          return [response.result.tx];
+          // `tx` is optional on this response only because the builder answers
+          // with a `swapTx` instead when the buyer pays in a token other than
+          // the listing's currency — a route that starts with a swap quote
+          // this wallet never sends, so nothing here can reach it. Name the
+          // answer we got rather than `!` it: a null assertion would turn "the
+          // server replied with a swap we can't perform" into an opaque crash.
+          final result = response.result;
+          final tx = result.tx;
+          if (tx == null) {
+            throw AppFailure.unknown(
+              result.swapTx != null
+                  ? 'This listing has to be paid for with a token swap, which '
+                        'the wallet does not support'
+                  : 'The server returned no purchase transaction',
+            );
+          }
+          // A compressed NFT's buy can be compiled against an address lookup
+          // table that does not exist yet; `setupTx` creates it, and the buy
+          // behind it names that table, so broadcasting the buy first fails
+          // on-chain. [TransactionExecutor] signs/sends/**confirms** each tx in
+          // the batch before starting the next, so putting the setup first IS
+          // the confirmation barrier, and a setup failure aborts the buy before
+          // it is ever broadcast. Absent leaves the batch byte-for-byte what it
+          // was, with no extra prompt or send.
+          final setupTx = result.setupTx;
+          hasSetupTx = setupTx != null;
+          return [?setupTx, tx];
         } else {
           // Read the on-chain print fee (mallow fee) so the confirmation
           // sheet can show it as its own line — same source the webapp reads
@@ -786,7 +882,17 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
             // byte what it was, with no extra prompt or send.
             final setupTx = response.setupTx;
             hasSetupTx = setupTx != null;
-            return [?setupTx, ...response.result.map((e) => e.tx)];
+            // Mint and tx are read off the SAME entries in one pass, so each
+            // print keeps the key its transaction is partially signed for —
+            // `BuyEditionTxItem` says the entries are not interchangeable, and
+            // a zip in the wrong order would report a copy the buyer does not
+            // own. Cleared first because a stale-blockhash rebuild re-enters
+            // this closure and the builder answers with fresh keys.
+            final prints = response.result;
+            printMintAccounts
+              ..clear()
+              ..addAll([for (final e in prints) e.mintAccount]);
+            return [?setupTx, for (final e in prints) e.tx];
           } on DioException catch (e) {
             if (!e.isV2DeferralFallback) rethrow;
             hasSetupTx = false;
@@ -797,7 +903,14 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
                 maxPrice: maxPrice,
               ),
             );
-            return response.result.map((e) => e.tx).toList(growable: false);
+            // Same pairing as the v2 arm above: the v1 builder also
+            // partial-signs each tx for its own print mint and returns both on
+            // one entry.
+            final prints = response.result;
+            printMintAccounts
+              ..clear()
+              ..addAll([for (final e in prints) e.mintAccount]);
+            return [for (final e in prints) e.tx];
           }
         }
       },
@@ -811,6 +924,7 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
         // always names the builder that actually ran.
         flow: printsEdition ? AppFlow.editionBuy : AppFlow.fixedPriceBuy,
         hasSetupTx: hasSetupTx,
+        printMintAccounts: printMintAccounts,
         totalCost: MarketPrice(
           rawAmount: perUnit.rawAmount * event.quantity,
           currencyMint: perUnit.currencyMint,
@@ -995,10 +1109,10 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
       isOwnOffer: event.buyer == me,
       auctionCurrentBidder: auctionRead.account?.highestBidder,
       listingType: listingType,
-      isFrozen:
-          asset.frozen ||
-          asset.freezeDelegateFrozen ||
-          asset.permanentFreezeDelegateFrozen,
+      // `heldByThirdParty` folds in the freeze-delegate terms `frozen` already
+      // carries, and drops the permanent self-freeze every pNFT has — which on
+      // its own refused every pNFT offer that had no mallow listing.
+      isFrozen: asset.heldByThirdParty,
       // Undetermined ⇒ assume a listing exists, so an unreadable Listing PDA
       // can't turn a legitimately-frozen listed asset into a refusal.
       hasMallowListing: listingRead.status != OnChainReadStatus.absent,
@@ -1127,6 +1241,10 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
       },
     );
 
+    // Re-derived from every build (including a toggle re-prepare, which
+    // rebuilds the tx from scratch) so the flag always describes the batch
+    // `toPrep` is about to wrap, never a stale earlier one.
+    var hasSetupTx = false;
     await _flow.prepare(
       sink: sink,
       tracker: _txTracker,
@@ -1143,7 +1261,15 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
             targetPriorityFeeLamports: _feeConfig.priorityFeeLamports,
           ),
         );
-        return [response.result.tx];
+        // Accepting an offer on a compressed NFT can need an address lookup
+        // table the chain does not have yet; `setupTx` creates it, and the
+        // accept is compiled against it. The executor confirms each tx before
+        // starting the next, so leading with the setup is what guarantees the
+        // table exists by the time the accept is broadcast — and a failed
+        // setup aborts before the seller's asset is ever committed.
+        final setupTx = response.result.setupTx;
+        hasSetupTx = setupTx != null;
+        return [?setupTx, response.result.tx];
       },
       toPrep: (txs, _) => _prep(
         txs,
@@ -1158,6 +1284,7 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
         settleProceedsFallback: proceedsFallback,
         disablePrimarySplit: disablePrimarySplit,
         showDirectProceedsOption: showDirectProceeds,
+        hasSetupTx: hasSetupTx,
       ),
       errorPrefix: 'Failed to prepare accept offer',
     );
@@ -1292,6 +1419,7 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     MarketCancelListing event,
     Emitter<MarketState> emit,
   ) {
+    var hasSetupTx = false;
     return _flow.prepare(
       sink: _sink(emit),
       tracker: _txTracker,
@@ -1303,7 +1431,14 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
             targetPriorityFeeLamports: _feeConfig.priorityFeeLamports,
           ),
         );
-        return [response.result.tx];
+        // Delisting a compressed NFT whose proof has drifted since it was
+        // listed can need an address lookup table the chain does not have yet.
+        // The executor confirms each tx before starting the next, so the setup
+        // leading the batch is what guarantees the table exists by the time the
+        // delist — which is compiled against it — is broadcast.
+        final setupTx = response.result.setupTx;
+        hasSetupTx = setupTx != null;
+        return [?setupTx, response.result.tx];
       },
       toPrep: (txs, _) => _prep(
         txs,
@@ -1311,6 +1446,7 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
         actionType: 'cancel-listing',
         flow: AppFlow.fixedPriceCancel,
         totalCost: MarketPrice.zero(),
+        hasSetupTx: hasSetupTx,
       ),
       errorPrefix: 'Failed to prepare cancel',
     );
@@ -1349,6 +1485,7 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     MarketCancelAuction event,
     Emitter<MarketState> emit,
   ) {
+    var hasSetupTx = false;
     return _flow.prepare(
       sink: _sink(emit),
       tracker: _txTracker,
@@ -1360,7 +1497,14 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
             targetPriorityFeeLamports: _feeConfig.priorityFeeLamports,
           ),
         );
-        return [response.result.tx];
+        // Cancelling a compressed NFT's auction can need an address lookup
+        // table the chain does not have yet. The executor confirms each tx
+        // before starting the next, so the setup leading the batch is what
+        // guarantees the table exists by the time the cancel — which is
+        // compiled against it — is broadcast.
+        final setupTx = response.result.setupTx;
+        hasSetupTx = setupTx != null;
+        return [?setupTx, response.result.tx];
       },
       toPrep: (txs, _) => _prep(
         txs,
@@ -1369,6 +1513,7 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
         // Both branches are the same on-chain `cancelAuction` ix.
         flow: AppFlow.auctionCancel,
         totalCost: MarketPrice.zero(),
+        hasSetupTx: hasSetupTx,
       ),
       errorPrefix: 'Failed to prepare cancel',
     );
@@ -1410,6 +1555,7 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
             disablePrimarySplit: false,
           );
 
+    var hasSetupTx = false;
     return _flow.prepare(
       sink: _sink(emit),
       tracker: _txTracker,
@@ -1421,7 +1567,15 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
             targetPriorityFeeLamports: _feeConfig.priorityFeeLamports,
           ),
         );
-        return [response.result.tx];
+        // Settling a compressed NFT's auction can need an address lookup table
+        // the chain does not have yet. The executor confirms each tx before
+        // starting the next, so the setup leading the batch is what guarantees
+        // the table exists by the time the settle — which is compiled against
+        // it — is broadcast, and a failed setup aborts before the winner's
+        // payout is committed.
+        final setupTx = response.result.setupTx;
+        hasSetupTx = setupTx != null;
+        return [?setupTx, response.result.tx];
       },
       toPrep: (txs, _) => _prep(
         txs,
@@ -1432,6 +1586,7 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
         settleProceeds: proceeds,
         settleSimInputs: simInputs,
         settleProceedsFallback: proceedsFallback,
+        hasSetupTx: hasSetupTx,
       ),
       errorPrefix: 'Failed to prepare settle',
     );
@@ -1504,9 +1659,21 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     }
     final asset = assetResult.valueOrNull!;
 
+    // The standards `/v2/tx/assets/burn` can actually build. This is a second
+    // gate behind [ArtworkPermissionService.canBurnAsset] (re-checked below),
+    // and the two disagreeing is a bug in itself: a standard the server burns
+    // fine but this set omits shows the user a Burn action that can only ever
+    // fail here. `cnft` was exactly that — the route has dispatched
+    // `TokenStandard::Cnft` to `build_cnft_burn_ixs` (Bubblegum `Burn` / V2
+    // `BurnV2`, leaf + proof + collection all resolved server-side off the same
+    // `{authority, asset, tokenStandard}` body) all along. Everything outside
+    // this set — `objkt`, the EVM standards — the route rejects with
+    // "token standard not supported by burn route", so refusing it here saves
+    // a round trip for a guaranteed 400.
     const supported = {
       TokenStandard.nft,
       TokenStandard.pnft,
+      TokenStandard.cnft,
       TokenStandard.core,
       TokenStandard.coreCollection,
     };
@@ -1631,6 +1798,11 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
         explorerUrl: 'https://orbmarkets.io/tx/$signature',
         actionType: prep.actionType,
         mintAccount: prep.mintAccount,
+        // Read AFTER execute, so a stale-blockhash rebuild's fresh print keys
+        // are the ones reported (the list is the build closure's own — see
+        // [MarketPrepData.printMintAccounts]). Empty for every non-edition
+        // action.
+        printMintAccounts: List.unmodifiable(prep.printMintAccounts),
       ),
     );
   }
@@ -1723,7 +1895,15 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     // see [MarketPrepData.hasSetupTx]. Leaving `isSimulating` false and the
     // result null falls the breakdown back to the static fee estimate, which is
     // the same path an un-simulated action already takes.
-    if (prep.hasSetupTx) return;
+    if (prep.hasSetupTx) {
+      // Except on a seller-side payout, where the static estimate covers gas
+      // only: "You'll receive" is resolved from the simulation, so skipping it
+      // outright would shimmer that line forever while the seller is asked to
+      // confirm an irreversible sale. Land on the arithmetic split instead —
+      // the same fallback a simulation that ran and couldn't answer takes.
+      if (prep.settleSimInputs != null) _emitSettleFallback(emit);
+      return;
+    }
     emit(
       TxFlowReady(
         prep.copyWith(

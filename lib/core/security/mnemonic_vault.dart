@@ -9,9 +9,14 @@ import 'package:injectable/injectable.dart';
 /// prompt and do not require a device lock screen: the user-facing gate is the
 /// app's own dual-lock (PIN and/or biometric app-lock), not this store.
 ///
+/// Writes are update-or-add on both platforms: a failed write leaves the
+/// stored value as it was. Nothing here deletes before it writes.
+///
 /// Errors:
-///   PlatformException(write_failed) — keychain/keystore write failed
-///   PlatformException(read_failed)  — keychain/keystore read/decrypt failed
+///   PlatformException(write_failed)  — keychain/keystore write failed
+///   PlatformException(read_failed)   — keychain/keystore read/decrypt failed
+///   PlatformException(delete_failed) — keychain/keystore delete failed
+///   PlatformException(list_failed)   — enumeration failed
 @lazySingleton
 class MnemonicVault {
   static const _channel = MethodChannel('art.mallow.wallet/mnemonic_vault');
@@ -35,8 +40,22 @@ class MnemonicVault {
     });
   }
 
-  /// Delete the value for [key]. No-op if not found.
+  /// Delete the value for [key]. No-op if not found; any other failure throws
+  /// `PlatformException(delete_failed)`, so a wipe cannot report "clean" while
+  /// a secret is still in the keystore.
   Future<void> delete(String key) async {
     await _channel.invokeMethod<void>('delete', {'key': key});
+  }
+
+  /// Every key currently stored, including ones the app has lost track of.
+  ///
+  /// Two callers only: the explicit wipes (Reset app, Start fresh), which
+  /// sweep the store so no secret outlives the identity it belonged to; and
+  /// the DB-key re-mint path, which uses an empty listing as one sign of a
+  /// device migration. Nothing decides from a listing that a secret *should*
+  /// exist — a normal launch never consults it.
+  Future<List<String>> listKeys() async {
+    final keys = await _channel.invokeListMethod<String>('listKeys');
+    return keys ?? const [];
   }
 }

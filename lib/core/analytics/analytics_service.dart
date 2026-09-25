@@ -243,6 +243,22 @@ class AnalyticsService {
     await _prefs.setAnalyticsQueue(jsonEncode(_queue));
   }
 
+  /// Forget the persistent device identity and mint a new one.
+  ///
+  /// Called on app reset so the next onboarding is not attributed to the
+  /// previous identity's analytics user — the device id survives reinstall on
+  /// iOS and is written with default storage options, so the reset's secure-
+  /// storage sweep does not reach it. Anything still queued was recorded under
+  /// the old identity and is dropped, not flushed.
+  Future<void> resetDeviceIdentity() async {
+    await discardQueue();
+    await _secureStorage.delete(key: _deviceIdKey);
+    _deviceId = null;
+    if (_initialized) {
+      _deviceId = await _resolveDeviceId();
+    }
+  }
+
   /// Single entry point for flipping telemetry consent. One switch governs
   /// both pipelines — this queue and the Sentry hub — and both must stop
   /// within this session, not on next launch. Any future writer of the

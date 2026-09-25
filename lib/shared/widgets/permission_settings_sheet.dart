@@ -23,6 +23,22 @@ enum AppPermission {
     settingsType: AppSettingsType.notification,
     androidHint: 'Turn them on in Settings › Apps › mallow › Notifications.',
     iosHint: 'Turn them on in Settings › Notifications › mallow.',
+  ),
+
+  /// Seed Vault can be permanently denied while the device still reports
+  /// Seed Vault as available, so the import row renders and then dead-ends.
+  /// This is the way back out of that.
+  ///
+  /// [iosHint] repeats the Android wording because it is unreachable:
+  /// Seed Vault exists only on Android, and every entry point is gated on the
+  /// availability probe, which is false on iOS.
+  seedVault(
+    title: 'Seed Vault access needed',
+    message:
+        'mallow needs access to Seed Vault to import the accounts it holds.',
+    settingsType: AppSettingsType.settings,
+    androidHint: 'Turn it on in Settings › Apps › mallow › Permissions.',
+    iosHint: 'Turn it on in Settings › Apps › mallow › Permissions.',
   );
 
   const AppPermission({

@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_api/mallow_api.dart' show RaffleUserState;
+import 'package:mallow_wallet/core/config/store_build.dart';
 import 'package:mallow_wallet/core/crypto/wallet_manager.dart';
 import 'package:mallow_wallet/core/models/account.dart';
 import 'package:mallow_wallet/core/security/secure_storage.dart';
@@ -91,6 +92,28 @@ const other = 'other-addr';
 const artist = 'artist-addr';
 
 void main() {
+  test('synthetic master has no asset-level action for any viewer state', () {
+    const master = 'cnft-master-collection-hash';
+    for (final address in <String?>[null, owner, other]) {
+      final state = resolveArtworkActionState(
+        artwork: artwork(
+          mint: master,
+          listingType: ListingType.buyNow,
+          ownerAddress: owner,
+        ),
+        currentAddress: address,
+        creatorLinkedAddresses: const {},
+        permissions: const ArtworkPermissions(
+          canTransfer: true,
+          canEdit: true,
+          canBurn: true,
+          canList: true,
+        ),
+      );
+      expect(state, isA<ArtworkNoAction>());
+    }
+  });
+
   group('disconnected (currentAddress == null)', () {
     test('buyNow → "Sign in to buy"', () {
       final s = resolveArtworkActionState(
@@ -2352,6 +2375,92 @@ void main() {
       final s = resolveArtworkActionState(
         artwork: artwork(listingType: ListingType.buyNow, chain: 'solana'),
         currentAddress: other,
+        creatorLinkedAddresses: const {},
+        permissions: null,
+      );
+      expect(s, isA<ArtworkBuyAction>());
+    });
+  });
+
+  group('store build (kShowNftCommerce off)', () {
+    // The iOS store build hides the paid side of the marketplace. Two things
+    // the resolver owns follow the flag: the connect-wallet label must not
+    // promise a purchase the sheet behind it will not offer, and an owner
+    // must not be offered "List artwork" — forced here rather than in the
+    // sheet so the `!canList && !canSend → no sheet` rule still holds.
+    setUp(() => debugShowNftCommerceOverride = false);
+    tearDown(() => debugShowNftCommerceOverride = null);
+
+    test('connect labels fall back to "Sign in to view" for paid actions', () {
+      final now = DateTime.utc(2026);
+      final cases = <ArtworkDetails>[
+        artwork(listingType: ListingType.buyNow),
+        artwork(),
+        artwork(
+          listingType: ListingType.auction,
+          auctionMetadata: AuctionMetadata(
+            endsAt: now.add(const Duration(hours: 1)),
+          ),
+        ),
+        artwork(listingType: ListingType.raffle),
+        artwork(listingType: ListingType.gumball),
+      ];
+      for (final a in cases) {
+        final s = resolveArtworkActionState(
+          artwork: a,
+          currentAddress: null,
+          creatorLinkedAddresses: const {},
+          permissions: null,
+          now: now,
+        );
+        expect(
+          (s as ArtworkConnectWalletAction).label,
+          'Sign in to view',
+          reason: '${a.listingType} must not advertise a purchase',
+        );
+      }
+    });
+
+    test('owner + canList permission → canList false, Send kept', () {
+      final s = resolveArtworkActionState(
+        artwork: artwork(ownerAddresses: [owner]),
+        currentAddress: owner,
+        creatorLinkedAddresses: const {},
+        permissions: const ArtworkPermissions(
+          canTransfer: true,
+          canEdit: true,
+          canBurn: true,
+          canList: true,
+        ),
+      );
+      expect(s, isA<ArtworkOwnerUnlistedAction>());
+      expect((s as ArtworkOwnerUnlistedAction).canList, isFalse);
+      expect(s.canSend, isTrue);
+    });
+
+    test('owner who can list but not send → no sheet at all', () {
+      // With List hidden and Send unavailable the sheet would be empty.
+      final s = resolveArtworkActionState(
+        artwork: artwork(ownerAddresses: [owner]),
+        currentAddress: owner,
+        creatorLinkedAddresses: const {},
+        permissions: const ArtworkPermissions(
+          canTransfer: false,
+          canEdit: true,
+          canBurn: true,
+          canList: true,
+        ),
+      );
+      expect(s, isA<ArtworkNoAction>());
+    });
+
+    test('the listed-viewer states still resolve — the sheet shows price and '
+        'status, the CTA is dropped by the sheet', () {
+      // The hide is a rendering decision inside the sheets (price and status
+      // stay visible), so the resolver keeps returning the buy states.
+      final s = resolveArtworkActionState(
+        artwork: artwork(listingType: ListingType.buyNow, ownerAddress: other),
+        currentAddress: owner,
         creatorLinkedAddresses: const {},
         permissions: null,
       );

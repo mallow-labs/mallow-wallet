@@ -412,8 +412,16 @@ class LedgerConnectBloc extends Bloc<LedgerConnectEvent, LedgerConnectState> {
       final existingWallets = await _walletRepo.getAllWallets();
       final existingAddresses = existingWallets.map((w) => w.address).toSet();
 
-      // Stored names of already-imported hardware accounts, keyed by derivation
+      // Stored names of already-imported Ledger accounts, keyed by derivation
       // index, so a user-edited name shows in the picker instead of `Account NN`.
+      //
+      // `hardware` only — deliberately not the Seed Vault kind, even though
+      // that is a hardware wallet too. A name here means "this index already
+      // has an account, so importing it consumes no new account number". A
+      // Seed Vault account at the same index is a *different* account, and a
+      // Ledger import at that index still allocates one, so borrowing its name
+      // would preview a number the import never assigns and shift every card
+      // below it.
       final importedNames = <int, String>{
         for (final a in await _walletRepo.getAccountViews())
           if (a.kind == AccountKind.hardware && a.derivationIndex != null)
@@ -680,6 +688,17 @@ class LedgerConnectBloc extends Bloc<LedgerConnectEvent, LedgerConnectState> {
       _trackImported(_activeChain);
     } on DuplicateWalletException {
       emit(const LedgerConnectState.error('One or more wallets already exist'));
+      _trackImportFailed(FailureReason.unknown);
+    } on GraphSyncException {
+      // Importing an address a view-only wallet already holds supersedes that
+      // wallet, and pruning it from the recovery graph is the commit point of
+      // its removal. Named here so the user reads the reason instead of the
+      // raw keystore error AppFailure.from would put in the message.
+      emit(
+        const LedgerConnectState.error(
+          'Could not update recovery data. Please try again.',
+        ),
+      );
       _trackImportFailed(FailureReason.unknown);
     } catch (e) {
       // Ledger-specific signing failures (SigningException and friends) are

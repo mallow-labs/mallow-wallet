@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import '../../../shared/widgets/loading_indicator.dart';
 
-import '../../../core/crypto/wallet_manager.dart';
 import '../../../core/router/auth_state_notifier.dart';
+import '../../../core/security/app_lock_bloc.dart';
+import '../../../core/services/app_reset_service.dart';
 import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
+import '../../../shared/widgets/app_snack_bar.dart';
 import '../../../shared/widgets/mallow_checkbox.dart';
 import '../widgets/settings_page_scaffold.dart';
 
@@ -28,14 +31,41 @@ class _ResetAppScreenState extends State<ResetAppScreen> {
     if (_resetting) return;
     setState(() => _resetting = true);
 
-    try {
-      await sl<WalletManager>().deleteWallet();
-      if (!mounted) return;
-      await sl<AuthStateNotifier>().onLogout();
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _resetting = false);
+    final authNotifier = sl<AuthStateNotifier>();
+    // The app-provided AppLock instance (a factory in DI — read the one wired
+    // into the widget tree, not a fresh sl() instance).
+    final appLock = context.read<AppLockBloc>();
+
+    // Best-effort teardown: it never throws, it reports. A partial failure is
+    // shown but still logs the user out — a half-wiped device must not look
+    // signed in.
+    final failures = await AppResetService.fromLocator().resetApp(
+      reason: ResetReason.resetApp,
+    );
+
+    // Drop the in-memory lock state, whatever the wipe reported. The PIN hash
+    // the bloc verifies against was just deleted, so a bloc still holding
+    // `unlocked(hasPin: true)` raises the LockScreen overlay on the next
+    // background and no PIN can clear it. A half-wiped device must not keep a
+    // live unlocked state either, so this runs before the failure check.
+    appLock.add(const AppLockEvent.reset());
+
+    if (mounted && failures.isNotEmpty) {
+      AppSnackBar.show(
+        context,
+        'Some data could not be erased. Please try again.',
+        type: AppSnackBarType.error,
+      );
     }
+
+    // Unconditional, and deliberately not behind the `mounted` guard: only the
+    // snack bar needs the context. The wipe takes seconds and the header's back
+    // arrow stays live, so a back tap unmounts this screen mid-wipe — and the
+    // logout is what tells the router the wallets are gone. Skipping it there
+    // left the app on signed-in routes over a wiped database until the next
+    // cold start. It is best-effort by contract: it notifies its listeners
+    // whatever the flag delete does, so nothing here can strand the spinner.
+    await authNotifier.onLogout();
   }
 
   @override

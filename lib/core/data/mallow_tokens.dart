@@ -92,6 +92,8 @@ const String smoresMint = 'smoEhMZMweWBnpd1QoU4ZjuVNBxMFchqy4NRMBbtW7V';
 const String xnuMint = 'EKuYvkDkNxkvGgpnmDJtFyp7bpaeKffMPp5DoTSJpHjs';
 const String xnuDevMint = 'AgztsuN5VDesPvwoTosw2J5webyeHkURWKCbByG4LBAJ';
 const String ethMint = '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs';
+const String toadsMint = 'DMXBsVBwfuzc5axa2vz6Ba2BzAxcUmn6V7ZtsJFEpump';
+const String test22Mint = '8n4NpCQY8ycnkByZdGaAyYK1pGKg1ya6QXZuVoFMQWmL';
 
 /// Tezos listing currencies. Unlike the Solana tokens above these aren't
 /// mints — objkt reports a listing's currency as either the `xtz` sentinel
@@ -256,6 +258,14 @@ const List<MallowToken> _tokens = [
     coinGeckoId: 'ethereum',
     disableSwap: true,
   ),
+  MallowToken(
+    symbol: 'TOADS',
+    mint: toadsMint,
+    decimals: 6,
+    inputDecimals: 0,
+    minListingPrice: 10000000000, // 10_000 * 1e6
+    disableSwap: true,
+  ),
   // Devnet entries — kept for parity, excluded from the bid-currency picker.
   MallowToken(
     symbol: 'USDC_DEV',
@@ -273,6 +283,15 @@ const List<MallowToken> _tokens = [
     inputDecimals: 9,
     minListingPrice: 100000000000,
     disablePrice: true,
+    isDevnet: true,
+  ),
+  MallowToken(
+    symbol: 'TEST22',
+    mint: test22Mint,
+    decimals: 6,
+    inputDecimals: 3,
+    minListingPrice: 1000000,
+    disableSwap: true,
     isDevnet: true,
   ),
 ];
@@ -353,8 +372,8 @@ List<MallowToken> swappableTokens() =>
 /// USDC entry is swapped for USDC_DEV on devnet so listings use the devnet
 /// mint instead of the real mainnet one.
 List<String> get defaultListingTokenSymbols => Config.isDevnet
-    ? const ['SOL', 'mallowSOL', 'USDC_DEV', 'SMORES', 'LSP']
-    : const ['SOL', 'mallowSOL', 'USDC', 'SMORES', 'LSP'];
+    ? const ['SOL', 'mallowSOL', 'USDC_DEV', 'SMORES', 'LSP', 'TOADS', 'TEST22']
+    : const ['SOL', 'mallowSOL', 'USDC', 'SMORES', 'LSP', 'TOADS'];
 
 /// Tokens eligible for the seller's currency picker — the default short list
 /// plus any extra mints the user has explicitly enabled on their profile

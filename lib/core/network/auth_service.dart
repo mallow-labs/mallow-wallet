@@ -10,12 +10,12 @@ import '../analytics/analytics_service.dart';
 import '../config/environment.dart';
 import '../crypto/exceptions.dart';
 import '../crypto/wallet_manager.dart';
+import '../models/account.dart';
 import '../observability/app_logger.dart';
 import '../security/secure_storage.dart';
 import '../services/preferences_service.dart';
-import '../services/push_notification_service.dart';
 import '../session/session_manager.dart';
-import 'ledger_verify_controller.dart';
+import 'hardware_verify_controller.dart';
 
 import '../../shared/utils/chain.dart';
 
@@ -119,14 +119,19 @@ class AuthService extends ChangeNotifier {
   /// Whether there is an active session.
   bool get hasSession => _sessionState == SessionState.authenticated;
 
-  /// True if the active wallet is a Ledger AND we don't have a usable
-  /// wallet-sig cookie cached for it — i.e. callers about to perform an
-  /// action that implies wallet identity (e.g. casting) should prompt the
-  /// user through [LedgerVerifyController] before proceeding.
-  Future<bool> currentWalletNeedsLedgerVerification() async {
+  /// True if the active wallet signs on external hardware (Ledger or
+  /// Seed Vault) AND we don't have a usable wallet-sig cookie cached for it
+  /// — i.e. callers about to perform an action that implies wallet identity
+  /// (e.g. casting) should prompt the user through [HardwareVerifyController]
+  /// before proceeding.
+  ///
+  /// Hardware-generic because the answer is the same for both devices: the
+  /// signature needs an approval outside this process, so it cannot be
+  /// conjured mid-action.
+  Future<bool> currentWalletNeedsHardwareVerification() async {
     final addr = _currentAddress;
     if (addr == null) return false;
-    if (!await _walletManager.isLedgerWallet(addr)) return false;
+    if (!await _walletManager.isHardwareWallet(addr)) return false;
     final cached =
         _walletSigCookies[addr] ?? await _storage.loadWalletSigCookie(addr);
     if (cached == null || cached.isEmpty) return true;
@@ -205,9 +210,9 @@ class AuthService extends ChangeNotifier {
   /// Silently obtain a `wallet-sig` for [address] in the background — the same
   /// path login runs for the active wallet, exposed so callers can widen the
   /// signature gate to a *non-active* session wallet WITHOUT switching the
-  /// active signer. HD, imported and social wallets sign immediately; Ledger,
-  /// view-only and key-less social wallets are deferred/skipped (see
-  /// [_verifySignatureIfPossible]).
+  /// active signer. HD, imported and social wallets sign immediately; hardware
+  /// (Ledger, Seed Vault), view-only and key-less social wallets are
+  /// deferred/skipped (see [_verifySignatureIfPossible]).
   Future<void> verifySessionWallet(String address) =>
       _verifySignatureIfPossible(address);
 
@@ -328,15 +333,27 @@ class AuthService extends ChangeNotifier {
     _pendingSwitchAddress = null;
     _pendingSwitchCompleter = null;
 
-    // Unregister push token before clearing session
-    try {
-      await GetIt.instance<PushNotificationService>().unregister();
-    } catch (e) {
-      AppLogger.warn(_tag, 'Failed to unregister push token: $e');
-    }
+    // Push is deliberately NOT unregistered here. The device's token is mapped
+    // to the wallets held on this device, not to a session: those wallets are
+    // still present after a logout, so their notifications should keep
+    // arriving. A wipe removes the wallets, and the resulting
+    // `WalletRepository` mutation re-syncs an empty set on its own.
 
     await _clearSession();
+    // The per-address ownership proofs go with the session. Not inside
+    // _clearSession: the wallet-switch path clears the session too, and there
+    // the map must survive — multi-wallet reads legitimately widen across the
+    // sigs of every wallet the user holds.
+    _walletSigCookies.clear();
     notifyListeners();
+  }
+
+  /// Forget the in-memory wallet-sig proof for [address] — called when a
+  /// wallet is removed from the device, so a later re-import of the same
+  /// address cannot ride on the removed wallet's proof. The on-disk copy is
+  /// the repository's to delete.
+  void forgetWalletSig(String address) {
+    _walletSigCookies.remove(_cookieAddress(address));
   }
 
   // ---------------------------------------------------------------------------
@@ -421,19 +438,27 @@ class AuthService extends ChangeNotifier {
       }
     }
 
-    // Ledger wallets require interactive BLE verification via bottom sheet
-    final isLedger = await _walletManager.isLedgerWallet(address);
-    if (isLedger) {
+    // Ledger proves ownership by signing a memo *transaction* over BLE — a
+    // shape only [LedgerAuthService], inside the verify sheet, produces, and
+    // one the ordinary handshake below cannot. Seed Vault signs the challenge
+    // verbatim, so it falls through to that handshake and its OS approval
+    // screen appears there: this method only ever runs from a user action, so
+    // an approval is what the user just asked for.
+    if (await _walletManager.isHardwareWallet(address) &&
+        await hardwareVerifyDeviceFor(address) == WalletType.ledger) {
       AppLogger.debug(
         _tag,
         'Ledger wallet — routing to interactive verification',
       );
-      final controller = GetIt.instance<LedgerVerifyController>();
-      final success = await controller.requestVerification(address);
+      final controller = GetIt.instance<HardwareVerifyController>();
+      final success = await controller.requestVerification(
+        address,
+        walletType: WalletType.ledger,
+      );
       if (!success) {
-        throw LedgerVerificationCancelledException();
+        throw HardwareVerificationCancelledException();
       }
-      return; // JWT already cached by LedgerVerifySheet
+      return; // JWT already cached by HardwareVerifySheet
     }
 
     // Step 1: Request auth token
@@ -569,9 +594,10 @@ class AuthService extends ChangeNotifier {
   /// `/v0/authToken/verify` never ran and nothing ever upgraded the public
   /// render. `currentUser.perks` then stayed empty for the whole session and an
   /// owned perk read as unowned. Priming costs one disk read and no extra round
-  /// trip, and it covers the wallets that skip the handshake entirely — Ledger,
-  /// and a social row whose key needs an interactive re-login — for which the
-  /// login response is the only route to a privileged render.
+  /// trip, and it covers the wallets that skip the handshake entirely —
+  /// hardware wallets, and a social row whose key needs an interactive
+  /// re-login — for which the login response is the only route to a privileged
+  /// render.
   ///
   /// Best-effort: a storage failure must not break login.
   Future<void> _primeWalletSigCookie(String address) async {
@@ -846,8 +872,8 @@ class AuthService extends ChangeNotifier {
   /// Request an auth token, sign it, and verify with the backend.
   ///
   /// Wallets that cannot sign silently are skipped: view-only ones hold no key,
-  /// Ledger needs an on-device confirmation, and a social wallet whose stored
-  /// key is missing needs an interactive re-login.
+  /// hardware wallets need an approval outside this process, and a social
+  /// wallet whose stored key is missing needs an interactive re-login.
   ///
   /// When [forceRefresh] is true, the cache check is skipped (used by the
   /// retry interceptor after a 401).
@@ -882,15 +908,20 @@ class AuthService extends ChangeNotifier {
         }
       }
 
-      // Ledger wallets require interactive BLE confirmation — popping the
-      // connect/verify sheet during a background login is jarring. Defer the
-      // wallet-sig handshake until the user takes an action that actually
-      // needs it (see [signAndVerifyForWallet], which routes through
-      // [LedgerVerifyController]).
-      if (await _walletManager.isLedgerWallet(address)) {
+      // 🛑 Hardware wallets are deferred, both of them. Ledger needs a BLE
+      // connect and an on-device confirmation; Seed Vault raises a full-screen
+      // OS approval Activity. Every caller of this method reaches it without a
+      // user action — the post-login warm-up, a resume, [verifySessionWallet]
+      // — so a prompt here has nothing behind it. On Seed Vault that is worse
+      // than a stray bottom sheet: an approval screen the user did not ask for
+      // reads as a system-level security event, on every cold start and every
+      // resume. Defer until the user does something that actually needs it
+      // (see [signAndVerifyForWallet], and the 401 retry below, which takes
+      // consent on a sheet of ours first).
+      if (await _walletManager.isHardwareWallet(address)) {
         AppLogger.debug(
           _tag,
-          'Skipping background signature verification for Ledger '
+          'Skipping background signature verification for hardware '
           'wallet $address — will sign on demand',
         );
         return;
@@ -920,49 +951,7 @@ class AuthService extends ChangeNotifier {
         return;
       }
 
-      // Step 1: Request auth token
-      AppLogger.debug(
-        _tag,
-        'Requesting auth token for signature verification...',
-      );
-      final tokenResponse = await _api.getAuthToken(
-        AuthTokenRequest(address: cookieAddress),
-      );
-      final token = tokenResponse.result;
-
-      // Step 2: Sign the chain-specific login challenge with the wallet matching
-      // this address (not the active wallet, which may differ after
-      // switchWallet). Throws ViewOnlyWalletException for view-only wallets;
-      // social wallets sign locally from their stored key.
-      final signature = await _walletManager.signLoginChallengeForAddress(
-        address,
-        message: _loginMessagePrefix,
-        token: token,
-      );
-
-      // Step 3: Verify with backend via raw Dio to capture Set-Cookie header
-      final response = await _dio.post<Map<String, dynamic>>(
-        '${Config.apiBaseUrl}/v0/authToken/verify',
-        data: _verifyBody(cookieAddress, signature),
-      );
-
-      // Step 4: Extract and cache the wallet-sig JWT from Set-Cookie
-      final jwt = _extractWalletSigCookie(response.headers, cookieAddress);
-      if (jwt != null) {
-        await _storage.storeWalletSigCookie(cookieAddress, jwt);
-        _walletSigCookies[cookieAddress] = jwt;
-        _refreshAuthInterceptor();
-        AppLogger.debug(_tag, 'Wallet-sig JWT cached for $cookieAddress');
-      }
-
-      // Store session expiry if present
-      final resultData = response.data?['result'] as Map<String, dynamic>?;
-      final expiresAt = resultData?['expiresAt'] as String?;
-      if (expiresAt != null) {
-        await _storage.storeSessionExpiry(expiresAt);
-      }
-
-      await _adoptPrivilegedUser(response.data, cookieAddress);
+      await _signAndCacheWalletSig(address);
 
       AppLogger.debug(_tag, 'Signature verification succeeded');
     } on ViewOnlyWalletException {
@@ -975,6 +964,66 @@ class AuthService extends ChangeNotifier {
       // Non-fatal: basic login already succeeded
       AppLogger.warn(_tag, 'Signature verification failed (non-fatal): $e');
     }
+  }
+
+  /// The wallet-sig handshake itself: request a challenge token, sign it with
+  /// the wallet matching [address], verify with the backend and cache the JWT
+  /// the response sets.
+  ///
+  /// Split out of [_verifySignatureIfPossible] so the 401 retry can run it for
+  /// a Seed Vault wallet *after* the user has consented on a sheet — the gates
+  /// [_verifySignatureIfPossible] applies before calling this exist to keep
+  /// background callers from prompting, and must not be reachable with an
+  /// "except this once" flag.
+  ///
+  /// Throws on failure (including [ViewOnlyWalletException] from the signer);
+  /// [_verifySignatureIfPossible] is what makes a background attempt non-fatal.
+  Future<void> _signAndCacheWalletSig(String address) async {
+    final cookieAddress = _cookieAddress(address);
+
+    // Step 1: Request auth token
+    AppLogger.debug(
+      _tag,
+      'Requesting auth token for signature verification...',
+    );
+    final tokenResponse = await _api.getAuthToken(
+      AuthTokenRequest(address: cookieAddress),
+    );
+    final token = tokenResponse.result;
+
+    // Step 2: Sign the chain-specific login challenge with the wallet matching
+    // this address (not the active wallet, which may differ after
+    // switchWallet). Throws ViewOnlyWalletException for view-only wallets;
+    // social wallets sign locally from their stored key.
+    final signature = await _walletManager.signLoginChallengeForAddress(
+      address,
+      message: _loginMessagePrefix,
+      token: token,
+    );
+
+    // Step 3: Verify with backend via raw Dio to capture Set-Cookie header
+    final response = await _dio.post<Map<String, dynamic>>(
+      '${Config.apiBaseUrl}/v0/authToken/verify',
+      data: _verifyBody(cookieAddress, signature),
+    );
+
+    // Step 4: Extract and cache the wallet-sig JWT from Set-Cookie
+    final jwt = _extractWalletSigCookie(response.headers, cookieAddress);
+    if (jwt != null) {
+      await _storage.storeWalletSigCookie(cookieAddress, jwt);
+      _walletSigCookies[cookieAddress] = jwt;
+      _refreshAuthInterceptor();
+      AppLogger.debug(_tag, 'Wallet-sig JWT cached for $cookieAddress');
+    }
+
+    // Store session expiry if present
+    final resultData = response.data?['result'] as Map<String, dynamic>?;
+    final expiresAt = resultData?['expiresAt'] as String?;
+    if (expiresAt != null) {
+      await _storage.storeSessionExpiry(expiresAt);
+    }
+
+    await _adoptPrivilegedUser(response.data, cookieAddress);
   }
 
   /// Replace the cached user with the privileged render `/v0/authToken/verify`
@@ -1243,9 +1292,10 @@ class _SignatureRetryInterceptor extends Interceptor {
 
   /// Re-sign and retry the request when the wallet signature has expired.
   ///
-  /// For Ledger wallets, routes through [LedgerVerifyController] to show an
-  /// interactive bottom sheet (the user must connect and confirm on device).
-  /// For all other wallets, signs silently in the background.
+  /// A 401 is trigger-blind: it can arrive from a background refresh as easily
+  /// as from a tap. So hardware wallets go through [HardwareVerifyController]
+  /// first, and nothing reaches the device until the user has agreed to it on
+  /// a sheet of ours. All other wallets sign silently in the background.
   Future<void> _handleSignatureRetry(
     DioException err,
     ErrorInterceptorHandler handler,
@@ -1267,21 +1317,31 @@ class _SignatureRetryInterceptor extends Interceptor {
     );
 
     try {
-      // Check if this is a Ledger wallet — requires interactive UI
-      final isLedger = await _authService._walletManager.isLedgerWallet(
-        address,
-      );
-
-      if (isLedger) {
+      // Hardware wallets cannot re-sign in the background: Ledger needs a BLE
+      // connect plus an on-device confirmation, and Seed Vault raises a
+      // full-screen OS approval Activity. Both get our own sheet first, so the
+      // user has a deliberate tap behind whatever the device then shows.
+      if (await _authService._walletManager.isHardwareWallet(address)) {
+        final device = await hardwareVerifyDeviceFor(address);
         AppLogger.debug(
           _tag,
-          'Ledger wallet detected — routing to interactive verification',
+          'Hardware wallet detected — routing to interactive verification',
         );
-        final controller = GetIt.instance<LedgerVerifyController>();
-        final success = await controller.requestVerification(address);
-        if (!success) {
-          AppLogger.warn(_tag, 'Ledger verification cancelled or failed');
+        final controller = GetIt.instance<HardwareVerifyController>();
+        final consented = await controller.requestVerification(
+          address,
+          walletType: device,
+        );
+        if (!consented) {
+          AppLogger.warn(_tag, 'Hardware verification cancelled or failed');
           return handler.next(err);
+        }
+        // The Ledger sheet performs the whole handshake itself and has already
+        // cached the JWT. Seed Vault's sheet only collects consent, so the
+        // signature — and with it the OS approval screen — happens here, now
+        // that the user has asked for it.
+        if (device == WalletType.seedVault) {
+          await _authService._signAndCacheWalletSig(address);
         }
       } else {
         // Existing silent signing flow for HD / importedKey / social wallets
@@ -1375,21 +1435,25 @@ class SignatureRequiredException implements Exception {
   String toString() => 'SignatureRequiredException: $message';
 }
 
-/// Thrown when the interactive Ledger connect + verify sheet does not produce a
-/// wallet-sig — the user dismissed it, or the BLE/APDU exchange failed. The
-/// sheet itself already shows the specific reason, so a caller catching this
-/// only needs to abort with its own short copy.
+/// Thrown when the interactive hardware verify sheet does not produce a
+/// wallet-sig — the user dismissed it, or the exchange with the device failed.
+/// The sheet itself already shows the specific reason, so a caller catching
+/// this only needs to abort with its own short copy.
+///
+/// One type for both devices: a caller can do nothing with the distinction
+/// (either way the user backed out of an approval), and an exception hierarchy
+/// for a single catch site buys nothing.
 ///
 /// Typed on purpose: without it a caller cannot tell a dismissed sheet from a
 /// storage/database failure on the same wallet, and ends up guessing from
 /// `walletType.isHardware`.
-class LedgerVerificationCancelledException implements Exception {
-  LedgerVerificationCancelledException([
-    this.message = 'Ledger verification cancelled',
+class HardwareVerificationCancelledException implements Exception {
+  HardwareVerificationCancelledException([
+    this.message = 'Hardware wallet verification cancelled',
   ]);
 
   final String message;
 
   @override
-  String toString() => 'LedgerVerificationCancelledException: $message';
+  String toString() => 'HardwareVerificationCancelledException: $message';
 }

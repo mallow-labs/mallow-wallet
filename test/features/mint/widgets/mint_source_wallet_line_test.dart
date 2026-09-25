@@ -139,6 +139,14 @@ void main() {
         result: UnsignedTxResponse(tx: 'dummy'),
       ),
     );
+    // `buildEditNftTx` returns the setup-aware envelope (the cNFT edit can
+    // answer with a lookup-table `setupTx`); `buildMintNftTx` still returns
+    // the plain one. Both dummies are needed — neither replaces the other.
+    provideDummy<ApiResponse<UnsignedTxWithSetupResponse>>(
+      const ApiResponse<UnsignedTxWithSetupResponse>(
+        result: UnsignedTxWithSetupResponse(tx: 'dummy'),
+      ),
+    );
     provideDummy<Result<String, AppFailure>>(const ResultSuccess('dummy'));
   });
 

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -159,6 +160,35 @@ class _LockScreenState extends State<LockScreen> {
                       _formatCooldownMessage(cooldownUntil),
                       style: MallowTheme.uiLabel.copyWith(
                         color: context.mallowColors.error,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                    // There is no in-app PIN reset (nothing could verify it
+                    // without the PIN), so once the ladder kicks in, say what
+                    // the way out is: the recovery phrase.
+                    //
+                    // What a reinstall costs differs by platform, and the
+                    // difference is the wallet itself, so the copy does too.
+                    // On iOS the Keychain outlives the uninstall, so the
+                    // reinstall lands on the Restore screen, whose Start fresh
+                    // is gated but not PIN-locked for exactly this case. On
+                    // Android nothing survives the uninstall — the app's
+                    // storage and its keystore aliases go with it, there is no
+                    // Restore screen to land on, and a user who reinstalls
+                    // without the phrase has destroyed the only copy of the
+                    // wallet that was on the device.
+                    const SizedBox(height: MallowTheme.spacingSm),
+                    Text(
+                      defaultTargetPlatform == TargetPlatform.android
+                          ? 'Forgot your PIN? Your recovery phrase is the only '
+                                'way back. Reinstalling the app erases the '
+                                'wallet stored on this device, so make sure '
+                                'you have the phrase first.'
+                          : 'Forgot your PIN? You will need your recovery '
+                                'phrase: reinstall the app, choose Start '
+                                'fresh, then import it.',
+                      style: MallowTheme.uiMeta.copyWith(
+                        color: context.mallowColors.textSecondary,
                       ),
                       textAlign: TextAlign.center,
                     ),

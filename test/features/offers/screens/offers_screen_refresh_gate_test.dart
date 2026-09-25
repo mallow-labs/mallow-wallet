@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import 'package:mallow_api/mallow_api.dart' as api;
 import 'package:mallow_wallet/core/config/remote_config.dart';
 import 'package:mallow_wallet/core/config/remote_config_service.dart';
+import 'package:mallow_wallet/core/config/store_build.dart';
 import 'package:mallow_wallet/core/result/app_failure.dart';
 import 'package:mallow_wallet/core/services/avatar_service.dart';
 import 'package:mallow_wallet/di.dart';
@@ -114,6 +115,7 @@ void main() {
     late _MockTokenBalanceBloc tokenBalanceBloc;
 
     setUpAll(() {
+      registerFallbackValue(const MarketEvent.reset());
       sl.registerLazySingleton<AvatarService>(
         () => AvatarService.forTest(_MockDio(), cacheDir: Directory.systemTemp),
       );
@@ -299,6 +301,48 @@ void main() {
         verify(
           () => offersBloc.add(const OffersInboxEvent.refresh()),
         ).called(1);
+      },
+    );
+
+    // A store build that hides NFT commerce (the iOS App Store build) keeps
+    // received offers as information: accepting is the paid side
+    // (`offer-accept`), so "View" on a received offer opens the artwork the
+    // way a bid row does, and never arms the signer switch or the market
+    // pipeline. The placed side is untouched — cancelling is the escape hatch.
+    testWidgets(
+      'with commerce hidden, View on a received offer opens the artwork and '
+      'arms nothing',
+      (tester) async {
+        debugShowNftCommerceOverride = false;
+        addTearDown(() => debugShowNftCommerceOverride = null);
+        whenListen(
+          marketBloc,
+          const Stream<MarketState>.empty(),
+          initialState: const TxFlowIdle<MarketPrepData, MarketSuccessData>(),
+        );
+
+        final router = GoRouter(
+          routes: [
+            GoRoute(path: '/', builder: (_, _) => const OffersScreen()),
+            GoRoute(
+              path: '/artwork/:mint',
+              builder: (_, _) =>
+                  const Scaffold(body: Center(child: Text('artwork'))),
+            ),
+          ],
+        );
+        addTearDown(router.dispose);
+
+        await tester.pumpWidget(MaterialApp.router(routerConfig: router));
+        await tester.pumpAndSettle();
+
+        // The default fixture is a *received offer* (see setUp), which with
+        // commerce shown would re-point the signer and open the accept flow.
+        await tester.tap(find.text('View'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('artwork'), findsOneWidget);
+        verifyNever(() => marketBloc.add(any()));
       },
     );
   });

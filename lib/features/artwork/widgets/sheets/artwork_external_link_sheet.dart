@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import '../../../../core/config/store_build.dart';
 
 import '../../../../shared/theme/mallow_theme.dart';
 import '../../../../shared/utils/artwork_web_link.dart';
@@ -38,12 +39,16 @@ class ArtworkExternalLinkSheet extends StatelessWidget {
             'This sale runs on the mallow web app.',
             style: MallowTheme.uiCaption.copyWith(color: colors.textSecondary),
           ),
-          const SizedBox(height: MallowTheme.spacingMd),
-          MallowButton(
-            label: 'View on mallow web',
-            onPressed: () => _openOnWeb(context),
-            isFullWidth: true,
-          ),
+          // The outlink lands on the sale's purchase page, so it goes with
+          // `kShowNftCommerce`; the explanation above stays either way.
+          if (showNftCommerce) ...[
+            const SizedBox(height: MallowTheme.spacingMd),
+            MallowButton(
+              label: 'View on mallow web',
+              onPressed: () => _openOnWeb(context),
+              isFullWidth: true,
+            ),
+          ],
         ],
       ),
     );

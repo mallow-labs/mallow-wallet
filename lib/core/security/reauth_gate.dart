@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import '../../di.dart';
 import '../../shared/widgets/confirm_sheet.dart';
 import '../../shared/widgets/pin_prompt_sheet.dart';
+import '../observability/app_logger.dart';
 import 'biometric_auth.dart';
 import 'secure_storage.dart';
 
@@ -13,15 +14,28 @@ import 'secure_storage.dart';
 ///
 /// Behaviour (the "correctly working method" — never auto-passes a cancel):
 /// • Neither biometric nor a PIN configured → nothing to challenge with, so it
-///   returns true (the app has no lock at all).
+///   returns true (the app has no lock at all). That conclusion has to be
+///   *read*, not assumed: a store that cannot answer denies instead, and a PIN
+///   that reads absent once is re-read before it is believed (see
+///   [SecureWalletStorage.loadAuthFactors]).
 /// • Biometric enabled → prompt; success passes. A cancelled / failed /
 ///   unavailable attempt does NOT pass — it falls through to the PIN sheet when
 ///   a PIN exists, otherwise the gate is denied. The earlier bug was treating
 ///   "no PIN" as a pass after a cancelled biometric.
 Future<bool> requireReauth(BuildContext context) async {
   final storage = sl<SecureWalletStorage>();
-  final biometricsEnabled = await storage.loadBiometricEnabled();
-  final hasPin = await storage.hasPin();
+  final bool biometricsEnabled;
+  final bool hasPin;
+  try {
+    final factors = await storage.loadAuthFactors();
+    biometricsEnabled = factors.biometricEnabled;
+    hasPin = factors.hasPin;
+  } catch (e) {
+    // An unreadable store is not an unlocked one. Denying costs the user a
+    // retry; passing hands over the surface this gate exists to protect.
+    AppLogger.error('ReauthGate', 'could not read the app lock factors', e);
+    return false;
+  }
 
   // No second factor at all — nothing to gate on.
   if (!biometricsEnabled && !hasPin) return true;

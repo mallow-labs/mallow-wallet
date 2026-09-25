@@ -3,6 +3,8 @@ import 'package:go_router/go_router.dart';
 
 import '../../../core/crypto/wallet_manager.dart';
 import '../../../core/models/account.dart';
+import '../../../core/network/auth_service.dart';
+import '../../../core/observability/app_logger.dart';
 import '../../../core/router/app_router.dart';
 import '../../../core/router/auth_state_notifier.dart';
 import '../../../core/services/wallet_repository.dart';
@@ -20,6 +22,7 @@ import '../../../shared/widgets/tap_target_expander.dart';
 import '../../home/widgets/drawer_signal.dart';
 import '../../portfolio/data/wallet_balance_totals.dart';
 import '../widgets/settings_page_scaffold.dart';
+import 'edit_account_screen.dart';
 
 /// Account-level management: reorder (drag) or open an account to rename it,
 /// change its avatar, or remove it. Reached from the drawer's "Edit" button.
@@ -32,8 +35,17 @@ class EditAccountsScreen extends StatefulWidget {
 
 class _EditAccountsScreenState extends State<EditAccountsScreen> {
   List<Account> _accounts = const [];
+
+  /// See [_AccountEditRow.dismissEpoch].
+  int _dismissEpoch = 0;
   Map<String, double> _balances = const {};
   bool _loading = true;
+
+  /// A removal is in flight. `removeAccount` returns null for "nothing
+  /// matched", which this screen reads as "no wallets remain" and turns into a
+  /// logout — so a second swipe landing while the first removal is still
+  /// awaiting would sign the user out of a device that still holds wallets.
+  bool _removing = false;
 
   @override
   void initState() {
@@ -99,13 +111,81 @@ class _EditAccountsScreenState extends State<EditAccountsScreen> {
   /// to the active session we leave the session — and its re-auth — untouched
   /// and just broadcast a data change so the drawer drops the deleted row.
   Future<void> _onRemoveAccount(Account account) async {
-    final repo = sl<WalletRepository>();
-    final activeBefore = await repo.getActiveWallet();
-    final removedActive =
-        activeBefore != null &&
-        account.wallets.any((w) => w.id == activeBefore.id);
+    if (_removing) return;
+    _removing = true;
+    try {
+      await _removeAccount(account);
+    } finally {
+      _removing = false;
+    }
+  }
 
-    final replacementId = await repo.removeAccount(account.id);
+  /// Ask before the swipe completes, naming what the removal destroys — an
+  /// imported key, or a recovery phrase whose last wallets this account holds.
+  /// Both leave the device with the account and cannot be recovered from the
+  /// app.
+  Future<bool> _confirmRemoveAccount(Account account) async {
+    // A removal already in flight owns the list. Letting a second swipe
+    // through would dismiss a row this screen has not removed yet, and the
+    // handler behind it returns early — leaving a dismissed Dismissible in a
+    // list that still holds its account.
+    if (_removing) return false;
+    final message = await accountRemovalMessage(
+      sl<WalletRepository>(),
+      account,
+    );
+    if (!mounted) return false;
+    final confirmed = await showConfirmSheet(
+      context,
+      title: 'Remove account?',
+      message: message,
+      confirmLabel: 'Remove',
+      destructive: true,
+    );
+    return confirmed == true;
+  }
+
+  /// Rebuild the rows under a new key so the one the swipe already dismissed
+  /// comes back, and say why it did.
+  ///
+  /// A dismissed `Dismissible` whose item is still in the list is a framework
+  /// error on the next build ("a dismissed Dismissible widget is still part of
+  /// the tree"), so every path that leaves the account in [_accounts] has to
+  /// come through here.
+  void _restoreDismissedRow(String message) {
+    if (!mounted) return;
+    setState(() => _dismissEpoch++);
+    AppSnackBar.show(context, message, type: AppSnackBarType.error);
+  }
+
+  Future<void> _removeAccount(Account account) async {
+    final repo = sl<WalletRepository>();
+    final bool removedActive;
+    final String? replacementId;
+    try {
+      final activeBefore = await repo.getActiveWallet();
+      removedActive =
+          activeBefore != null &&
+          account.wallets.any((w) => w.id == activeBefore.id);
+      replacementId = await repo.removeAccount(account.id);
+    } on GraphSyncException {
+      // The recovery-graph write is the commit point of a removal; when it
+      // fails nothing has been deleted, so the row stays in the list.
+      _restoreDismissedRow(
+        'Could not update recovery data. Nothing was removed.',
+      );
+      return;
+    } catch (e) {
+      // Anything else that stops the removal leaves the account in the list
+      // too — the reads above included, which is why they are inside the try.
+      AppLogger.error('EditAccountsScreen', 'could not remove the account', e);
+      _restoreDismissedRow('Could not remove the account. Please try again.');
+      return;
+    }
+    // The in-memory ownership proofs go with the rows; disk is the repo's.
+    for (final w in account.wallets) {
+      sl<AuthService>().forgetWalletSig(w.address);
+    }
     if (!mounted) return;
 
     setState(() {
@@ -186,7 +266,9 @@ class _EditAccountsScreenState extends State<EditAccountsScreen> {
                           balances: _balances,
                           dragIndex: index,
                           isOnlyAccount: _accounts.length == 1,
+                          dismissEpoch: _dismissEpoch,
                           onTap: () => _onTapAccount(account),
+                          confirmRemove: () => _confirmRemoveAccount(account),
                           onRemove: () => _onRemoveAccount(account),
                         );
                       },
@@ -206,7 +288,9 @@ class _AccountEditRow extends StatelessWidget {
     required this.dragIndex,
     required this.isOnlyAccount,
     required this.onTap,
+    required this.confirmRemove,
     required this.onRemove,
+    this.dismissEpoch = 0,
     super.key,
   });
 
@@ -214,11 +298,20 @@ class _AccountEditRow extends StatelessWidget {
   final Map<String, double> balances;
   final int dragIndex;
 
+  /// Bumped by the screen when a removal is refused after the swipe finished,
+  /// so the already-dismissed Dismissible is rebuilt under a new key instead
+  /// of tripping "a dismissed Dismissible widget is still part of the tree".
+  final int dismissEpoch;
+
   /// The last account on the device can't be removed — the device must always
   /// retain at least one account (resetting the app is the only way to clear
   /// everything). When true, the swipe is refused with a message.
   final bool isOnlyAccount;
   final VoidCallback onTap;
+
+  /// Shows the confirmation sheet and reports what the user chose. Owned by
+  /// the screen, which reads what the removal would destroy before it asks.
+  final Future<bool> Function() confirmRemove;
   final VoidCallback onRemove;
 
   @override
@@ -230,7 +323,7 @@ class _AccountEditRow extends StatelessWidget {
     );
 
     return Dismissible(
-      key: ValueKey('dismiss_${account.id}'),
+      key: ValueKey('dismiss_${account.id}_$dismissEpoch'),
       direction: DismissDirection.endToStart,
       background: Container(
         color: colors.error,
@@ -248,17 +341,7 @@ class _AccountEditRow extends StatelessWidget {
           AppSnackBar.show(context, 'Your device needs at least one account.');
           return false;
         }
-        final confirmed = await showConfirmSheet(
-          context,
-          title: 'Remove account?',
-          message:
-              'This account and all of its wallets will be removed from your '
-              'device. Make sure you have backed up your recovery phrase before '
-              'proceeding.',
-          confirmLabel: 'Remove',
-          destructive: true,
-        );
-        return confirmed == true;
+        return confirmRemove();
       },
       onDismissed: (_) => onRemove(),
       // Long-press anywhere on the row starts a reorder drag.

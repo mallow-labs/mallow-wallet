@@ -43,6 +43,70 @@ if ! grep -qE '^[[:space:]]*ENV=' .env .env.local 2>/dev/null \
   echo "      --dart-define=ENV=development." >&2
 fi
 
+# Android has had no flavourless variant since the store split, so a build with
+# no --flavor is a trap. Gradle's assembleDebug writes app-play-debug.apk and
+# app-dappstore-debug.apk and never app-debug.apk — which is the only name
+# `flutter run` looks for when no flavour is given. The build still succeeds, so
+# flutter picks up whatever stale app-debug.apk is left in
+# build/app/outputs/flutter-apk/ and installs THAT. A debug APK carries
+# libflutter.so for the target device's ABI alone, so a leftover emulator build
+# lands on a phone and dies at launch on a missing arm64 library, pointing at
+# nothing that looks like the real cause.
+#
+# iOS is the opposite: one Runner scheme, no flavours, and --flavor is an error
+# there. So resolve the target device and default the flavour only when every
+# device flutter could pick is an Android one.
+flavor_given=false
+device_selector=""
+want_device=false
+for arg in "$@"; do
+  if $want_device; then device_selector="$arg"; want_device=false; continue; fi
+  case "$arg" in
+    --flavor|--flavor=*) flavor_given=true ;;
+    -d|--device-id) want_device=true ;;
+    --device-id=*) device_selector="${arg#--device-id=}" ;;
+    -d?*) device_selector="${arg#-d}" ;;
+  esac
+done
+
+if ! $flavor_given; then
+  # Mirrors flutter's own -d resolution (see getDevicesById): a case-insensitive
+  # exact hit on id or name wins outright, otherwise every prefix hit competes.
+  # An empty selector means flutter chooses among all supported devices.
+  target_is_android=$(flutter devices --machine 2>/dev/null | awk -v sel="$device_selector" '
+    function val(s) { sub(/^[^:]*: *"/, "", s); sub(/".*$/, "", s); return s }
+    BEGIN { sel = tolower(sel); n = 0 }
+    /^  \{/               { id = ""; nm = ""; plat = ""; sup = "false"; next }
+    /^ *"id": /           { id = val($0); next }
+    /^ *"name": /         { nm = val($0); next }
+    /^ *"targetPlatform":/{ plat = val($0); next }
+    /^ *"isSupported": /  { sup = ($0 ~ /true/) ? "true" : "false"; next }
+    /^  \}/ {
+      if (sup == "true" && id != "") { ids[n] = tolower(id); nms[n] = tolower(nm); plats[n] = plat; n++ }
+      next
+    }
+    END {
+      cnt = 0
+      if (sel == "") {
+        for (i = 0; i < n; i++) pick[cnt++] = i
+      } else {
+        for (i = 0; i < n; i++) if (ids[i] == sel || nms[i] == sel) pick[cnt++] = i
+        if (cnt == 0)
+          for (i = 0; i < n; i++) if (index(ids[i], sel) == 1 || index(nms[i], sel) == 1) pick[cnt++] = i
+      }
+      if (cnt == 0) exit
+      for (j = 0; j < cnt; j++) if (plats[pick[j]] !~ /^android-/) exit
+      print "android"
+    }
+  ') || target_is_android=""
+
+  if [ "$target_is_android" = "android" ]; then
+    echo "note: Android target, so defaulting to --flavor play." >&2
+    echo "      Pass --flavor dappstore for the Solana dApp Store build." >&2
+    set -- --flavor play "$@"
+  fi
+fi
+
 # exec so Ctrl-C and the hot-reload keypresses reach flutter directly, and its
 # exit code is ours.
 exec flutter run \

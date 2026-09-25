@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:injectable/injectable.dart';
 import 'package:mallow_api/mallow_api.dart' as api;
+import '../../../shared/utils/synthetic_master.dart';
 
 /// Wraps marketplace read endpoints — listing PDA, edition purchase stats — on the v2 Rust backend. The webapp performs
 /// these reads via its own Anchor client; the Flutter wallet routes
@@ -19,7 +20,9 @@ class MarketListingRepository {
     required String mint,
     required String buyer,
   }) async {
-    if (mint.isEmpty || buyer.isEmpty) return null;
+    if (mint.isEmpty || buyer.isEmpty || isSyntheticSolanaMaster(mint)) {
+      return null;
+    }
     try {
       final response = await _apiV2.getEditionPurchaseStats(mint, buyer);
       return response.result;
@@ -34,7 +37,7 @@ class MarketListingRepository {
   /// the dispatcher's `BuyEditionSheet` vs `BuySheet` routing and the
   /// progress bar on `ArtworkBuyEditionSheet`.
   Future<api.EditionLiveState?> getEditionState(String mint) async {
-    if (mint.isEmpty) return null;
+    if (mint.isEmpty || isSyntheticSolanaMaster(mint)) return null;
     try {
       final response = await _apiV2.getEditionState(mint);
       return response.result;

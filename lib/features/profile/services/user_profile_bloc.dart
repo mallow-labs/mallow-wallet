@@ -13,7 +13,7 @@ import 'package:mallow_api/mallow_api.dart' show $ExploreFilterCopyWith;
 
 import '../../../core/models/account.dart';
 import '../../../core/network/auth_service.dart';
-import '../../../core/network/ledger_verify_controller.dart';
+import '../../../core/network/hardware_verify_controller.dart';
 import '../../../core/result/app_failure.dart';
 import '../../../core/result/result.dart';
 import '../../../core/session/session_manager.dart';
@@ -93,8 +93,8 @@ sealed class UserProfileEvent with _$UserProfileEvent {
   const factory UserProfileEvent.setGroupSearch({required String query}) =
       UserProfileSetGroupSearch;
 
-  /// Sign in with the active wallet to unlock private curations (Ledger,
-  /// own profile only).
+  /// Sign in with the active wallet to unlock private curations (hardware
+  /// wallets, own profile only).
   const factory UserProfileEvent.verifyForPrivateCurations() =
       UserProfileVerifyForPrivateCurations;
 
@@ -171,11 +171,11 @@ sealed class UserProfileState with _$UserProfileState {
     /// tab surfaces the error instead of silently showing "no curations".
     String? curationsError,
 
-    /// True when viewing your own profile with a Ledger wallet that lacks a
+    /// True when viewing your own profile with a hardware wallet that lacks a
     /// signed-login session, so private curations are hidden until verified.
     @Default(false) bool showVerifyPrivateCurationsCta,
 
-    /// True while the Ledger verification flow is in-flight.
+    /// True while the hardware verification flow is in-flight.
     @Default(false) bool isVerifyingCurations,
   }) = UserProfileLoaded;
 
@@ -191,7 +191,7 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
     this._repository,
     this._curationRepository,
     this._authService,
-    this._ledgerVerifyController,
+    this._hardwareVerifyController,
   ) : super(const UserProfileState.initial()) {
     on<UserProfileLoad>(_onLoad);
     on<UserProfileLoadByUsername>(_onLoadByUsername);
@@ -256,7 +256,7 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
   final UserProfileRepository _repository;
   final CurationRepository _curationRepository;
   final AuthService _authService;
-  final LedgerVerifyController _ledgerVerifyController;
+  final HardwareVerifyController _hardwareVerifyController;
 
   StreamSubscription<void>? _curationsSignalSub;
   StreamSubscription<String>? _editedSignalSub;
@@ -458,6 +458,11 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
           groups: currentLoaded?.groups,
           youOwnArtworks: currentLoaded?.youOwnArtworks,
           activeTab: currentLoaded?.activeTab ?? _initialTab(resolvedProfile),
+          activeSort:
+              currentLoaded != null &&
+                  !isArtworkListTab(currentLoaded.activeTab)
+              ? currentLoaded.activeSort
+              : PortfolioSortOption.recent,
           artworkViewMode:
               currentLoaded?.artworkViewMode ?? savedArtworkViewMode,
           groupViewMode: currentLoaded?.groupViewMode ?? savedGroupViewMode,
@@ -553,7 +558,7 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
       // verifies a locally-signable session wallet when none is verified yet,
       // so the curation fetch below authorizes via the freshly-attached cookie
       // on this same load. Returns whether to show the manual "verify" CTA
-      // (only Ledger / watch-only session wallets remain). No active switch.
+      // (only hardware / watch-only session wallets remain). No active switch.
       final needsVerifyF = isOwnProfile
           ? _resolvePrivateCurationsGate(
               ownerAddress: event.address,
@@ -584,7 +589,7 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
         if (currentState is UserProfileLoaded) {
           emit(
             currentState.copyWith(
-              groups: result,
+              groups: _sortGroups(result, currentState.activeSort),
               curationsError: curationResult.error,
               showVerifyPrivateCurationsCta: needsVerify,
             ),
@@ -709,9 +714,9 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
   ///   silent sign can fail non-fatally (offline / keystore / 5xx), so re-check
   ///   whether a valid sig actually landed and surface the CTA if it didn't;
   /// - else, no locally-signable scoped wallet remains: surface the manual
-  ///   verify CTA only when a Ledger scoped wallet is present (it can verify via
-  ///   the BLE sheet); with only social / watch-only wallets nothing can satisfy
-  ///   the gate, so don't show a dead-end CTA.
+  ///   verify CTA only when a hardware scoped wallet is present (it can verify
+  ///   through the hardware verify sheet); with only social / watch-only
+  ///   wallets nothing can satisfy the gate, so don't show a dead-end CTA.
   ///
   /// Returns true when the CTA should show. [SessionManager] is read via [sl]
   /// (guarded) to match the bloc's other service-locator usages and stay
@@ -758,11 +763,12 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
       return !_authService.hasAnyVerifiedSession(scopedAddrs);
     }
 
-    // No locally-signable scoped wallet remains. A Ledger scoped wallet can
-    // still verify through the manual BLE sheet, so surface the CTA. But if only
-    // social / watch-only wallets remain, nothing can satisfy the gate — the
-    // CTA would pop a Ledger sheet that can never succeed — so don't show it.
-    return scopedWallets.any((w) => w.walletType == WalletType.ledger);
+    // No locally-signable scoped wallet remains. A hardware scoped wallet — a
+    // Ledger or a Seed Vault account — can still verify through the manual
+    // sheet, so surface the CTA. But if only social / watch-only wallets
+    // remain, nothing can satisfy the gate — the CTA would pop a sheet that can
+    // never succeed — so don't show it.
+    return scopedWallets.any((w) => w.walletType.isHardware);
   }
 
   /// Fetch a profile's curations mapped to curation [ArtGroup]s so they slot
@@ -808,7 +814,7 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
     }
   }
 
-  /// Run the wallet verification flow (Ledger sign-in) on your own profile
+  /// Run the wallet verification flow (hardware sign-in) on your own profile
   /// and, on success, refetch curations so private ones appear.
   Future<void> _onVerifyForPrivateCurations(
     UserProfileVerifyForPrivateCurations event,
@@ -823,29 +829,27 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
 
     emit(currentState.copyWith(isVerifyingCurations: true));
 
-    // Verify a Ledger wallet that BELONGS to the viewed profile (not
+    // Verify a hardware wallet that BELONGS to the viewed profile (not
     // necessarily the active signer): only such a wallet's sig unlocks this
-    // profile's private curations, and the CTA only shows when Ledger wallets
+    // profile's private curations, and the CTA only shows when hardware wallets
     // are all that remain. No active switch.
     final profileAddrs = <String>{
       currentState.profile.address,
       ...currentState.profile.linkedAddresses,
     };
-    final ledgerAddress = sl.isRegistered<SessionManager>()
+    final hardwareWallet = sl.isRegistered<SessionManager>()
         ? sl<SessionManager>().sessionWallets
               .where(
                 (w) =>
-                    w.walletType == WalletType.ledger &&
-                    profileAddrs.contains(w.address),
+                    w.walletType.isHardware && profileAddrs.contains(w.address),
               )
               .firstOrNull
-              ?.address
         : null;
-    // Only a Ledger wallet can complete the BLE sign sheet. With no Ledger
-    // session wallet there is nothing the sheet could verify — popping it for a
+    // Only a hardware wallet can complete the verify sheet. With none in the
+    // session there is nothing the sheet could verify — popping it for a
     // social / watch-only address is a dead end that can never succeed — so
     // bail out without prompting rather than firing an impossible flow.
-    if (ledgerAddress == null) {
+    if (hardwareWallet == null) {
       final s = state;
       if (s is UserProfileLoaded) {
         emit(s.copyWith(isVerifyingCurations: false));
@@ -854,11 +858,15 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
     }
     var verified = false;
     try {
-      verified = await _ledgerVerifyController.requestVerification(
-        ledgerAddress,
+      // The wallet is in hand, so name its device rather than making the
+      // controller re-resolve it: the sheet's copy has to match the device the
+      // user actually holds.
+      verified = await _hardwareVerifyController.requestVerification(
+        hardwareWallet.address,
+        walletType: hardwareWallet.walletType,
       );
     } catch (e) {
-      debugPrint('[UserProfileBloc] Ledger verification failed: $e');
+      debugPrint('[UserProfileBloc] Hardware verification failed: $e');
     }
     if (isClosed) return;
 
@@ -888,7 +896,7 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
     if (s is! UserProfileLoaded) return;
     emit(
       s.copyWith(
-        groups: _allGroups,
+        groups: _sortGroups(_allGroups, s.activeSort),
         isVerifyingCurations: false,
         showVerifyPrivateCurationsCta: false,
         curationsError: curationResult.error,
@@ -929,7 +937,12 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
 
     final s = state;
     if (s is! UserProfileLoaded) return;
-    emit(s.copyWith(groups: _allGroups, curationsError: curationResult.error));
+    emit(
+      s.copyWith(
+        groups: _sortGroups(_allGroups, s.activeSort),
+        curationsError: curationResult.error,
+      ),
+    );
   }
 
   /// Build the resolved UserProfile with role, banner, and youOwn data.
@@ -992,6 +1005,9 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
       currentState.copyWith(
         activeTab: event.tab,
         activeSort: defaultSort,
+        groups: currentState.groups == null
+            ? null
+            : _sortGroups(_allGroups, defaultSort),
         groupSearch: null,
       ),
     );
@@ -1177,6 +1193,22 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
     }
   }
 
+  /// Sort a copy so Recent can always restore the original API order.
+  List<ArtGroup> _sortGroups(List<ArtGroup> groups, PortfolioSortOption sort) {
+    final sorted = List<ArtGroup>.of(groups);
+    switch (sort) {
+      case PortfolioSortOption.count:
+        sorted.sort((a, b) => b.artworkCount.compareTo(a.artworkCount));
+      case PortfolioSortOption.name:
+        sorted.sort(
+          (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+        );
+      case PortfolioSortOption.recent:
+        break;
+    }
+    return sorted;
+  }
+
   Future<void> _onSetSort(
     UserProfileSetSort event,
     Emitter<UserProfileState> emit,
@@ -1216,26 +1248,13 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
         ? null
         : sortArtworks(_allListedArtworks);
 
-    // Re-sort groups
-    final sortedGroups = List<ArtGroup>.of(_allGroups);
-    switch (event.sort) {
-      case PortfolioSortOption.count:
-        sortedGroups.sort((a, b) => b.artworkCount.compareTo(a.artworkCount));
-      case PortfolioSortOption.name:
-        sortedGroups.sort(
-          (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
-        );
-      case PortfolioSortOption.recent:
-        break;
-    }
-
     emit(
       currentState.copyWith(
         activeSort: event.sort,
         artworks: sortedArtworks,
         ownedArtworks: sortedOwned,
         listedArtworks: sortedListed,
-        groups: sortedGroups,
+        groups: _sortGroups(_allGroups, event.sort),
       ),
     );
   }

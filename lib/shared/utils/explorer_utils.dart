@@ -2,6 +2,7 @@ import '../../core/config/environment.dart';
 import '../../core/services/preferences_service.dart';
 import '../../di.dart';
 import 'chain.dart';
+import 'synthetic_master.dart';
 
 /// URL patterns for supported block explorers.
 const _explorerUrls = <String, String>{
@@ -59,6 +60,7 @@ String buildExplorerUrlFromPrefs(String signature) {
 ///
 /// Appends `?cluster=devnet` in development/staging environments.
 String buildTokenExplorerUrl(String mintAddress, String explorerKey) {
+  if (isSyntheticSolanaMaster(mintAddress)) return '';
   final base =
       _tokenExplorerUrls[explorerKey] ?? _tokenExplorerUrls['solscan']!;
   final url = '$base$mintAddress';

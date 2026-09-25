@@ -247,6 +247,7 @@ class _PlaceBidSheetState extends State<PlaceBidSheet> {
               title: widget.artworkTitle,
               imageUrl: widget.artworkImageUrl,
               username: widget.artistUsername,
+              imageHeight: 74,
               nsfw: widget.nsfw,
             ),
             const SizedBox(height: MallowTheme.spacingLg),
@@ -271,7 +272,8 @@ class _PlaceBidSheetState extends State<PlaceBidSheet> {
                       onTap: _fillMinimum,
                       child: Text(
                         'Min: '
-                        '${_minBidDisplay!.toStringAsFixed(2)} ${_token.symbol}',
+                        '${stripTrailingZeros(_minBidDisplay!.toStringAsFixed(2))} '
+                        '${_token.symbol}',
                         style: MallowTheme.uiCaption.copyWith(
                           color: colors.textSecondary,
                         ),

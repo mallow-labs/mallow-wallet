@@ -6,11 +6,13 @@ import 'package:mallow_wallet/core/utils/asset_url.dart';
 /// full-res image) is fetched from, and in what order. It exists because those
 /// origins 403 unpredictably — most notably `arweave.net`, whose CDN blocks
 /// specific clients even for data it serves fine elsewhere. These tests pin the
-/// two behaviours the player depends on: the public gateway must come FIRST
-/// (matching the webapp, which only mirrors on a real load failure), and a
-/// working mirror/alternate must ALWAYS follow so a 403 is recoverable rather
-/// than fatal. If the mirror stopped following the primary, video playback
-/// would silently regress to the still poster for every arweave asset.
+/// two behaviours the player depends on: an http(s) source keeps the host it
+/// arrived on FIRST (matching the webapp, which only mirrors on a real load
+/// failure) while a scheme-native `ipfs://` source, which names no host,
+/// resolves onto the configured gateway; and a working mirror/alternate must
+/// ALWAYS follow either one so a 403 is recoverable rather than fatal. If the
+/// mirror stopped following the primary, video playback would silently regress
+/// to the still poster for every arweave asset.
 void main() {
   // These suites assert URL *shapes*, which only exist once the build declares
   // the hosts that produce them. Placeholder hosts on purpose: the rule under
@@ -86,17 +88,18 @@ void main() {
 
   group('AssetUrl.assetSourceCandidates — ipfs', () {
     test(
-      'resolves ipfs:// through the PUBLIC gateway first, then the mirror',
+      'resolves ipfs:// through the CONFIGURED gateway first, then ipfs.io',
       () {
-        // 🛑 ipfs.io leads on every chain, and the configured mirror is only a
-        // retry behind it. The first candidate is also the string embedded in
-        // the image CDN's resize path, so it is the resizer cache key: the web
-        // client resolves `ipfs://` through ipfs.io unconditionally, and a
-        // different host here forks every ipfs:// asset across two cache
-        // entries with nothing failing to show for it.
+        // 🛑 The scheme names no host, so nothing about the source argues for
+        // starting on a third party: the configured gateway leads, matching the
+        // web client, which maps every IPFS shape onto it. It is also the only
+        // rung that is tiered — pinned copies first, then a full IPFS node
+        // behind the same host — so it answers imported CIDs that the public
+        // gateway can only reach by a cold DHT walk. `ipfs.io` is the retry
+        // behind it, not the lead.
         expect(AssetUrl.assetSourceCandidates('ipfs://$cid', chain: 'solana'), [
-          'https://ipfs.io/ipfs/$cid',
           'https://ipfs.example.com/ipfs/$cid',
+          'https://ipfs.io/ipfs/$cid',
           'https://dweb.link/ipfs/$cid',
         ]);
       },
@@ -104,8 +107,8 @@ void main() {
 
     test('is chain-independent for the ipfs:// scheme', () {
       expect(AssetUrl.assetSourceCandidates('ipfs://$cid', chain: 'ethereum'), [
-        'https://ipfs.io/ipfs/$cid',
         'https://ipfs.example.com/ipfs/$cid',
+        'https://ipfs.io/ipfs/$cid',
         'https://dweb.link/ipfs/$cid',
       ]);
     });
@@ -146,7 +149,7 @@ void main() {
           'ipfs://ipfs/$cid',
           chain: 'solana',
         ).first,
-        'https://ipfs.io/ipfs/$cid',
+        'https://ipfs.example.com/ipfs/$cid',
       );
     });
 
@@ -220,8 +223,8 @@ void main() {
       // dweb.link stays a plain https host — it is a third party, not something
       // the local prefix may leak into.
       expect(AssetUrl.assetSourceCandidates('ipfs://$cid', chain: 'solana'), [
-        'https://ipfs.io/ipfs/$cid',
         '$ipfsBase/ipfs/$cid',
+        'https://ipfs.io/ipfs/$cid',
         'https://dweb.link/ipfs/$cid',
       ]);
     });
@@ -261,12 +264,12 @@ void main() {
 
   /// The images service gets first refusal via `/original/` before the
   /// on-device gateway walk: it serves the R2-cached original when it has one,
-  /// which is far faster than any public gateway. The retired resolver never
-  /// leads the list.
+  /// which is far faster than any public gateway. The removed (2026-09)
+  /// resolver never leads the list.
   group('AssetUrl.videoSourceCandidates', () {
     const cid = 'bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim';
 
-    test('/original/ leads even with the resize-path gate off', () async {
+    test('/original/ leads the ladder for an arweave source', () async {
       final result = await AssetUrl.videoSourceCandidates(
         'https://arweave.net/abc123',
         chain: 'solana',
@@ -288,8 +291,8 @@ void main() {
       // that ends playback with nothing left to try (decision 24).
       expect(result, [
         'https://images.example.com/original/ipfs%3A%2F%2F$cid%2Fv.mp4',
-        'https://ipfs.io/ipfs/$cid/v.mp4',
         'https://ipfs.example.com/ipfs/$cid/v.mp4',
+        'https://ipfs.io/ipfs/$cid/v.mp4',
         'https://dweb.link/ipfs/$cid/v.mp4',
       ]);
     });

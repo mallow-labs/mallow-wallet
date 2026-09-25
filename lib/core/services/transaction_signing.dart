@@ -135,3 +135,61 @@ Future<SignedTx> _refreshBlockhashIfSafe(
     compiledMessage: tx.compiledMessage.copyWith(recentBlockhash: fresh),
   );
 }
+
+/// Solana's Address Lookup Table program.
+const String addressLookupTableProgramId =
+    'AddressLookupTab1e1111111111111111111111111';
+
+/// bincode variant index (u32, little-endian) of the ALT program's
+/// `CreateLookupTable` instruction. `ExtendLookupTable` is variant 2 and
+/// carries no time-bound state, so the discriminator — not merely the program
+/// id — is what this matches on.
+const List<int> _createLookupTableDiscriminator = <int>[0, 0, 0, 0];
+
+/// `true` when [tx] carries a `CreateLookupTable` instruction.
+///
+/// ### Why this is not the same question as "is it co-signed?"
+///
+/// [_refreshBlockhashIfSafe] can rewrite the blockhash of any tx nobody has
+/// pre-signed, which is why non-co-signed flows normally need no staleness
+/// rebuild at all: the blockhash is the only clock on them, and the refresh
+/// resets it.
+///
+/// `create_lookup_table` breaks that assumption. It bakes a `recent_slot` into
+/// its instruction data, and the runtime validates that slot against
+/// `SlotHashes` — the last 512 slots, roughly 3.4 minutes. A blockhash refresh
+/// leaves those bytes untouched, so a confirmation sheet left open past the
+/// slot window sends a transaction that looks perfectly fresh and fails
+/// on-chain for a reason nothing on screen explains. Since a LUT `setupTx`
+/// leads the batch, that failure lands on the *first* transaction of a cNFT
+/// buy / list / cancel / settle.
+///
+/// The principle: a blockhash refresh is not a substitute for a rebuild when
+/// the transaction carries other time-bound state. Such a tx must go back to
+/// the builder, exactly like a co-signed one — see `TransactionExecutor.execute`.
+///
+/// Program ids are always static account keys (they can never be loaded from
+/// an address lookup table), so reading them off `accountKeys` is complete for
+/// both legacy and v0 messages.
+bool createsLookupTable(SignedTx tx) {
+  final message = tx.compiledMessage;
+  final keys = message.accountKeys;
+  for (final ix in message.instructions) {
+    if (ix.programIdIndex < 0 || ix.programIdIndex >= keys.length) continue;
+    if (keys[ix.programIdIndex].toBase58() != addressLookupTableProgramId) {
+      continue;
+    }
+    final data = ix.data;
+    if (data.length < _createLookupTableDiscriminator.length) continue;
+    final head = data.take(_createLookupTableDiscriminator.length).toList();
+    var matches = true;
+    for (var i = 0; i < head.length; i++) {
+      if (head[i] != _createLookupTableDiscriminator[i]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return true;
+  }
+  return false;
+}

@@ -48,6 +48,23 @@ val keystoreProperties = Properties().apply {
     }
 }
 
+// The dApp Store artifact is signed with its OWN key, never the Play upload
+// key. Solana Mobile's publishing docs require it: "You cannot use the same
+// signing key for both Google Play and the dApp Store." Play App Signing means
+// our upload key is already not the certificate Play distributes, so reusing it
+// would arguably satisfy the intent — but the rule is written against the key
+// you hold, and a rejected review costs a multi-day round trip. Two keys, no
+// argument.
+//
+// Losing this keystore means the dApp Store listing can never be updated again:
+// the store matches the App NFT to the package name AND the signing cert.
+val dappstoreKeystorePropertiesFile = rootProject.file("dappstore-key.properties")
+val dappstoreKeystoreProperties = Properties().apply {
+    if (dappstoreKeystorePropertiesFile.exists()) {
+        load(FileInputStream(dappstoreKeystorePropertiesFile))
+    }
+}
+
 android {
     namespace = "com.mallow.wallet.android"
     compileSdk = flutter.compileSdkVersion
@@ -73,6 +90,33 @@ android {
         manifestPlaceholders["castReceiverAppId"] = castReceiverAppId
     }
 
+    // Two distribution channels, two package names.
+    //
+    // `dappstore` targets the Solana dApp Store (Seeker). It reuses the legacy
+    // `art.mallow.twa` id because the dApp Store App NFT is keyed to the
+    // package name and we update that listing rather than mint a new one.
+    //
+    // A separate id — not an `applicationIdSuffix` — is load-bearing. The dApp
+    // Store cannot take the Play-distributed certificate (Play App Signing
+    // holds it; ours is the upload key), so the two artifacts are signed
+    // differently. Under one shared id that would make them mutually
+    // uninstallable, and for a wallet "uninstall to continue" destroys the
+    // Keychain/Keystore entries behind MnemonicVault with `allowBackup=false`
+    // and no restore path. Two ids let both builds coexist.
+    //
+    // `namespace` above stays `com.mallow.wallet.android` on purpose:
+    // namespace is the R/BuildConfig package and the resolution root for the
+    // manifest's relative class names, and it is independent of applicationId.
+    // Changing it would move every Kotlin source file for no benefit.
+    //
+    // google-services.json at android/app/ registers BOTH packages, so one
+    // file serves both flavours and no per-flavour copy is needed.
+    flavorDimensions += "store"
+
+    // Declared BEFORE productFlavors on purpose: the Kotlin DSL evaluates these
+    // blocks top-to-bottom, and the dappstore flavour resolves its signing
+    // config by name. Move this below and the build dies with
+    // "SigningConfig with name 'dappstore' not found".
     signingConfigs {
         create("release") {
             if (keystorePropertiesFile.exists()) {
@@ -82,16 +126,53 @@ android {
                 storePassword = keystoreProperties["storePassword"] as String
             }
         }
+        create("dappstore") {
+            if (dappstoreKeystorePropertiesFile.exists()) {
+                keyAlias = dappstoreKeystoreProperties["keyAlias"] as String
+                keyPassword = dappstoreKeystoreProperties["keyPassword"] as String
+                storeFile = file(dappstoreKeystoreProperties["storeFile"] as String)
+                storePassword = dappstoreKeystoreProperties["storePassword"] as String
+            }
+        }
     }
 
-    buildTypes {
-        release {
-            // Falls back to debug signing when key.properties is absent so
+    // Release signing is chosen HERE, per flavour, not in buildTypes.release.
+    //
+    // AGP resolves a variant's signing config from the build type FIRST and only
+    // falls back to the flavour, so a `signingConfig` set on buildTypes.release
+    // silently wins over anything a flavour asks for — the dApp Store artifact
+    // would go out signed with the Play upload key and nothing would say so.
+    // The debug build type keeps its own implicit debug config, which by that
+    // same precedence still wins for debug builds of either flavour. That is
+    // what we want: debug stays debug-signed, release takes the flavour's key.
+    productFlavors {
+        create("play") {
+            dimension = "store"
+            // applicationId inherited from defaultConfig.
+            // Falls back to debug signing when key.properties is absent so a
             // local `flutter run --release` still works without the upload key.
             signingConfig = if (keystorePropertiesFile.exists())
                 signingConfigs.getByName("release")
             else
                 signingConfigs.getByName("debug")
+        }
+        create("dappstore") {
+            dimension = "store"
+            applicationId = "art.mallow.twa"
+            // Its OWN key, never the Play upload key — see the keystore comment
+            // at the top of this file.
+            signingConfig = if (dappstoreKeystorePropertiesFile.exists())
+                signingConfigs.getByName("dappstore")
+            else
+                signingConfigs.getByName("debug")
+        }
+    }
+
+    buildTypes {
+        release {
+            // No signingConfig here on purpose — it is set per flavour above,
+            // because a build type's config takes precedence over a flavour's
+            // and would override the dApp Store key.
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -119,4 +200,10 @@ dependencies {
     implementation("androidx.biometric:biometric:1.1.0")
     // Google Cast SDK — required for Chromecast support
     implementation("com.google.android.gms:play-services-cast-framework:21.5.0")
+    // Solana Mobile Seed Vault. Ships in BOTH flavours on purpose: the feature
+    // is gated at runtime on SeedVault.isAvailable(), so the play and dappstore
+    // artifacts differ only in identity and signing and store QA transfers
+    // between them. The AAR contributes its own <queries> block and the
+    // ACCESS_SEED_VAULT uses-permission through manifest merging.
+    implementation("com.solanamobile:seedvault-wallet-sdk:0.4.0")
 }

@@ -70,26 +70,39 @@ void main() {
     sl.unregister<SecureWalletStorage>();
   });
 
-  group('deletableUsername', () {
-    test('null when the logged-in address owns no profile', () {
+  group('deletableProfile', () {
+    // Only a signed-out session has nothing to delete against: the route is
+    // authenticated by the `login-token`, so with no authenticated user the
+    // call would 401 and the profile would survive.
+    test('not signed in when there is no authenticated user', () {
       when(() => auth.currentUser).thenReturn(null);
-      expect(deletableUsername(), isNull);
 
+      expect(deletableProfile(), (signedIn: false, username: null));
+    });
+
+    // The finding this encodes: every `/v0/login` upserts a `users` document
+    // for the address, so a signed-in address ALWAYS has a server record — a
+    // missing username is not a missing record. Withholding the delete here
+    // left App Review's own account (sign in, never set a username)
+    // undeletable, which is the 5.1.1(v) gap.
+    test('signed in with no username still has a record to delete', () {
       when(() => auth.currentUser).thenReturn(const api.User());
-      expect(deletableUsername(), isNull);
+
+      expect(deletableProfile(), (signedIn: true, username: null));
     });
 
     // A whitespace-only username is not a username: rendering "@   " in the
-    // confirmation sheet would name nothing, and the row would offer a delete
-    // the user can't verify.
-    test('null when the username is blank', () {
+    // heading would name nothing. It does not change whether the doc exists.
+    test('a blank username reads as no username, not as no record', () {
       when(() => auth.currentUser).thenReturn(const api.User(username: '   '));
-      expect(deletableUsername(), isNull);
+
+      expect(deletableProfile(), (signedIn: true, username: null));
     });
 
     test('the username when one exists', () {
       when(() => auth.currentUser).thenReturn(const api.User(username: 'ada'));
-      expect(deletableUsername(), 'ada');
+
+      expect(deletableProfile(), (signedIn: true, username: 'ada'));
     });
   });
 
@@ -155,7 +168,7 @@ void main() {
     });
 
     // A 401 means the route never ran, so the profile is still there. Reporting
-    // it as deleted would show "Your mallow account was deleted" and tear the
+    // it as deleted would show "Your mallow profile was deleted" and tear the
     // local session down over a profile that still exists server-side — the
     // exact flow App Review exercises.
     test(

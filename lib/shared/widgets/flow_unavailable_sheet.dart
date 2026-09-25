@@ -6,9 +6,13 @@ import '../../core/analytics/analytics_events.dart';
 import '../../core/analytics/analytics_service.dart';
 import '../../core/config/remote_config.dart';
 import '../../core/config/remote_config_service.dart';
+import '../../core/config/store_build.dart';
 import '../../core/result/app_failure.dart';
 import '../../core/security/transaction_auth_gate.dart'
-    show kFlowDisabledFallbackMessage;
+    show
+        kFlowDisabledFallbackMessage,
+        kStoreGatedFlowMessage,
+        reportUnsupportedFlow;
 import '../../di.dart';
 import '../theme/mallow_theme.dart';
 import 'mallow_button.dart';
@@ -125,8 +129,27 @@ bool handleFlowDisabled(
 /// view-only guard — so a user is told the action is off *before* being made
 /// to switch wallets for it.
 ///
+/// It also carries the **store arm**, the tap-level twin of the route gate and
+/// the signing backstop: a cell [storeHidesFlow] answers true for is refused
+/// with [kStoreGatedFlowMessage].
+///
 /// Always re-check `context.mounted` after awaiting.
 Future<bool> guardFlowDisabled(BuildContext context, FlowKey flow) async {
+  // The store arm runs first — ahead of the network nudge, and deliberately
+  // never behind remote config: the flags behind `storeHidesFlow` are
+  // compile-time precisely so that no config change can make a store build
+  // reveal a hidden surface.
+  //
+  // Reaching it is a bug in the same sense as reaching the signing backstop:
+  // every entry point to a hidden cell is hidden in such a build, so a tap on
+  // one means a CTA was rendered that should not have been. Hence the report —
+  // but deliberately no `trackFlowDisabledHit`, which measures how far a remote
+  // kill reached and would be corrupted by a compile-time hide.
+  if (storeHidesFlow(flow.flow)) {
+    reportUnsupportedFlow(flow, caughtBy: 'a tap-level entry gate');
+    await showFlowUnavailableSheet(context, kStoreGatedFlowMessage);
+    return true;
+  }
   refreshRemoteConfigOnFlowEntry();
   final message = flowDisabledMessage(flow);
   if (message == null) return false;
@@ -151,6 +174,13 @@ Widget flowGatedScreen(List<FlowKey> flows, Widget Function() builder) =>
 /// offering several actions is blocked only when **every** one of them is
 /// killed — killing fixed-price listing creation must not also close the
 /// route to auction creation. The first killed cell's message is the one shown.
+///
+/// The same every-cell rule gates the **store build**: when [storeHidesFlow]
+/// answers true for every cell, the route renders [FlowUnavailableScreen] with
+/// [kStoreGatedFlowMessage] instead. That is a compile-time hide, not a kill —
+/// no config refresh is nudged and no `flowDisabledHit` is tracked (that metric
+/// measures incident reach). The only way to reach such a route is a deep link
+/// or stale navigation, because every entry point to it is hidden.
 ///
 /// Presenting beats redirecting: silently bouncing a tap back is exactly the
 /// dead end exists to remove.
@@ -188,6 +218,14 @@ class _FlowGatedScreenState extends State<FlowGatedScreen> {
   @override
   void initState() {
     super.initState();
+    // `isNotEmpty` first: `every` on an empty list is true, and a route
+    // registered with no cells would otherwise gate itself shut in every
+    // build. No caller passes one today; this is what keeps that true.
+    if (widget.flows.isNotEmpty &&
+        widget.flows.every((flow) => storeHidesFlow(flow.flow))) {
+      _disabledMessage = kStoreGatedFlowMessage;
+      return;
+    }
     refreshRemoteConfigOnFlowEntry();
     final messages = [
       for (final flow in widget.flows) flowDisabledMessage(flow),

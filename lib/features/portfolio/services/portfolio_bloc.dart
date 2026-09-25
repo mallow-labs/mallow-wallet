@@ -14,7 +14,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/crypto/wallet_manager.dart';
 import '../../../core/network/auth_service.dart';
-import '../../../core/network/ledger_verify_controller.dart';
+import '../../../core/network/hardware_verify_controller.dart';
 import '../../../core/result/result.dart';
 import '../../../core/services/wallet_change_listening.dart';
 import '../../../core/utils/price_formatter.dart';
@@ -680,7 +680,7 @@ class PortfolioBloc extends Bloc<PortfolioEvent, PortfolioState>
     this._repository,
     this._curationRepository,
     this._authService,
-    this._ledgerVerifyController,
+    this._hardwareVerifyController,
     this.walletManager,
   ) : super(const PortfolioState.initial()) {
     on<PortfolioLoad>(_onLoad);
@@ -755,7 +755,7 @@ class PortfolioBloc extends Bloc<PortfolioEvent, PortfolioState>
   final PortfolioRepository _repository;
   final CurationRepository _curationRepository;
   final AuthService _authService;
-  final LedgerVerifyController _ledgerVerifyController;
+  final HardwareVerifyController _hardwareVerifyController;
 
   StreamSubscription<void>? _refreshSignalSub;
   StreamSubscription<void>? _curationsSignalSub;
@@ -827,6 +827,7 @@ class PortfolioBloc extends Bloc<PortfolioEvent, PortfolioState>
   int _artworksGen = 0;
   int _curationsGen = 0;
   int _listedGen = 0;
+  int _loadGen = 0;
 
   /// The filter for the Listed slice: the active artwork filter narrowed to
   /// listed artworks. The filter object is shared across tabs and the filters
@@ -888,14 +889,45 @@ class PortfolioBloc extends Bloc<PortfolioEvent, PortfolioState>
     PortfolioLoad event,
     Emitter<PortfolioState> emit,
   ) async {
-    final artworkViewMode = await loadArtworkViewMode();
-    final groupViewMode = await loadGroupViewMode();
+    final loadGen = ++_loadGen;
+    final current = state;
+    final isReloading = current is PortfolioLoaded;
 
-    // A full load can follow a wallet/session change, so the previous
-    // session's Listed slice must not survive it — drop it and let the tab
-    // refetch (below) if it's the one on screen.
-    _listedArtworks = const [];
+    // A full load can follow a wallet/session change. Invalidate every
+    // session-owned slice before any preference or cache I/O so a mounted
+    // portfolio never keeps painting the previous wallet while it waits.
+    ++_artworksGen;
+    ++_curationsGen;
     ++_listedGen;
+    _allArtworks = const [];
+    _listedArtworks = const [];
+    _portfolioGroups = const [];
+    _curationGroups = const [];
+
+    if (current case PortfolioLoaded()) {
+      emit(
+        current.copyWith(
+          groups: const [],
+          totalArtworks: 0,
+          allArtworks: const [],
+          isLoadingMoreAllArt: false,
+          hasMoreAllArt: true,
+          nextAllArtPage: null,
+          listedArtworks: null,
+          isLoadingMoreListed: false,
+          hasMoreListed: true,
+          nextListedPage: null,
+          isRefreshing: true,
+          showVerifyPrivateCurationsCta: false,
+          isVerifyingCurations: false,
+        ),
+      );
+    }
+
+    final artworkViewMode = await loadArtworkViewMode();
+    if (isClosed || loadGen != _loadGen) return;
+    final groupViewMode = await loadGroupViewMode();
+    if (isClosed || loadGen != _loadGen) return;
 
     // 1. Serve this session's cached snapshot immediately for an instant
     //    paint; fall back to the skeleton only when no cache exists yet.
@@ -907,7 +939,7 @@ class PortfolioBloc extends Bloc<PortfolioEvent, PortfolioState>
     } catch (e) {
       debugPrint('[PortfolioBloc] Portfolio cache read failed: $e');
     }
-    if (isClosed) return;
+    if (isClosed || loadGen != _loadGen) return;
 
     if (cached != null) {
       _allArtworks = cached.artworks.artworks;
@@ -928,7 +960,7 @@ class PortfolioBloc extends Bloc<PortfolioEvent, PortfolioState>
           resetListed: true,
         ),
       );
-    } else {
+    } else if (!isReloading) {
       emit(
         PortfolioState.loading(
           artworkViewMode: artworkViewMode,
@@ -945,7 +977,9 @@ class PortfolioBloc extends Bloc<PortfolioEvent, PortfolioState>
       fallbackGroupViewMode: groupViewMode,
       failureLabel: 'Failed to load portfolio',
       resetListed: true,
+      keepLoadedOnFailure: cached != null,
     );
+    if (isClosed || loadGen != _loadGen) return;
 
     // Refetch the (just-cleared) Listed slice when it's the tab on screen.
     final loaded = state;
@@ -999,6 +1033,7 @@ class PortfolioBloc extends Bloc<PortfolioEvent, PortfolioState>
     ArtworkViewMode fallbackArtworkViewMode = ArtworkViewMode.masonry,
     PortfolioViewMode fallbackGroupViewMode = PortfolioViewMode.grid,
     bool resetListed = false,
+    bool keepLoadedOnFailure = true,
   }) async {
     final artworksGen = ++_artworksGen;
     final curationsGen = ++_curationsGen;
@@ -1044,7 +1079,7 @@ class PortfolioBloc extends Bloc<PortfolioEvent, PortfolioState>
         debugPrint('[PortfolioBloc] $failureLabel: ${error.message}');
         if (artworksGen != _artworksGen) return;
         final current = state;
-        if (current is PortfolioLoaded) {
+        if (current is PortfolioLoaded && keepLoadedOnFailure) {
           // Keep what's on screen (cached paint or previous data); just stop
           // the refresh indicator.
           emit(current.copyWith(isRefreshing: false));
@@ -1485,7 +1520,7 @@ class PortfolioBloc extends Bloc<PortfolioEvent, PortfolioState>
   /// an eligible HD wallet first). The two can disagree — see the follow-up to
   /// hoist one shared gate.
   Future<bool> _needsCurationVerification() async {
-    if (!await _authService.currentWalletNeedsLedgerVerification()) {
+    if (!await _authService.currentWalletNeedsHardwareVerification()) {
       return false;
     }
     return !await _authService.hasValidWalletSigForAny(
@@ -1510,9 +1545,9 @@ class PortfolioBloc extends Bloc<PortfolioEvent, PortfolioState>
 
     var verified = false;
     try {
-      verified = await _ledgerVerifyController.requestVerification(address);
+      verified = await _hardwareVerifyController.requestVerification(address);
     } catch (e) {
-      debugPrint('[PortfolioBloc] Ledger verification failed: $e');
+      debugPrint('[PortfolioBloc] Hardware verification failed: $e');
     }
     if (isClosed) return;
 

@@ -128,7 +128,7 @@ traffic and the logs are both yours.
 | **IPFS pinning** | `IPFS_UPLOAD_URL` | The NFT mint flow. No default — see [Media, CDN and gateways](#media-cdn-and-gateways) |
 | **Image CDN** | `IMAGE_CDN_BASE_URL` | Nothing visibly. Images load from their own origin at full size instead of a resized bucket |
 | **Static asset CDN** | `ASSET_CDN_BASE_URL` | Rewards-store metadata, and the maintenance/broadcast banners |
-| **IPFS gateway** | `IPFS_GATEWAY_URL` | Nothing — an extra rung in the fallback ladder only. Defaults to `ipfs.io` |
+| **IPFS gateway** | `IPFS_GATEWAY_URL` | Direct IPFS fetches fall through to `ipfs.io`, then `dweb.link`. Defaults to `ipfs.io` |
 | **Arweave gateway** | `ARWEAVE_GATEWAY_URL` | The mirror retry for an Arweave 403. Defaults to `arweave.net`, which makes the retry a no-op |
 | **Avatar service** | `AVATAR_SERVICE_URL` | Nothing — defaults to DiceBear's public API |
 | **Firebase** | config files, not variables | Android build fails outright; iOS throws at startup |
@@ -136,8 +136,8 @@ traffic and the logs are both yours.
 | **Sentry** | `SENTRY_DSN` | No crash reports. Everything else works |
 
 Also available: `JUPITER_REFERRAL_ACCOUNT` (collects an integrator fee on swaps;
-without it swaps run fee-free), `ANALYTICS_ENABLED` (set `false` to hard-disable
-a build), and `CANONICAL_ASSET_URLS`.
+without it swaps run fee-free) and `ANALYTICS_ENABLED` (set `false` to
+hard-disable a build).
 
 ---
 
@@ -154,12 +154,13 @@ default to empty and degrade the feature instead of guessing a host: images
 load unresized from their own origin, and the store metadata and operator
 banners are simply absent.
 
-**IPFS assets are read through the CDN, not through a gateway.** An `ipfs://`
-source resolves to `https://ipfs.io/ipfs/<cid>` and that string is embedded in
-the CDN's resize path — it is the resizer's cache key, so it must match what
-every other client of the same CDN emits. Direct gateway fetches happen only
-when the CDN has failed, in the video and download fallback ladders, and
-`IPFS_GATEWAY_URL` adds one rung to those.
+**IPFS assets are read through the CDN, not through a gateway.** The string
+embedded in the CDN's resize and `/original/` paths is the canonical
+`ipfs://<cid>` form, not a gateway URL — it is the resizer's cache key, and
+naming the bytes rather than a host is what keeps every client of the same CDN
+on one entry per asset. Direct gateway fetches happen only when the CDN has
+failed, in the video and download fallback ladders, where `IPFS_GATEWAY_URL`
+is the first rung, `ipfs.io` the second and `dweb.link` the last.
 
 🛑 **The gateway written into minted metadata is not configurable.** It is
 always `ipfs.io`. That URL goes on-chain in the token's metadata and is

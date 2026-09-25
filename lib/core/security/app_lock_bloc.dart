@@ -3,6 +3,7 @@ import 'package:freezed_annotation/freezed_annotation.dart';
 import 'package:injectable/injectable.dart';
 
 import '../database/database.dart';
+import '../observability/app_logger.dart';
 import 'biometric_auth.dart';
 import 'secure_storage.dart';
 
@@ -38,6 +39,10 @@ sealed class AppLockEvent with _$AppLockEvent {
   const factory AppLockEvent.disable(String pin) = AppLockEventDisable;
 
   /// Reset app lock (logout/clear all).
+  ///
+  /// Dispatched right after an explicit wipe has already swept the secure
+  /// store, so the handler only deletes — it must never write a value back
+  /// and leave an item behind the sweep.
   const factory AppLockEvent.reset() = AppLockEventReset;
 }
 
@@ -98,6 +103,54 @@ class AppLockBloc extends Bloc<AppLockEvent, AppLockState> {
 
   static const _maxFailedAttempts = 5;
 
+  /// Where a failed read lands: locked, with the PIN pad up.
+  ///
+  /// The reads behind the lock state can throw rather than answer — the vault
+  /// reports an unreadable Keychain/Keystore item as an error, which is the
+  /// point of it. An unhandled throw emits nothing at all, leaving the bloc
+  /// `uninitialized` and the app on its splash for the rest of the launch, so
+  /// every read here is caught and answered with this state instead.
+  ///
+  /// It claims a PIN because the caller only reaches it on a device whose
+  /// database holds wallets: onboarding cannot finish there without a factor,
+  /// and the PIN pad is the challenge every locked user can be offered. A
+  /// biometric-only user stays locked until the read recovers — but with the
+  /// store unreadable their unlock could not be verified either.
+  static const _lockedOnUnreadableState = AppLockState.locked(hasPin: true);
+
+  /// Run a lockout-bookkeeping store call whose failure must not decide an
+  /// unlock. The handler around it has already worked out what the user sees;
+  /// letting a refused write throw would skip that emit and leave the lock
+  /// screen with no answer at all.
+  Future<void> _bestEffort(String what, Future<void> Function() op) async {
+    try {
+      await op();
+    } catch (e) {
+      AppLogger.error('AppLockBloc', 'could not $what', e);
+    }
+  }
+
+  /// The read half of [_bestEffort]: answer [fallback] rather than throw.
+  ///
+  /// The lockout counters are bookkeeping — which cooldown tier the next
+  /// failure lands in. Letting one of their reads throw would hand the state
+  /// to the fail-closed catch and replace a correctly read lock with
+  /// [_lockedOnUnreadableState], a PIN-only lock a biometric-only user cannot
+  /// satisfy and nothing re-inits out of. Only a *factor* read may decide
+  /// that.
+  Future<T> _bestEffortRead<T>(
+    String what,
+    Future<T> Function() read,
+    T fallback,
+  ) async {
+    try {
+      return await read();
+    } catch (e) {
+      AppLogger.error('AppLockBloc', 'could not $what', e);
+      return fallback;
+    }
+  }
+
   Future<void> _onInit(
     AppLockEventInit event,
     Emitter<AppLockState> emit,
@@ -109,49 +162,85 @@ class AppLockBloc extends Bloc<AppLockEvent, AppLockState> {
     // yet. Locking in that state would auto-fire biometric and surface the
     // iOS Face ID permission prompt before the user reaches the biometric
     // setup screen. Defer to the explicit opt-in on that screen instead.
-    final hasWallets = await _db.hasAnyWallets();
+    final bool hasWallets;
+    try {
+      hasWallets = await _db.hasAnyWallets();
+    } catch (e) {
+      // Only an emptiness this read *confirmed* may skip the lock.
+      AppLogger.error('AppLockBloc', 'init could not read the wallet rows', e);
+      emit(_lockedOnUnreadableState);
+      return;
+    }
     if (!hasWallets) {
       emit(const AppLockState.noPinSet());
       return;
     }
 
-    final hasPin = await _storage.hasPin();
-    final biometricEnabled = await _storage.loadBiometricEnabled();
+    try {
+      // A missing PIN is re-read before it is believed — see
+      // [SecureWalletStorage.loadAuthFactors].
+      final factors = await _storage.loadAuthFactors();
+      final hasPin = factors.hasPin;
+      final biometricEnabled = factors.biometricEnabled;
 
-    // Lock if either auth factor is set up. noPinSet only applies to a
-    // fresh install with no auth at all (pre-onboarding).
-    if (hasPin || biometricEnabled) {
-      // Rehydrate the lockout counters so force-close does not reset the
-      // cooldown ladder. A cooldown that has already elapsed by the time we
-      // wake is dropped — the persisted counter alone determines which tier
-      // the next failure escalates to.
-      final failedAttempts = await _storage.loadFailedPinAttempts();
-      final persistedCooldown = await _storage.loadPinCooldownUntil();
-      final DateTime? cooldownUntil;
-      if (persistedCooldown != null &&
-          persistedCooldown.isAfter(DateTime.now())) {
-        cooldownUntil = persistedCooldown;
-      } else {
-        cooldownUntil = null;
-        if (persistedCooldown != null) {
-          await _storage.deletePinCooldownUntil();
+      // Lock if either auth factor is set up. noPinSet means this device has
+      // neither, which onboarding no longer allows — it is an install that
+      // predates the mandatory app-lock floor. Dropping the PIN while
+      // biometrics are on (change_pin_screen) is not that case: it leaves
+      // biometricEnabled true, and still locks.
+      if (hasPin || biometricEnabled) {
+        // Rehydrate the lockout counters so force-close does not reset the
+        // cooldown ladder. A cooldown that has already elapsed by the time we
+        // wake is dropped — the persisted counter alone determines which tier
+        // the next failure escalates to.
+        // Best-effort, all three: see [_bestEffortRead]. The factors above
+        // already decided which lock this user gets, and losing a counter
+        // costs a cooldown tier — dropping it into the catch below would cost
+        // them the lock screen they can actually answer.
+        final failedAttempts = await _bestEffortRead(
+          'read the failed-PIN counter',
+          _storage.loadFailedPinAttempts,
+          0,
+        );
+        final persistedCooldown = await _bestEffortRead<DateTime?>(
+          'read the PIN cooldown',
+          _storage.loadPinCooldownUntil,
+          null,
+        );
+        final DateTime? cooldownUntil;
+        if (persistedCooldown != null &&
+            persistedCooldown.isAfter(DateTime.now())) {
+          cooldownUntil = persistedCooldown;
+        } else {
+          cooldownUntil = null;
+          if (persistedCooldown != null) {
+            await _bestEffort(
+              'drop the elapsed PIN cooldown',
+              _storage.deletePinCooldownUntil,
+            );
+          }
         }
-      }
 
-      emit(
-        AppLockState.locked(
-          hasPin: hasPin,
-          biometricEnabled: biometricEnabled,
-          // Pre-set the in-flight flag so the LockScreen renders the
-          // privacy blur from frame 1 instead of flashing PIN UI before
-          // the OS biometric prompt animates in.
-          biometricAttempting: biometricEnabled,
-          failedAttempts: failedAttempts,
-          cooldownUntil: cooldownUntil,
-        ),
-      );
-    } else {
-      emit(const AppLockState.noPinSet());
+        emit(
+          AppLockState.locked(
+            hasPin: hasPin,
+            biometricEnabled: biometricEnabled,
+            // Pre-set the in-flight flag so the LockScreen renders the
+            // privacy blur from frame 1 instead of flashing PIN UI before
+            // the OS biometric prompt animates in.
+            biometricAttempting: biometricEnabled,
+            failedAttempts: failedAttempts,
+            cooldownUntil: cooldownUntil,
+          ),
+        );
+      } else {
+        emit(const AppLockState.noPinSet());
+      }
+    } catch (e) {
+      // See [_lockedOnUnreadableState]: the wallets are there, so an
+      // unreadable lock state must not open the app.
+      AppLogger.error('AppLockBloc', 'init could not read the lock state', e);
+      emit(_lockedOnUnreadableState);
     }
   }
 
@@ -188,9 +277,26 @@ class AppLockBloc extends Bloc<AppLockEvent, AppLockState> {
 
     // Biometric-only mode: PIN entry is not a valid unlock path.
     if (!currentState.hasPin) return;
-    if (await _storage.verifyPin(event.pin)) {
+
+    final bool verified;
+    try {
+      verified = await _storage.verifyPin(event.pin);
+    } catch (e) {
+      // The stored hash could not be read — the vault reports an unreadable
+      // item as an error. Refuse the attempt without counting it: the PIN may
+      // well be right, so escalating the cooldown ladder for a store glitch
+      // would punish the user for it. `wrongPinAttempt` is the only signal
+      // this state carries, so it is what the lock screen shows.
+      AppLogger.error('AppLockBloc', 'could not read the stored PIN', e);
+      emit(currentState.copyWith(wrongPinAttempt: true));
+      return;
+    }
+
+    if (verified) {
       // Successful unlock — reset everything, including persisted lockout.
-      await _storage.clearPinLockout();
+      // A refused clear must not hold the unlock hostage; the worst it leaves
+      // behind is a stale counter.
+      await _bestEffort('clear the PIN lockout', _storage.clearPinLockout);
       emit(
         AppLockState.unlocked(
           biometricEnabled: currentState.biometricEnabled,
@@ -199,7 +305,13 @@ class AppLockBloc extends Bloc<AppLockEvent, AppLockState> {
       );
     } else {
       final newFailedAttempts = currentState.failedAttempts + 1;
-      await _storage.storeFailedPinAttempts(newFailedAttempts);
+      // Best-effort for the same reason as above: a failed counter write must
+      // not skip the emit below and leave the lock screen holding a full,
+      // unanswered PIN entry.
+      await _bestEffort(
+        'store the failed-PIN counter',
+        () => _storage.storeFailedPinAttempts(newFailedAttempts),
+      );
 
       if (newFailedAttempts >= _maxFailedAttempts) {
         // Calculate which cooldown tier we're in
@@ -208,7 +320,10 @@ class AppLockBloc extends Bloc<AppLockEvent, AppLockState> {
         final tierIndex = lockoutRound.clamp(0, _cooldownDurations.length - 1);
         final cooldown = _cooldownDurations[tierIndex];
         final cooldownUntil = DateTime.now().add(cooldown);
-        await _storage.storePinCooldownUntil(cooldownUntil);
+        await _bestEffort(
+          'store the PIN cooldown',
+          () => _storage.storePinCooldownUntil(cooldownUntil),
+        );
 
         emit(
           currentState.copyWith(
@@ -256,8 +371,10 @@ class AppLockBloc extends Bloc<AppLockEvent, AppLockState> {
 
     if (result.isSuccess) {
       // Biometric unlock is a valid auth path — clear the persisted PIN
-      // lockout so the counter does not bleed across a successful auth.
-      await _storage.clearPinLockout();
+      // lockout so the counter does not bleed across a successful auth. Same
+      // best-effort as the PIN path: the auth already succeeded, and a store
+      // refusal here must not strand the user behind the blur.
+      await _bestEffort('clear the PIN lockout', _storage.clearPinLockout);
       emit(
         AppLockState.unlocked(biometricEnabled: true, hasPin: latest.hasPin),
       );
@@ -344,9 +461,29 @@ class AppLockBloc extends Bloc<AppLockEvent, AppLockState> {
     AppLockEventReset event,
     Emitter<AppLockState> emit,
   ) async {
-    await _storage.deletePin();
-    await _storage.storeBiometricEnabled(false);
-    await _storage.clearPinLockout();
+    // In-memory state first, and unconditionally. The store deletes below can
+    // now fail loudly — the vault reports a refused delete instead of
+    // swallowing it — and the wipe that dispatches this event has already
+    // swept the store anyway. What this handler must not skip is dropping the
+    // lock state: a bloc left holding `unlocked(hasPin: true)` raises the
+    // LockScreen on the next backgrounding, and the PIN that would dismiss it
+    // has just been deleted.
     emit(const AppLockState.noPinSet());
+
+    // Deletes only — see [AppLockEvent.reset]. `storeBiometricEnabled(false)`
+    // would write the flag back into the store the wipe has just emptied.
+    // Each is independent: one refusal must not leave the others behind the
+    // sweep, and on iOS a Keychain item outlives an app reinstall.
+    Future<void> bestEffort(String what, Future<void> Function() delete) async {
+      try {
+        await delete();
+      } catch (e) {
+        AppLogger.error('AppLockBloc', 'reset could not delete $what', e);
+      }
+    }
+
+    await bestEffort('the PIN', _storage.deletePin);
+    await bestEffort('the biometric flag', _storage.deleteBiometricEnabled);
+    await bestEffort('the PIN lockout', _storage.clearPinLockout);
   }
 }

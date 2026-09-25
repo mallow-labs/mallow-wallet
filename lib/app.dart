@@ -17,8 +17,8 @@ import 'core/config/system_status_service.dart';
 import 'core/crypto/wallet_manager.dart';
 import 'core/models/account.dart';
 import 'core/network/auth_service.dart';
+import 'core/network/hardware_verify_controller.dart';
 import 'core/network/ledger_connect_controller.dart';
-import 'core/network/ledger_verify_controller.dart';
 import 'core/router/app_router.dart';
 import 'core/router/auth_state_notifier.dart';
 import 'core/router/nav_bar_state.dart';
@@ -41,8 +41,8 @@ import 'features/cast/widgets/cast_error_toast.dart';
 import 'features/cast/widgets/cast_receiver_view.dart';
 import 'features/cast/widgets/now_casting_bar.dart';
 import 'features/home/widgets/drawer_signal.dart';
+import 'features/ledger/widgets/hardware_verify_sheet.dart';
 import 'features/ledger/widgets/ledger_connect_sheet.dart';
-import 'features/ledger/widgets/ledger_verify_sheet.dart';
 import 'shared/theme/mallow_theme.dart';
 import 'shared/widgets/action_menu.dart';
 import 'shared/widgets/bottom_nav_bar.dart';
@@ -50,6 +50,7 @@ import 'shared/widgets/force_upgrade_overlay.dart';
 import 'shared/widgets/lock_screen.dart';
 import 'shared/widgets/mallow_scroll_behavior.dart';
 import 'shared/widgets/mallow_sheet.dart';
+import 'shared/widgets/mallow_button.dart';
 import 'shared/widgets/mallow_svg_icon.dart';
 import 'shared/widgets/system_status_banner.dart';
 
@@ -65,7 +66,10 @@ class MallowApp extends StatefulWidget {
 }
 
 class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
-  late final Future<GoRouter> _routerFuture;
+  // Not final: the boot error screen's Retry re-runs initialization (e.g. the
+  // database open failed because the keystore was locked on a background
+  // launch), replacing this future.
+  late Future<GoRouter> _routerFuture;
   late final AppLockBloc _appLockBloc;
   late final CastAwakeGuard _castAwakeGuard;
   DeepLinkService? _deepLinkService;
@@ -74,6 +78,12 @@ class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
   StreamSubscription<AppLockState>? _lockStateSubscription;
   StreamSubscription<CastState>? _castStateSubscription;
   StreamSubscription<SocialAuthResult>? _socialSignInSubscription;
+
+  // True while _initializeRouter is running. The boot error screen's Retry can
+  // fire twice before the rebuild swaps the error screen for the splash, and a
+  // second concurrent run would start a second AuthStateNotifier.initialize()
+  // — whose graph backfill and dormant restore would then race the first run's.
+  bool _bootInFlight = false;
 
   DateTime? _backgroundedAt;
   static const _backgroundLockThreshold = Duration(seconds: 60);
@@ -221,7 +231,36 @@ class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
     }
   }
 
+  /// Run the boot sequence and build the router.
+  ///
+  /// The previous run's listeners are torn down *first*, before anything is
+  /// awaited: a boot Retry re-runs this while run #1's listeners are still
+  /// live, and a social sign-in landing on a stale one switches the active
+  /// wallet — a graph write racing the dormant restore that
+  /// [AuthStateNotifier.initialize] is about to run.
   Future<GoRouter> _initializeRouter() async {
+    _teardownBootListeners();
+    _bootInFlight = true;
+    try {
+      return await _buildRouter();
+    } finally {
+      _bootInFlight = false;
+    }
+  }
+
+  /// Drop every listener a previous [_initializeRouter] left behind. They hold
+  /// the discarded router and keep driving wallet/session state, so they must
+  /// be gone before the next run starts, not merely replaced at the end of it.
+  void _teardownBootListeners() {
+    _socialSignInSubscription?.cancel();
+    _socialSignInSubscription = null;
+    _deepLinkService?.dispose();
+    _deepLinkService = null;
+    _walletChangeSubscription?.cancel();
+    _walletChangeSubscription = null;
+  }
+
+  Future<GoRouter> _buildRouter() async {
     final authStateNotifier = sl<AuthStateNotifier>();
     await authStateNotifier.initialize();
 
@@ -260,6 +299,10 @@ class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
     // Start capturing inbound App Links / Universal Links now that the router
     // exists. Best-effort — failures are swallowed inside the service so they
     // can't block boot.
+    //
+    // Idempotent: a boot Retry re-runs _initializeRouter, which disposes the
+    // first service (see _teardownBootListeners) before reaching here — it
+    // stays subscribed to the link stream and holds the discarded router.
     _deepLinkService = DeepLinkService(
       router: router,
       twitterConnectNotifier: sl<TwitterConnectNotifier>(),
@@ -274,6 +317,9 @@ class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
     final walletManager = sl<WalletManager>();
     final authService = sl<AuthService>();
 
+    // Idempotent: a boot Retry re-runs _initializeRouter, which cancels the
+    // previous subscription (see _teardownBootListeners) before reaching here;
+    // never stack a second listener on the first.
     _walletChangeSubscription = walletManager.onWalletChanged.listen((
       newAddress,
     ) async {
@@ -419,7 +465,18 @@ class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
                     theme: MallowTheme.lightTheme,
                     darkTheme: MallowTheme.darkTheme,
                     themeMode: themeMode,
-                    home: _ErrorScreen(error: snapshot.error.toString()),
+                    home: _ErrorScreen(
+                      error: snapshot.error.toString(),
+                      // Guarded: the tap can land twice before this rebuilds
+                      // into the splash, and a second concurrent boot would
+                      // race the first one's wallet-graph work.
+                      onRetry: () {
+                        if (_bootInFlight) return;
+                        setState(() {
+                          _routerFuture = _initializeRouter();
+                        });
+                      },
+                    ),
                   );
                 }
 
@@ -538,7 +595,7 @@ class _AppWithLockScreen extends StatelessWidget {
                       // a session is active — SafeArea/padding-aware
                       // descendants lift content automatically without
                       // each screen wiring it up.
-                      _LedgerVerifyListener(
+                      _HardwareVerifyListener(
                         child: _LedgerConnectListener(
                           child: PendingTxResolutionListener(
                             child: CastBarMediaQueryInset(
@@ -725,27 +782,28 @@ class _PrivacyBlurOverlayState extends State<_PrivacyBlurOverlay> {
   }
 }
 
-/// Listens to [LedgerVerifyController] and shows the verification bottom sheet
-/// when a Ledger wallet needs interactive signature verification.
-class _LedgerVerifyListener extends StatefulWidget {
-  const _LedgerVerifyListener({required this.child});
+/// Listens to [HardwareVerifyController] and shows the verification bottom
+/// sheet when a hardware wallet needs interactive signature verification.
+class _HardwareVerifyListener extends StatefulWidget {
+  const _HardwareVerifyListener({required this.child});
   final Widget child;
 
   @override
-  State<_LedgerVerifyListener> createState() => _LedgerVerifyListenerState();
+  State<_HardwareVerifyListener> createState() =>
+      _HardwareVerifyListenerState();
 }
 
-class _LedgerVerifyListenerState extends State<_LedgerVerifyListener> {
-  late final StreamSubscription<LedgerVerifyRequest> _sub;
+class _HardwareVerifyListenerState extends State<_HardwareVerifyListener> {
+  late final StreamSubscription<HardwareVerifyRequest> _sub;
   bool _isShowing = false;
 
   @override
   void initState() {
     super.initState();
-    _sub = sl<LedgerVerifyController>().requests.listen(_onRequest);
+    _sub = sl<HardwareVerifyController>().requests.listen(_onRequest);
   }
 
-  void _onRequest(LedgerVerifyRequest request) {
+  void _onRequest(HardwareVerifyRequest request) {
     if (_isShowing) {
       // Another sheet is already showing — reject this request
       request.completer.complete(false);
@@ -766,8 +824,9 @@ class _LedgerVerifyListenerState extends State<_LedgerVerifyListener> {
     showMallowSheet<void>(
       context: navContext,
       isScrollControlled: true,
-      builder: (_) => LedgerVerifySheet(
+      builder: (_) => HardwareVerifySheet(
         address: request.address,
+        walletType: request.walletType,
         completer: request.completer,
       ),
     ).whenComplete(() {
@@ -992,9 +1051,14 @@ class _SplashScreen extends StatelessWidget {
 
 /// Error screen shown if initialization fails.
 class _ErrorScreen extends StatelessWidget {
-  const _ErrorScreen({required this.error});
+  const _ErrorScreen({required this.error, required this.onRetry});
 
   final String error;
+
+  /// Re-runs boot initialization. The failed database open is not cached
+  /// (see ReopenableExecutor), so a retry after the device is unlocked
+  /// succeeds without a force-quit.
+  final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -1025,6 +1089,12 @@ class _ErrorScreen extends StatelessWidget {
                     textAlign: TextAlign.center,
                   ),
                 ),
+              ),
+              const SizedBox(height: MallowTheme.spacingLg),
+              MallowButton(
+                label: 'Try again',
+                onPressed: onRetry,
+                isFullWidth: true,
               ),
             ],
           ),

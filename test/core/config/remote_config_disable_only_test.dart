@@ -143,4 +143,152 @@ void main() {
       );
     });
   });
+
+  group('iOS store gate: kShowNftCommerce hides the paid side only', () {
+    tearDown(() => debugShowNftCommerceOverride = null);
+
+    test('the commerce set names every paid cell and no escape hatch', () {
+      // The paid side — what Apple 3.1.1 is about. Written out longhand so a
+      // new paid cell added to AppFlow without being listed here fails this
+      // test rather than silently shipping on iOS.
+      expect(kStoreCommerceFlows, {
+        AppFlow.fixedPriceBuy,
+        AppFlow.editionBuy,
+        AppFlow.auctionBid,
+        AppFlow.offerCreate,
+        AppFlow.fixedPriceCreate,
+        AppFlow.fixedPriceUpdate,
+        AppFlow.auctionCreate,
+        AppFlow.offerAccept,
+        AppFlow.nftMint,
+        AppFlow.editionMint,
+        AppFlow.collectionMint,
+        AppFlow.raffleBuyTickets,
+      });
+
+      // The escape hatches: how a user gets an asset back out. Hiding the
+      // paid side must leave every one of these reachable, so none may ever
+      // be classified as commerce.
+      const hatches = <AppFlow>[
+        AppFlow.fixedPriceCancel,
+        AppFlow.auctionCancel,
+        AppFlow.auctionSettle,
+        AppFlow.offerCancel,
+        AppFlow.raffleCancel,
+        AppFlow.raffleClaimPrize,
+        AppFlow.raffleClaimProceeds,
+        AppFlow.unstakeNative,
+        AppFlow.withdrawStake,
+        // Wallet functions and metadata edits stay too. `tokenSwap` and
+        // `stakeLiquid` are here because *commerce* never hides them; the
+        // separate `kShowSwap` flag does, and its own group below is what
+        // asserts that.
+        AppFlow.nativeSend,
+        AppFlow.tokenSend,
+        AppFlow.tokenBurn,
+        AppFlow.tokenSwap,
+        AppFlow.nftTransfer,
+        AppFlow.nftBurn,
+        AppFlow.nftEdit,
+        AppFlow.collectionEdit,
+        AppFlow.collectionArtworksEdit,
+        AppFlow.stakeNative,
+        AppFlow.stakeLiquid,
+      ];
+
+      for (final hatch in hatches) {
+        expect(
+          hatch.isStoreCommerce,
+          isFalse,
+          reason: '${hatch.wire} must stay reachable when commerce is hidden',
+        );
+      }
+
+      // The two lists must exhaust AppFlow between them. This is the part
+      // that catches a *new* cell: `isStoreCommerce` is set membership, not an
+      // exhaustive switch, so an unlisted flow is non-commerce by default and
+      // the compiler says nothing — it would walk straight through the route
+      // gate and the signing backstop on iOS.
+      final unclassified = AppFlow.values.toSet()
+        ..removeAll(kStoreCommerceFlows)
+        ..removeAll(hatches);
+      expect(
+        unclassified,
+        isEmpty,
+        reason:
+            'classify the new cell: commerce or escape hatch — '
+            '${unclassified.map((f) => f.wire).join(', ')}',
+      );
+    });
+
+    test('showNftCommerce honours the test override and defaults to the '
+        'compiled flag', () {
+      expect(showNftCommerce, kShowNftCommerce);
+      debugShowNftCommerceOverride = false;
+      expect(showNftCommerce, isFalse);
+      debugShowNftCommerceOverride = true;
+      expect(showNftCommerce, isTrue);
+    });
+  });
+
+  group('iOS store gate: kShowSwap hides the aggregator paths only', () {
+    tearDown(() {
+      debugShowSwapOverride = null;
+      debugShowNftCommerceOverride = null;
+    });
+
+    test('the swap set is exactly the two aggregator cells', () {
+      // Both directions of the liquid staking path are the one `stake-liquid`
+      // cell, so this set covers the liquid unstake as well — deliberately;
+      // see `kShowSwap` for why that escape hatch goes with it.
+      expect(kStoreSwapFlows, {AppFlow.tokenSwap, AppFlow.stakeLiquid});
+
+      // Nothing else may be swept up. Native staking in particular: it stakes
+      // to a validator, builds no swap, and must stay signable.
+      for (final flow in AppFlow.values) {
+        if (kStoreSwapFlows.contains(flow)) continue;
+        expect(
+          flow.isStoreSwap,
+          isFalse,
+          reason: '${flow.wire} is not an aggregator swap',
+        );
+      }
+    });
+
+    test('showSwap honours the test override and defaults to the compiled '
+        'flag', () {
+      expect(showSwap, kShowSwap);
+      debugShowSwapOverride = false;
+      expect(showSwap, isFalse);
+      debugShowSwapOverride = true;
+      expect(showSwap, isTrue);
+    });
+
+    test('storeHidesFlow reads both flags independently', () {
+      // The point of the fold: each flag hides its own cells and neither
+      // reaches the other's. A gate that only consulted one would pass every
+      // single-flag test and still ship the surface the other flag hides.
+      const buy = AppFlow.fixedPriceBuy;
+      const swap = AppFlow.tokenSwap;
+      const send = AppFlow.tokenSend;
+
+      debugShowNftCommerceOverride = true;
+      debugShowSwapOverride = true;
+      expect(storeHidesFlow(buy), isFalse);
+      expect(storeHidesFlow(swap), isFalse);
+
+      debugShowNftCommerceOverride = false;
+      expect(storeHidesFlow(buy), isTrue);
+      expect(storeHidesFlow(swap), isFalse);
+
+      debugShowNftCommerceOverride = true;
+      debugShowSwapOverride = false;
+      expect(storeHidesFlow(buy), isFalse);
+      expect(storeHidesFlow(swap), isTrue);
+
+      // A wallet function no flag names stays visible under both.
+      debugShowNftCommerceOverride = false;
+      expect(storeHidesFlow(send), isFalse);
+    });
+  });
 }

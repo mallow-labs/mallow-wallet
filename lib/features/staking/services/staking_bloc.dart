@@ -9,6 +9,7 @@ import 'package:mallow_api/mallow_api.dart';
 import 'package:solana/solana.dart' show Ed25519HDKeyPair;
 
 import '../../../core/config/remote_config.dart';
+import '../../../core/config/store_build.dart';
 import '../../../core/crypto/wallet_manager.dart';
 import '../../../core/result/app_failure.dart';
 import '../../../core/result/result.dart';
@@ -38,6 +39,20 @@ enum StakeTab { stake, unstake, leaderboard }
 
 /// Native (delegated stake account) vs liquid (mallowSOL via Jupiter).
 enum StakeType { native, liquid }
+
+/// The path the stake sheet opens on.
+///
+/// Liquid leads normally: it asks nothing of the user that Native does — no
+/// ~2-day epoch wait before the stake is earning, no 1 SOL minimum, no claim
+/// step to come back for — and it leads the type selector, so the default and
+/// the first row agree.
+///
+/// A build with [showSwap] off has no liquid path at all — it is an aggregator
+/// swap in either direction — so the selector is gone and the sheet opens
+/// Native. Resolved here rather than defaulted in [StakingState] because the
+/// flag is a getter and that constructor is `const`.
+StakeType get defaultStakeType =>
+    showSwap ? StakeType.liquid : StakeType.native;
 
 /// Kill-switch cell for a staking submit. Native stake and unstake are distinct
 /// builders — and unstake is an escape hatch, so
@@ -152,11 +167,9 @@ class StakingState extends Equatable {
     this.isLoading = true,
     this.loadError,
     this.tab = StakeTab.stake,
-    // The sheet opens on the unlocked path. `StakingBloc` is a DI factory, so
-    // every `showStakeSheet` starts here — and Liquid asks nothing of the user
-    // that Native does: no ~2-day epoch wait before the stake is earning, no
-    // 1 SOL minimum, no claim step to come back for. It also leads the type
-    // selector, so the default and the first row agree.
+    // 🛑 Not the sheet's default — [defaultStakeType] is, and `StakingBloc`
+    // passes it into its initial state. This value only has to be a
+    // compile-time constant so the constructor can stay `const`.
     this.stakeType = StakeType.liquid,
     this.amount = '',
     this.solLamports = 0,
@@ -403,7 +416,7 @@ class StakingBloc extends Bloc<StakingEvent, StakingState> {
     this._walletManager,
     this._journal,
     this._landedSlots,
-  ) : super(const StakingState()) {
+  ) : super(StakingState(stakeType: defaultStakeType)) {
     on<StakingLoadData>(_onLoadData);
     on<StakingBalancesUpdated>(_onBalancesUpdated);
     on<StakingSetTab>(_onSetTab);

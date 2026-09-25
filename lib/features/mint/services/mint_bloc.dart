@@ -1853,8 +1853,16 @@ class MintBloc extends Bloc<MintEvent, MintState> {
       // The v2 builders take the actor (creator/authority) explicitly.
       final signer = await _walletManager.getAddress();
       final String responseTx;
+      // An edit of a compressed NFT whose merkle proof does not fit the
+      // packet comes back with a `setupTx` that creates the address lookup
+      // table the edit tx is compiled against. It is a hard prerequisite:
+      // broadcast the edit first and it names a table that does not exist,
+      // and the chain rejects it with an error that reads like a bug. Absent
+      // (every non-cNFT edit and every shallow tree) the batch is byte-for-
+      // byte the single tx it has always been.
+      final String? setupTx;
       if (isEditMode) {
-        responseTx = (await _repository.buildEditNftTx(
+        final edit = (await _repository.buildEditNftTx(
           _buildEditV2Request(
             authority: signer,
             mintAccount: mintAccount,
@@ -1863,8 +1871,11 @@ class MintBloc extends Bloc<MintEvent, MintState> {
             dryRun: false,
             newGroupSigner: groupKeypair?.publicKey.toBase58(),
           ),
-        )).result.tx;
+        )).result;
+        setupTx = edit.setupTx;
+        responseTx = edit.tx;
       } else {
+        setupTx = null;
         responseTx = (await _repository.buildMintNftTx(
           _buildMintV2Request(
             creator: signer,
@@ -1876,6 +1887,11 @@ class MintBloc extends Bloc<MintEvent, MintState> {
           ),
         )).result.tx;
       }
+      // [TransactionExecutor.execute] signs, sends and **confirms** each tx
+      // before starting the next, so putting the setup tx first IS the
+      // confirmation barrier the edit needs, and a setup failure aborts the
+      // edit without ever broadcasting it.
+      final txBatch = <String>[?setupTx, responseTx];
 
       // 4. Sign + broadcast. Edit mode has no additional signer (the
       // mint account already exists); create mode signs with the
@@ -1887,10 +1903,22 @@ class MintBloc extends Bloc<MintEvent, MintState> {
           groupKeypair,
       ];
       final isLocal = await _walletManager.isLocalSigner();
+      // Signing copy for tx [index] of [total]. A two-tx edit (setup +
+      // edit) prompts the external wallet twice, so the copy carries the
+      // position — without it the second prompt looks like the first one
+      // failed and re-asked. Local-key wallets sign with no user-facing
+      // prompt, so they keep the unadorned label (same rule as the
+      // marketplace flows' `stageFor`).
+      String signingStage(int index, int total) {
+        if (isLocal) return kLocalSigningLabel;
+        if (total > 1) return '$kExternalSigningLabel (${index + 1} of $total)';
+        return kExternalSigningLabel;
+      }
+
       emit(
         state.copyWith(
           pipelineStatus: MintPipelineStatus.awaitingApproval,
-          pipelineStage: isLocal ? kLocalSigningLabel : kExternalSigningLabel,
+          pipelineStage: signingStage(0, txBatch.length),
           mintAccount: mintAccount,
         ),
       );
@@ -1908,10 +1936,23 @@ class MintBloc extends Bloc<MintEvent, MintState> {
       // Route sign → broadcast → confirm through the shared
       // [TransactionExecutor] — the single signing path. Create flows sign
       // with the ephemeral mint keypair (and any lazily-created group
-      // keypair) via [additionalSigners]; edit flows pass none. Mint txs
-      // aren't server-co-signed, so no [StaleTxTracker] is needed.
+      // keypair) via [additionalSigners]; edit flows pass none.
+      //
+      // No [StaleTxTracker] here — and NOT because these txs are unsigned by
+      // the server. They frequently are co-signed: the v2 mint and edit
+      // builders attach the auth keypair's signature whenever
+      // `unlockableContentIds` is non-empty (it is the AppData data
+      // authority) and the subsidy keypair's on a subsidized master-edition
+      // mint (it pays the group rent), so `hasPreAttachedSignature` is
+      // routinely true on this batch. The tracker is omitted because it has
+      // no window to cover here: it closes the gap between a *prepare*-time
+      // build and a later Confirm tap (the marketplace flows' `prepare` →
+      // ready → `execute` split), and this handler builds the tx a few lines
+      // up, milliseconds before `execute`. An expired blockhash surfaces in
+      // the catch below, and Retry (`MintRetryMint` re-enters this handler)
+      // rebuilds from the builder rather than re-signing the stale bytes.
       final signResult = await _executor.execute(
-        txsBase64: [responseTx],
+        txsBase64: txBatch,
         usdValue: usdOutflow,
         flow: FlowKey.solana(flowCell),
         additionalSigners: additionalSigners,
@@ -1921,9 +1962,7 @@ class MintBloc extends Bloc<MintEvent, MintState> {
               emit(
                 state.copyWith(
                   pipelineStatus: MintPipelineStatus.awaitingApproval,
-                  pipelineStage: isLocal
-                      ? kLocalSigningLabel
-                      : kExternalSigningLabel,
+                  pipelineStage: signingStage(e.index, e.total),
                 ),
               );
             case ExecutorStage.ledgerAwaitingDevice:
@@ -2171,7 +2210,8 @@ class MintBloc extends Bloc<MintEvent, MintState> {
 
   /// Build the edit-tx for simulation only. Reuses `existingMetadataUri`
   /// so the IPFS pin isn't needed. Returns null when the required
-  /// edit-mode state isn't available yet (prefill incomplete, etc.).
+  /// edit-mode state isn't available yet (prefill incomplete, etc.), and
+  /// when the answer carries a `setupTx` (see below).
   ///
   /// Sent with `dryRun: true` so pricing the edit doesn't claim the
   /// group-rent subsidy slot or leave a pending `NftUpload` row behind when
@@ -2199,6 +2239,15 @@ class MintBloc extends Bloc<MintEvent, MintState> {
         newGroupSigner: groupSigner,
       ),
     );
+    // A `setupTx` means the returned `tx` is compiled against an address
+    // lookup table that does not exist yet — the backend plans the table
+    // regardless of `dryRun`, so a deep-tree compressed NFT answers with one
+    // here too. There is nothing simulatable: the RPC rejects a tx that names
+    // a missing table, and the caller's blanket catch would swallow that and
+    // report "no cost" as if simulation had merely come back empty. Decline
+    // explicitly so the fallback to the static [costBreakdown] estimate is a
+    // decision, not an accident.
+    if (response.result.setupTx != null) return null;
     return response.result.tx;
   }
 

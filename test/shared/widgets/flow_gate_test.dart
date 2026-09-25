@@ -3,6 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_wallet/core/config/remote_config.dart';
 import 'package:mallow_wallet/core/config/remote_config_service.dart';
+import 'package:mallow_wallet/core/config/store_build.dart';
+import 'package:mallow_wallet/core/security/transaction_auth_gate.dart'
+    show kStoreGatedFlowMessage;
 import 'package:mallow_wallet/di.dart';
 import 'package:mallow_wallet/shared/widgets/flow_unavailable_sheet.dart';
 
@@ -41,6 +44,7 @@ const _fixedPriceBuy = FlowKey.solana(AppFlow.fixedPriceBuy);
 const _editionBuy = FlowKey.solana(AppFlow.editionBuy);
 const _nftMint = FlowKey.solana(AppFlow.nftMint);
 const _nftEdit = FlowKey.solana(AppFlow.nftEdit);
+const _offerCancel = FlowKey.solana(AppFlow.offerCancel);
 const _solTransfer = FlowKey.solana(AppFlow.nftTransfer);
 const _ethTransfer = FlowKey(Chain.ethereum, AppFlow.nftTransfer);
 
@@ -56,6 +60,7 @@ void main() {
   });
 
   tearDown(() {
+    debugShowNftCommerceOverride = null;
     sl.unregister<RemoteConfigService>();
     service.notifier.dispose();
   });
@@ -136,6 +141,65 @@ void main() {
       service.notifier.value = _kill({_fixedPriceBuy: 'Paused.'});
       await runGate(tester, _fixedPriceBuy);
       expect(service.refreshes, 2);
+    });
+  });
+
+  group('the store arm of guardFlowDisabled', () {
+    // A build with `kShowNftCommerce` off hides every entry point to a
+    // commerce cell, so a tap reaching the guard means one was missed. The
+    // guard is the tap-level twin of the route gate and the signing backstop:
+    // same copy, same refusal, and — like the backstop — a Sentry report,
+    // because this is a bug in the hiding, not a routine rejection.
+    testWidgets('refuses a commerce cell with the store copy', (tester) async {
+      debugShowNftCommerceOverride = false;
+
+      await tapGuardedAction(tester, _fixedPriceBuy);
+      expect(find.text(kStoreGatedFlowMessage), findsOneWidget);
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+      expect(aborted, isTrue);
+    });
+
+    testWidgets('does not consult remote config to decide it', (tester) async {
+      // Store policy may never be gated on a value the server can change
+      // (Apple 2.3.1). No cached read, and no staleness nudge either — the
+      // hide is compile-time, so there is nothing a refresh could tell us.
+      debugShowNftCommerceOverride = false;
+
+      expect(await runGate(tester, _fixedPriceBuy), isTrue);
+      expect(service.refreshes, 0);
+    });
+
+    testWidgets('leaves the escape hatches reachable', (tester) async {
+      // The whole point of scoping the hide to `kStoreCommerceFlows`: a user
+      // who listed or offered on the web must still be able to undo it from a
+      // build that sells nothing.
+      debugShowNftCommerceOverride = false;
+
+      expect(await runGate(tester, _offerCancel), isFalse);
+      expect(service.refreshes, 1);
+    });
+
+    testWidgets('a killed escape hatch still shows the operator copy', (
+      tester,
+    ) async {
+      // The arm returns early, so it must not shadow the kill switch for the
+      // cells it does not cover.
+      debugShowNftCommerceOverride = false;
+      service.notifier.value = _kill({_offerCancel: 'Cancels are paused.'});
+
+      expect(await runGate(tester, _offerCancel), isTrue);
+      expect(service.refreshes, 1);
+    });
+
+    testWidgets('with commerce shown a commerce cell is untouched', (
+      tester,
+    ) async {
+      debugShowNftCommerceOverride = true;
+
+      expect(await runGate(tester, _fixedPriceBuy), isFalse);
+      expect(find.text(kStoreGatedFlowMessage), findsNothing);
+      expect(service.refreshes, 1);
     });
   });
 

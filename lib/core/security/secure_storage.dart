@@ -19,6 +19,10 @@ import '../observability/app_logger.dart';
 /// an OS biometric/passcode prompt; the user-facing gate is the app's own
 /// dual-lock (PIN and/or biometric app-lock), see AppLockBloc.
 ///
+/// The recovery graph, the PIN hash and the biometric flag are in the vault
+/// too — see [_write] for why nothing load-bearing may live in the plugin
+/// store.
+///
 /// All other fields use [FlutterSecureStorage]: the iOS Keychain, or on
 /// Android AES-GCM ciphertext under an RSA-OAEP-wrapped Keystore key — see
 /// [_androidOptions]. `EncryptedSharedPreferences` is not used.
@@ -83,12 +87,17 @@ class SecureWalletStorage {
     resetOnError: true,
   );
 
-  /// Store the wallet mnemonic securely.
-  ///
-  /// SECURITY: Written to the OS keychain/keystore at the device-unlock tier.
-  Future<void> storeMnemonic(String mnemonic) async {
-    await _vault.write(_mnemonicKey, mnemonic);
-  }
+  // Same options with the self-heal turned off, for the one read that must
+  // never trade a secret for usability: the pre-vault legacy copy in
+  // [_vaultReadWithMigration]. With resetOnError the plugin DELETES an entry
+  // it cannot decrypt and answers null, so a transient decrypt failure would
+  // destroy the only copy of a mnemonic — or of the not-yet-migrated graph or
+  // PIN — and report it as "never stored". Off, the failure throws, which the
+  // callers read as "unknown" and act on conservatively.
+  static const _androidOptionsNoReset = AndroidOptions(
+    migrateOnAlgorithmChange: true,
+    resetOnError: false,
+  );
 
   /// Load the wallet mnemonic.
   ///
@@ -143,25 +152,20 @@ class SecureWalletStorage {
   ///
   /// SECURITY: The plaintext PIN is never written to disk — only its salted,
   /// memory-hard hash. See [PinHasher].
+  ///
+  /// Stored in the vault: losing the hash drops the mandatory app-lock floor
+  /// (AppLockBloc reports `noPinSet` and the app opens unlocked), and the
+  /// plugin store cannot hold it safely — see [_write].
   Future<void> storePinHash(String pin) async {
     final encoded = await _pinHasher.hash(pin);
-    await _storage.write(
-      key: _pinKey,
-      value: encoded,
-      iOptions: _iosOptions,
-      aOptions: _androidOptions,
-    );
+    await _vaultWriteDroppingLegacy(_pinKey, encoded);
   }
 
   /// Load the raw stored PIN value (an encoded `v1$...` hash, or a legacy
   /// plaintext PIN that predates hashing). Prefer [verifyPin] / [hasPin] —
   /// this is exposed only for callers that need to detect presence.
   Future<String?> loadPin() async {
-    return _storage.read(
-      key: _pinKey,
-      iOptions: _iosOptions,
-      aOptions: _androidOptions,
-    );
+    return _vaultReadWithMigration(_pinKey);
   }
 
   /// Verify [pin] against the stored PIN.
@@ -185,19 +189,58 @@ class SecureWalletStorage {
     return false;
   }
 
-  /// Delete the app lock PIN.
+  /// Delete the app lock PIN from both stores.
   Future<void> deletePin() async {
-    await _storage.delete(
-      key: _pinKey,
-      iOptions: _iosOptions,
-      aOptions: _androidOptions,
-    );
+    await Future.wait([_vault.delete(_pinKey), _delete(_pinKey)]);
   }
 
   /// Check if a PIN has been set.
   Future<bool> hasPin() async {
     final pin = await loadPin();
     return pin != null && pin.isNotEmpty;
+  }
+
+  /// Reads of the auth factors before a missing PIN is believed, and the pause
+  /// between them. See [loadAuthFactors].
+  static const _authFactorReadAttempts = 3;
+  static const _authFactorReadRetryDelay = Duration(milliseconds: 150);
+
+  /// Read both app-lock factors, re-reading while the PIN reads absent.
+  ///
+  /// A transient keystore miss on the PIN must not drop the lock floor or wave
+  /// a gate through. Onboarding cannot finish with neither factor, and every
+  /// caller of these two reads treats "no PIN" as "nothing to challenge with":
+  /// AppLockBloc opens the session, the re-auth gate passes, and the recovery
+  /// phrase screen reveals the mnemonic. The PIN alone drives the retry because
+  /// the biometric flag can only lose a true the same way — and the asymmetric
+  /// miss (PIN absent, biometrics on) is the one that strands a user on a lock
+  /// screen with no PIN pad and no way past a failed biometric.
+  ///
+  /// A biometric-only device really has no PIN: it pays the delays on every
+  /// cold start and still reads false. That is the price of not believing the
+  /// first miss, which is why the delay is short.
+  ///
+  /// The biometric flag is sticky across the attempts — a `true` is never
+  /// talked back down by a later read. It is exactly the biometric-only device
+  /// that burns every attempt, so a transient miss on the last flag read would
+  /// otherwise answer `(false, false)`: the one answer that drops the lock
+  /// entirely.
+  ///
+  /// Read errors propagate — "unknown" is not "absent". Callers must fail
+  /// closed on a throw rather than read it as no lock at all.
+  Future<({bool hasPin, bool biometricEnabled})> loadAuthFactors() async {
+    var pinSet = await hasPin();
+    var biometricEnabled = await loadBiometricEnabled();
+    for (
+      var attempt = 1;
+      !pinSet && attempt < _authFactorReadAttempts;
+      attempt++
+    ) {
+      await Future<void>.delayed(_authFactorReadRetryDelay);
+      pinSet = await hasPin();
+      biometricEnabled = biometricEnabled || await loadBiometricEnabled();
+    }
+    return (hasPin: pinSet, biometricEnabled: biometricEnabled);
   }
 
   // ---------------------------------------------------------------------------
@@ -254,23 +297,31 @@ class SecureWalletStorage {
   Future<void> deleteOnboardingCompleted() => _delete(_onboardingCompletedKey);
 
   /// Store biometric enabled preference.
+  ///
+  /// Kept in the vault alongside the PIN hash: the two together are the
+  /// app-lock floor, and losing one while keeping the other changes what the
+  /// gate means.
   Future<void> storeBiometricEnabled(bool enabled) async {
-    await _storage.write(
-      key: _biometricEnabledKey,
-      value: enabled.toString(),
-      iOptions: _iosOptions,
-      aOptions: _androidOptions,
-    );
+    await _vaultWriteDroppingLegacy(_biometricEnabledKey, enabled.toString());
   }
 
   /// Load biometric enabled preference.
   Future<bool> loadBiometricEnabled() async {
-    final value = await _storage.read(
-      key: _biometricEnabledKey,
-      iOptions: _iosOptions,
-      aOptions: _androidOptions,
-    );
+    final value = await _vaultReadWithMigration(_biometricEnabledKey);
     return value == 'true';
+  }
+
+  /// Delete the biometric enabled preference.
+  ///
+  /// Use this instead of `storeBiometricEnabled(false)` on any path that runs
+  /// after a wipe: writing `'false'` re-creates the item, and a Keychain item
+  /// outlives an iOS reinstall. Absent and `'false'` read the same, so the
+  /// delete costs nothing.
+  Future<void> deleteBiometricEnabled() async {
+    await Future.wait([
+      _vault.delete(_biometricEnabledKey),
+      _delete(_biometricEnabledKey),
+    ]);
   }
 
   /// Check if a wallet exists (account graph, mnemonic, or social wallet address).
@@ -291,13 +342,47 @@ class SecureWalletStorage {
   // ---------------------------------------------------------------------------
 
   /// Store the account graph JSON blob for recovery after reinstall.
-  Future<void> storeAccountGraph(String json) => _write(_accountGraphKey, json);
+  ///
+  /// Written to the vault, never the plugin store: the graph is the only index
+  /// of the vault's per-seed mnemonics and imported keys, and a plugin-store
+  /// overwrite destroys the stored item before it writes the new one (see
+  /// [_write]). The vault write is update-or-add on both platforms, so a
+  /// failed write leaves the stored graph exactly as it was — which is why
+  /// this is deliberately not behind [_requireProtectedData], and why both
+  /// sync callers can treat a failed write as safe: a plain sync keeps the
+  /// stored graph, a pruning sync aborts the removal with nothing deleted.
+  ///
+  /// The pre-migration plugin copy is dropped after the write so
+  /// [loadAccountGraph]'s migration can never resurrect a stale graph.
+  Future<void> storeAccountGraph(String json) =>
+      _vaultWriteDroppingLegacy(_accountGraphKey, json);
 
   /// Load the account graph JSON blob.
-  Future<String?> loadAccountGraph() => _read(_accountGraphKey);
+  ///
+  /// Guarded by [_requireProtectedData] for the same reason the DB key read is:
+  /// while protected data is unavailable the Keychain can report an existing
+  /// item as *not found*, and every caller of this read acts on null as "there
+  /// is no graph". That answer routes a launch to onboarding, or makes the next
+  /// sync write a graph built from the database alone — orphaning every seed
+  /// the stored graph was carrying, with the vault items left behind and no
+  /// index to find them by. A keystore that cannot be read must therefore
+  /// throw, never read as absent.
+  ///
+  /// The thrown [DbEncryptionKeyUnavailable] is named for the read that needed
+  /// the guard first; the condition it reports — this keystore is not readable
+  /// right now — is exactly the same one, and its message already says so.
+  Future<String?> loadAccountGraph() async {
+    await _requireProtectedData();
+    return _vaultReadWithMigration(_accountGraphKey);
+  }
 
-  /// Delete the account graph.
-  Future<void> deleteAccountGraph() => _delete(_accountGraphKey);
+  /// Delete the account graph from both stores.
+  Future<void> deleteAccountGraph() async {
+    await Future.wait([
+      _vault.delete(_accountGraphKey),
+      _delete(_accountGraphKey),
+    ]);
+  }
 
   // ---------------------------------------------------------------------------
   // Login Token Methods
@@ -564,30 +649,75 @@ class SecureWalletStorage {
   // Private helpers
   // ---------------------------------------------------------------------------
 
-  /// Read from the biometric vault, falling back to legacy [FlutterSecureStorage]
-  /// on a cache miss and migrating the value on first access.
+  /// Read from the vault, falling back to legacy [FlutterSecureStorage] on a
+  /// cache miss and migrating the value on first access.
+  ///
+  /// A vault read *error* propagates: "unknown" is not "absent", and every
+  /// caller of these reads acts on null as "the value was never stored".
   Future<String?> _vaultReadWithMigration(String key) async {
     final vaultValue = await _vault.read(key);
     if (vaultValue != null) return vaultValue;
 
-    // Legacy item present from before the vault was introduced.
+    // Legacy item present from before the vault was introduced — read with
+    // the self-heal off (see [_androidOptionsNoReset]) so an undecryptable
+    // entry throws instead of being deleted and answered as null.
     final legacy = await _storage.read(
       key: key,
       iOptions: _iosOptions,
-      aOptions: _androidOptions,
+      aOptions: _androidOptionsNoReset,
     );
     if (legacy == null) return null;
 
-    // Migrate: write to vault and delete from legacy storage.
-    await _vault.write(key, legacy);
-    await _storage.delete(
-      key: key,
-      iOptions: _iosOptions,
-      aOptions: _androidOptions,
-    );
+    // Migrate: write to vault and delete from legacy storage. The migration
+    // is an optimisation, not a precondition — a failed one must not hide a
+    // value that was read successfully, and the legacy copy survives it
+    // because the delete only runs after the write succeeded.
+    try {
+      await _vault.write(key, legacy);
+      await _storage.delete(
+        key: key,
+        iOptions: _iosOptions,
+        aOptions: _androidOptions,
+      );
+    } catch (e) {
+      AppLogger.warn(
+        'SecureStorage',
+        'Failed to migrate a legacy item into the vault: $e',
+      );
+    }
     return legacy;
   }
 
+  /// Write [value] into the vault, then best-effort drop any pre-migration
+  /// copy of [key] from the plugin store.
+  ///
+  /// Order matters: the vault write is update-or-add, so nothing is ever
+  /// deleted before the new value is stored. The legacy delete is swallowed —
+  /// it only stops [_vaultReadWithMigration] reading a stale value back if
+  /// the vault entry later reads as absent.
+  Future<void> _vaultWriteDroppingLegacy(String key, String value) async {
+    await _vault.write(key, value);
+    try {
+      await _delete(key);
+    } catch (e) {
+      AppLogger.warn(
+        'SecureStorage',
+        'Failed to drop the legacy plugin-store copy: $e',
+      );
+    }
+  }
+
+  /// Plugin-store write.
+  ///
+  /// WARNING: nothing load-bearing may be stored through here. On iOS the
+  /// plugin's overwrite is delete-then-add (its update query asks for the item
+  /// data back, so the update never succeeds and it falls through to
+  /// `SecItemDelete` + `SecItemAdd`), so a kill or a failed add between the two
+  /// destroys the stored item; on Android `resetOnError` deletes an entry the
+  /// plugin cannot decrypt — or the whole store — and reports it as absent.
+  /// The recovery graph, the PIN hash and the biometric flag were moved to the
+  /// vault for exactly that reason. What stays here is re-creatable by a fresh
+  /// login, onboarding or sync.
   Future<void> _write(String key, String value) => _storage.write(
     key: key,
     value: value,
@@ -693,10 +823,16 @@ class SecureWalletStorage {
 
   /// In-flight bootstrap, so concurrent cold-start callers share one result
   /// instead of racing to generate/store separate keys.
-  Completer<String>? _dbEncryptionKeyBootstrap;
+  Completer<DbKeyResolution>? _dbEncryptionKeyBootstrap;
 
   /// Resolve the DB encryption key, generating and persisting one only when
-  /// this is genuinely the first run.
+  /// this is genuinely the first run. See [resolveDbEncryptionKey] for the
+  /// full outcome; this returns just the key.
+  Future<String> getOrCreateDbEncryptionKey({required bool dbFileExists}) =>
+      resolveDbEncryptionKey(dbFileExists: dbFileExists).then((r) => r.key);
+
+  /// Resolve the DB encryption key, generating and persisting one only when
+  /// this is genuinely the first run — and say how it was resolved.
   ///
   /// [dbFileExists] is the safety interlock: when an encrypted database is
   /// already on disk, a key must have existed, so a null read is treated as a
@@ -705,12 +841,19 @@ class SecureWalletStorage {
   /// bug that silently destroyed wallet metadata and forced users through the
   /// Restore screen.
   ///
-  /// Concurrent callers receive the same key — the first call wins and any
+  /// When a replacement *is* minted against an existing file, the result
+  /// records whether this looks like a device migration — the Keychain holds
+  /// nothing at all (no key in either store, no vault item, no account graph),
+  /// which is what a backup restore or device transfer leaves behind since
+  /// every item is `*ThisDeviceOnly`. The open path uses that to log the
+  /// inevitable quarantine as information rather than a corruption alert.
+  ///
+  /// Concurrent callers receive the same result — the first call wins and any
   /// callers that arrive while it is in flight await the same future.
-  Future<String> getOrCreateDbEncryptionKey({required bool dbFileExists}) {
+  Future<DbKeyResolution> resolveDbEncryptionKey({required bool dbFileExists}) {
     final inFlight = _dbEncryptionKeyBootstrap;
     if (inFlight != null) return inFlight.future;
-    final completer = Completer<String>();
+    final completer = Completer<DbKeyResolution>();
     _dbEncryptionKeyBootstrap = completer;
     () async {
       try {
@@ -723,7 +866,7 @@ class SecureWalletStorage {
     return completer.future;
   }
 
-  Future<String> _resolveDbEncryptionKey(bool dbFileExists) async {
+  Future<DbKeyResolution> _resolveDbEncryptionKey(bool dbFileExists) async {
     await _requireProtectedData();
 
     var hexKey = await _readDbKeyAnySource();
@@ -738,18 +881,28 @@ class SecureWalletStorage {
       await Future<void>.delayed(_dbKeyReadRetryDelay);
       hexKey = await _readDbKeyAnySource();
     }
-    if (hexKey != null) return hexKey;
+    if (hexKey != null) {
+      return DbKeyResolution(
+        key: hexKey,
+        mintedReplacement: false,
+        migrationSuspected: false,
+      );
+    }
 
+    var migrationSuspected = false;
     if (dbFileExists) {
+      migrationSuspected = await _keychainLooksEmpty();
       // Genuine loss (e.g. Android resetOnError wiped the store and the
-      // vault backup predates this build). Mint a replacement so the app
+      // vault backup predates this build), or a database file that travelled
+      // to a new device without its Keychain. Mint a replacement so the app
       // stays usable; the open path quarantines — never deletes — the old
       // file, and the recovery screen restores wallets from the Keychain
-      // account graph.
+      // account graph when there is one.
       AppLogger.warn(
         'SecureStorage',
         'DB encryption key missing from both stores while a database file '
-            'exists; minting a replacement. The old file will be quarantined.',
+            'exists; minting a replacement. The old file will be quarantined'
+            '${migrationSuspected ? ' (no Keychain data at all: likely a device migration)' : ''}.',
       );
     }
 
@@ -762,7 +915,27 @@ class SecureWalletStorage {
     // memory would create a database no later launch can decrypt.
     await storeDbEncryptionKey(minted);
     await _backfillDbKeyBackup(minted);
-    return minted;
+    return DbKeyResolution(
+      key: minted,
+      mintedReplacement: dbFileExists,
+      migrationSuspected: migrationSuspected,
+    );
+  }
+
+  /// True when nothing of ours is in the Keychain: no vault item and no
+  /// account graph. Best-effort — any read error answers false, so a doubt
+  /// is logged as the louder (error) case.
+  ///
+  /// The graph now lives in the vault, so the first check already covers it;
+  /// the second is what catches a legacy copy that has not been migrated yet.
+  Future<bool> _keychainLooksEmpty() async {
+    try {
+      if ((await _vault.listKeys()).isNotEmpty) return false;
+      final graph = await loadAccountGraph();
+      return graph == null || graph.isEmpty;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Read the key from the primary store, falling back to the vault backup.
@@ -771,7 +944,10 @@ class SecureWalletStorage {
   /// A [MnemonicVault] read error propagates when the primary came back empty:
   /// with the
   /// primary unreadable, failing the launch is safer than concluding "no key"
-  /// and re-keying an existing database.
+  /// and re-keying an existing database. An item the Android channel cannot
+  /// decrypt (its keystore alias is gone) is reported as *absent*, not as an
+  /// error, by design: that null is never acted on destructively — the caller
+  /// retries, and mints only when a database file does not exist.
   Future<String?> _readDbKeyAnySource() async {
     final primary = await loadDbEncryptionKey();
     if (primary != null) {
@@ -793,9 +969,11 @@ class SecureWalletStorage {
     return backup;
   }
 
-  /// Write the vault backup copy of the DB key if it is absent. Best-effort:
-  /// the vault write is delete-then-add on iOS, so this only runs when no
-  /// backup exists — never as a replacement — and failures are swallowed.
+  /// Write the vault backup copy of the DB key if it is absent. Best-effort,
+  /// and never a replacement: the backup must not be overwritten with a
+  /// *different* key, because a transient null on the backup read at mint time
+  /// would otherwise replace the key that still opens the quarantined file.
+  /// Failures are swallowed.
   Future<void> _backfillDbKeyBackup(String hexKey) async {
     try {
       final existing = await _vault.read(_dbEncryptionKeyKey);
@@ -807,14 +985,16 @@ class SecureWalletStorage {
     }
   }
 
-  /// Block until iOS/macOS protected data is available, or fail the launch.
+  /// Block until iOS/macOS protected data is available, or refuse the read.
   ///
   /// Every Keychain item here uses the when-unlocked tier, and iOS can report
   /// an existing-but-inaccessible item as *not found* — which reads as "no
-  /// key". Never read (or mint) while the keystore is in that state. Failing
-  /// is fatal for this launch (drift's LazyDatabase caches a failed open):
-  /// headless background launches while locked die here harmlessly, and a
-  /// foreground launch implies an unlocked device.
+  /// key", and equally as "no recovery graph". Never read (or mint, or rebuild
+  /// an index) while the keystore is in that state: a throw leaves the caller
+  /// holding "unknown", which every caller of the guarded reads treats
+  /// conservatively, while null means "gone" and is acted on. Headless
+  /// background launches while locked stop here harmlessly, and a foreground
+  /// launch implies an unlocked device.
   Future<void> _requireProtectedData() async {
     if (kIsWeb) return;
     final platform = defaultTargetPlatform;
@@ -882,7 +1062,7 @@ class SecureWalletStorage {
       deleteActiveProfileId(),
       deleteOnboardingCompleted(),
       deleteAccountGraph(),
-      _delete(_biometricEnabledKey),
+      deleteBiometricEnabled(),
       _delete(_txAuthThresholdUsdKey),
       _delete(_txAuthEnabledKey),
       clearPinLockout(),
@@ -919,6 +1099,78 @@ class SecureWalletStorage {
     await Future.wait(keys.map(_delete));
   }
 
+  /// Erase every secret and preference this class owns — the explicit-wipe
+  /// path behind Settings → Reset app and the reinstall screen's Start fresh.
+  ///
+  /// Runs [clearAll] first (the readable inventory of what a wipe touches),
+  /// then sweeps both stores by enumeration: every vault key ([MnemonicVault.
+  /// listKeys]) and every plugin-store item under the app's service. The
+  /// sweep is what makes the wipe complete — ids the app has lost track of
+  /// (a per-seed mnemonic whose account graph is gone, a legacy per-account
+  /// key) are unreachable by name but must not outlive the identity.
+  ///
+  /// Best-effort by design: every step runs even when an earlier one fails,
+  /// and the failures come back as [EraseFailure]s (step name + error code,
+  /// never a value) so the caller can report "some data could not be erased"
+  /// instead of leaving the user half-wiped and still signed in.
+  ///
+  /// The DB encryption key goes too — both the primary and the vault backup —
+  /// so the caller must also discard the database *file* and reopen it, or
+  /// the next launch finds a file it cannot decrypt.
+  Future<List<EraseFailure>> eraseAllSecrets({
+    List<String> seedPhraseIds = const [],
+    List<String> walletIds = const [],
+  }) async {
+    final failures = <EraseFailure>[];
+    Future<void> step(String name, Future<void> Function() body) async {
+      try {
+        await body();
+      } catch (e) {
+        failures.add(EraseFailure(name, _describeError(e)));
+      }
+    }
+
+    await step(
+      'clearAll',
+      () => clearAll(seedPhraseIds: seedPhraseIds, walletIds: walletIds),
+    );
+
+    var vaultKeys = const <String>[];
+    await step('vault.listKeys', () async {
+      vaultKeys = await _vault.listKeys();
+    });
+    for (final key in vaultKeys) {
+      await step('vault.delete', () => _vault.delete(key));
+    }
+
+    var storeKeys = const <String>[];
+    await step('store.readAll', () async {
+      final all = await _storage.readAll(
+        iOptions: _iosOptions,
+        aOptions: _androidOptions,
+      );
+      storeKeys = all.keys.toList();
+    });
+    for (final key in storeKeys) {
+      await step('store.delete', () => _delete(key));
+    }
+
+    // The in-memory DB-key bootstrap would otherwise hand the erased key to
+    // the next database open in this process.
+    _dbEncryptionKeyBootstrap = null;
+    return failures;
+  }
+
+  /// Error → report string with no secret content: platform error codes and
+  /// messages carry OS status codes, not stored values; anything else is
+  /// reduced to its type.
+  static String _describeError(Object e) {
+    if (e is PlatformException) {
+      return e.message == null ? e.code : '${e.code}: ${e.message}';
+    }
+    return e.runtimeType.toString();
+  }
+
   /// Delete only the non-secret session/selection keys that make [hasWallet]
   /// report a wallet: selected wallet/account pointers, login session, and
   /// the onboarding flag.
@@ -944,17 +1196,51 @@ class SecureWalletStorage {
   }
 }
 
+/// How [SecureWalletStorage.resolveDbEncryptionKey] arrived at its key.
+class DbKeyResolution {
+  const DbKeyResolution({
+    required this.key,
+    required this.mintedReplacement,
+    required this.migrationSuspected,
+  });
+
+  /// The hex key to open the database with.
+  final String key;
+
+  /// True when a database file existed but no key could be found in either
+  /// store, so a fresh key was minted — the existing file will fail its header
+  /// check and be quarantined.
+  final bool mintedReplacement;
+
+  /// True when [mintedReplacement] and the Keychain held nothing of ours at
+  /// all (no vault item, no account graph): the signature of a backup restore
+  /// or device transfer, not of corruption.
+  final bool migrationSuspected;
+}
+
+/// One step of an explicit wipe that failed. [step] is a stable name
+/// (`vault.delete`, `store.readAll`, …); [detail] is the error code or type —
+/// never a stored value.
+class EraseFailure {
+  const EraseFailure(this.step, this.detail);
+
+  final String step;
+  final String detail;
+
+  @override
+  String toString() => 'EraseFailure($step: $detail)';
+}
+
 /// Thrown when the DB encryption key cannot be read because the OS keystore
 /// is not available (iOS/macOS protected data unavailable — the device has
-/// not been unlocked). Fatal for this launch: drift's LazyDatabase caches a
-/// failed open, so recovery is a relaunch. Users should never see this — a
-/// foreground launch implies an unlocked device; locked background launches
-/// die on it harmlessly instead of corrupting the key.
+/// not been unlocked). The database open that hit it fails, and the next
+/// query retries the open from scratch; the key itself is never touched.
+/// Users should rarely see this — a foreground launch implies an unlocked
+/// device; locked background launches fail on it harmlessly.
 class DbEncryptionKeyUnavailable implements Exception {
   const DbEncryptionKeyUnavailable();
 
   @override
   String toString() =>
-      'Secure storage is locked. Unlock your device, then close and reopen '
-      'the app.';
+      'Secure storage is locked. Unlock your device and try again.';
 }

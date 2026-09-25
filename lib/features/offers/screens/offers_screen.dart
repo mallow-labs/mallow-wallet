@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:mallow_api/mallow_api.dart' as api;
 
 import '../../../core/config/remote_config.dart';
+import '../../../core/config/store_build.dart';
 import '../../../core/router/app_router.dart';
 import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
@@ -123,10 +124,17 @@ class _OffersViewState extends State<_OffersView> {
     if (item.kind == api.OffersInboxKind.bid) {
       return _openArtwork(item);
     }
+    final isPlaced = item.direction == api.OffersInboxDirection.placed;
+    // Accepting is the paid side (`offer-accept` is a `kStoreCommerceFlows`
+    // cell): a store build that hides commerce keeps the received row as
+    // information and routes "View" to the artwork, exactly like a bid.
+    // Cancelling a placed offer is the escape hatch and keeps its flow.
+    if (!isPlaced && !showNftCommerce) {
+      return _openArtwork(item);
+    }
     // A second tap while the first is still switching would race two switches.
     if (_switchingSigner) return;
 
-    final isPlaced = item.direction == api.OffersInboxDirection.placed;
     // Kill-switch entry gate — this inbox is an independent signing host for
     // the same two builders the artwork detail screen dispatches, so it reads
     // the same two cells (🔓 offer-cancel stays separate so killing

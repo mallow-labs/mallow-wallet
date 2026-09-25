@@ -8,6 +8,7 @@ import 'package:mallow_wallet/di.dart';
 import 'package:mallow_wallet/features/market/widgets/place_bid_sheet.dart';
 import 'package:mallow_wallet/features/portfolio/models/token_balance.dart';
 import 'package:mallow_wallet/features/portfolio/services/token_balance_bloc.dart';
+import 'package:mallow_wallet/shared/widgets/artwork_sheet_image.dart';
 import 'package:mallow_wallet/shared/widgets/mallow_button.dart';
 import 'package:mocktail/mocktail.dart';
 
@@ -56,19 +57,34 @@ void main() {
     when(() => balanceBloc.state).thenReturn(solBalance(10));
   });
 
-  Widget buildSheet({int? minBid = minBidRaw, AuctionMetadata? auction}) =>
-      MaterialApp(
-        home: Scaffold(
-          body: PlaceBidSheet(
-            artworkTitle: 'Amazing NFT',
-            mintAccount: 'mint',
-            currencyMint: solMint,
-            minBidRaw: minBid,
-            auction: auction,
-            tokenBalanceBloc: balanceBloc,
-          ),
-        ),
-      );
+  Widget buildSheet({
+    int? minBid = minBidRaw,
+    AuctionMetadata? auction,
+    String? artworkImageUrl,
+  }) => MaterialApp(
+    home: Scaffold(
+      body: PlaceBidSheet(
+        artworkTitle: 'Amazing NFT',
+        mintAccount: 'mint',
+        artworkImageUrl: artworkImageUrl,
+        currencyMint: solMint,
+        minBidRaw: minBid,
+        auction: auction,
+        tokenBalanceBloc: balanceBloc,
+      ),
+    ),
+  );
+
+  testWidgets('caps the artwork preview at 74px', (tester) async {
+    await tester.pumpWidget(
+      buildSheet(artworkImageUrl: 'https://example.com/artwork.png'),
+    );
+
+    expect(
+      tester.widget<ArtworkSheetImage>(find.byType(ArtworkSheetImage)).height,
+      74,
+    );
+  });
 
   VoidCallback? nextOnPressed(WidgetTester tester) =>
       tester.widget<MallowButton>(find.byType(MallowButton)).onPressed;
@@ -77,7 +93,7 @@ void main() {
     await tester.pumpWidget(buildSheet());
     await tester.pump();
 
-    expect(find.text('Min: 1.50 SOL'), findsOneWidget);
+    expect(find.text('Min: 1.5 SOL'), findsOneWidget);
   });
 
   testWidgets('a below-minimum bid disables Next and labels it "Bid too low"', (

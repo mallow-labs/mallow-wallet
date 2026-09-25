@@ -105,10 +105,23 @@ void main() {
     when(mockProfileLookup.lastResponse).thenReturn(null);
   });
 
+  test('synthetic master has no permissions and never reaches DAS', () async {
+    final permissions = await service.checkPermissions(
+      'cnft-master-collection-hash',
+    );
+
+    expect(permissions.canTransfer, isFalse);
+    expect(permissions.canBurn, isFalse);
+    expect(permissions.canEdit, isFalse);
+    expect(permissions.canList, isFalse);
+    verifyNever(mockDas.getAsset(any));
+  });
+
   DigitalAsset asset({
     TokenStandard standard = TokenStandard.nft,
     String? owner = me,
     bool frozen = false,
+    bool delegated = false,
     bool freezeDelegateFrozen = false,
     bool permanentFreezeDelegateFrozen = false,
     int supply = 0,
@@ -125,6 +138,7 @@ void main() {
     // freezeDelegate.frozen, and permanentFreezeDelegate.frozen —
     // mirror that here so tests look like real DAS state.
     frozen: frozen || freezeDelegateFrozen || permanentFreezeDelegateFrozen,
+    delegated: delegated,
     supply: supply,
     freezeDelegateFrozen: freezeDelegateFrozen,
     permanentFreezeDelegateFrozen: permanentFreezeDelegateFrozen,
@@ -179,16 +193,86 @@ void main() {
       expect(p.canBurn, isFalse);
     });
 
-    test('pNFT owner with supply==0 can burn', () async {
-      final p = await checkWith(asset(standard: TokenStandard.pnft));
+    // A REAL pNFT is always `frozen`: Token Metadata freezes the token account
+    // for the asset's whole life to enforce the programmable rules. Reading
+    // that flag as "someone else is holding it" disabled Burn — and Transfer,
+    // List and Accept Offer — for every pNFT a user owns. Only a delegate
+    // (staked, or listed off-mallow) is a real hold, and Token Metadata does
+    // refuse the burn then.
+    test(
+      'pNFT owner with supply==0 can burn, frozen token account and all',
+      () async {
+        final p = await checkWith(
+          asset(standard: TokenStandard.pnft, frozen: true),
+        );
+        expect(p.canBurn, isTrue);
+        expect(p.canTransfer, isTrue);
+        expect(p.canList, isTrue);
+      },
+    );
+
+    test('delegated pNFT cannot burn, transfer or list', () async {
+      final p = await checkWith(
+        asset(standard: TokenStandard.pnft, frozen: true, delegated: true),
+      );
+      expect(p.canBurn, isFalse);
+      expect(p.canTransfer, isFalse);
+      expect(p.canList, isFalse);
+    });
+
+    // The carve-out is pNFT-only: a delegate on any other standard is not a
+    // hold, and a frozen one still is.
+    test(
+      'a delegated legacy NFT is unaffected by the pNFT carve-out',
+      () async {
+        expect((await checkWith(asset(delegated: true))).canBurn, isTrue);
+        expect(
+          (await checkWith(asset(frozen: true, delegated: true))).canBurn,
+          isFalse,
+        );
+      },
+    );
+
+    // Burn is irreversible and this predicate is the only thing that decides
+    // whether the row is offered at all, so both directions are user-visible
+    // bugs. `false` for every cNFT — what this file used to pin, on a stale
+    // "the v2 builder rejects cnft" note — permanently stranded the standard:
+    // `/v2/tx/assets/burn` dispatches `cnft` to `build_cnft_burn_ixs` and
+    // builds a Bubblegum `Burn` / `BurnV2` for either tree version.
+    test('cNFT owner can burn — the v2 builder has a cnft arm', () async {
+      final p = await checkWith(asset(standard: TokenStandard.cnft));
       expect(p.canBurn, isTrue);
     });
 
-    // Webapp's `burnAsset` has no cnft arm and the v2 backend
-    // (`/v2/tx/assets/burn`) returns BadRequest for cnft. Hiding the
-    // menu item is the only way to avoid a mid-flow failure.
-    test('cNFT is never burnable, even for the owner', () async {
-      final p = await checkWith(asset(standard: TokenStandard.cnft));
+    // The builder resolves the leaf from DAS and refuses with a 400 unless its
+    // owner is the signer — the case that covers both "someone else's leaf"
+    // and a leaf sitting in a listing / auction escrow PDA. A `true` here
+    // would offer a burn that can only ever fail.
+    test('cNFT owned by another wallet (or an escrow) cannot burn', () async {
+      final p = await checkWith(
+        asset(standard: TokenStandard.cnft, owner: other),
+      );
+      expect(p.canBurn, isFalse);
+    });
+
+    // Same frozen term the cNFT transfer / list arms carry: the pNFT carve-out
+    // is pNFT-only, so a frozen leaf still reads as held by someone else and
+    // Bubblegum would reject the burn.
+    test('frozen cNFT cannot burn', () async {
+      final p = await checkWith(
+        asset(standard: TokenStandard.cnft, frozen: true),
+      );
+      expect(p.canBurn, isFalse);
+    });
+
+    // The indexer listing gate is applied before the on-chain arms for every
+    // standard, and a listed cNFT is escrowed away from its owner — burning it
+    // is exactly the destructive action the gate exists to withhold.
+    test('listed cNFT is not burnable even for the owner', () async {
+      final p = await checkWith(
+        asset(standard: TokenStandard.cnft),
+        listingType: ListingType.buyNow,
+      );
       expect(p.canBurn, isFalse);
     });
 

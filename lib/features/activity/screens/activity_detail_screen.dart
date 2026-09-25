@@ -20,7 +20,9 @@ import '../../../shared/widgets/app_snack_bar.dart';
 import '../../../shared/widgets/mallow_button.dart';
 import '../../../shared/widgets/mallow_svg_icon.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
+import '../../artwork/models/on_chain_asset.dart';
 import '../../artwork/services/artwork_download_actions.dart';
+import '../../artwork/services/artwork_permission_service.dart';
 import '../../artwork/widgets/artwork_context_menu_sheet.dart';
 import '../../artwork/widgets/burn_artwork_flow.dart';
 import '../../artwork/widgets/transfer_artwork_flow.dart';
@@ -55,6 +57,8 @@ class ActivityDetailScreen extends StatefulWidget {
 
 class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
   bool _copied = false;
+  PortfolioArtwork? _artwork;
+  Future<ArtworkPermissions>? _permissionsFuture;
 
   api.Activity get activity => widget.activity;
   VoidCallback get onBack => widget.onBack;
@@ -62,6 +66,16 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
   @override
   void initState() {
     super.initState();
+    _artwork = _artworkFromActivity();
+    final artwork = _artwork;
+    if (artwork != null) {
+      _permissionsFuture = sl<ArtworkPermissionService>()
+          .checkPermissions(
+            artwork.mintAccount,
+            listingType: artwork.listingType,
+          )
+          .onError((_, _) => const UnresolvedArtworkPermissions());
+    }
     // The preview hero and the Paid / Received rows both name the token, which
     // the feed doesn't. Usually already warm from the list row that was
     // tapped — but not on a push-notification deep link into this screen.
@@ -639,6 +653,24 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
   }
 
   Future<void> _showContextMenu(BuildContext context) async {
+    final artwork = _artwork;
+    if (artwork == null || !context.mounted) return;
+
+    // Hide/Unhide is suppressed here: activity artworks are synthesized from
+    // tx data with no real hidden state, so the row would always read "Hide"
+    // and re-hide an already-hidden item. See [showArtworkContextMenu].
+    final action = await showArtworkContextMenu(
+      context,
+      artwork: artwork,
+      showHide: false,
+      permissionsFuture: _permissionsFuture,
+    );
+    if (!context.mounted) return;
+
+    await _handleCastAction(action, artwork);
+  }
+
+  PortfolioArtwork? _artworkFromActivity() {
     PortfolioArtwork? artwork;
 
     final marketData = activity.marketData;
@@ -664,20 +696,7 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
         editionNumber: transferData.nftEditionNumber,
       );
     }
-
-    if (artwork == null || !context.mounted) return;
-
-    // Hide/Unhide is suppressed here: activity artworks are synthesized from
-    // tx data with no real hidden state, so the row would always read "Hide"
-    // and re-hide an already-hidden item. See [showArtworkContextMenu].
-    final action = await showArtworkContextMenu(
-      context,
-      artwork: artwork,
-      showHide: false,
-    );
-    if (!context.mounted) return;
-
-    await _handleCastAction(action, artwork);
+    return artwork;
   }
 
   Future<void> _handleCastAction(

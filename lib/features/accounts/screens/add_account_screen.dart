@@ -10,12 +10,14 @@ import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/widgets/mallow_header.dart';
 import '../../../shared/widgets/menu_row.dart';
 import '../../onboarding/widgets/create_wallet_menu.dart';
+import '../../seed_vault/widgets/seed_vault_entry.dart';
 
 /// Full-screen menu for adding a new account.
 ///
 /// Options:
 /// - Create new account (new seed or social sign-in)
 /// - Connect hardware wallet (the live Ledger BLE scan, not a placeholder)
+/// - Import from Seed Vault (only on a device that has one)
 /// - Add from recovery phrase (only when existing phrases exist)
 /// - Import recovery phrase
 /// - Import private key
@@ -97,6 +99,20 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
                 onTap: () {
                   context.push(AppRoutes.ledgerScan);
                 },
+              ),
+              // Renders nothing unless this device actually has Seed Vault, so
+              // a plain Android phone and iOS show no Seed Vault surface at all.
+              SeedVaultEntry(
+                builder: (context) => Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: MenuRow(
+                    icon: 'assets/icons/shield_half.svg',
+                    label: 'Import from Seed Vault',
+                    onTap: () {
+                      context.push(AppRoutes.seedVaultImport);
+                    },
+                  ),
+                ),
               ),
               const SizedBox(height: 8),
               MenuRow(

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../../core/config/store_build.dart';
 import '../../../../shared/theme/mallow_theme.dart';
 import '../../../../shared/widgets/mallow_button.dart';
 import '../../services/artwork_bloc.dart';
@@ -62,6 +63,9 @@ class ArtworkAuctionBidSheet extends StatelessWidget {
       currentBidderUsername: currentBidderUsername,
       onAuctionEnded: onAuctionEnded,
       actionBuilder: (context, timing) {
+        // Bidding is the paid side: a store build that hides commerce keeps
+        // the live panel (highest bid, countdown, reserve) and draws no CTA.
+        if (!showNftCommerce) return const SizedBox.shrink();
         final canBid =
             !timing.preStart &&
             !timing.ended &&

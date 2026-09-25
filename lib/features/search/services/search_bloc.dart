@@ -132,7 +132,7 @@ sealed class SearchState with _$SearchState {
 
 /// BLoC for the search feature.
 ///
-/// Debounces [SearchQueryChanged] events by 250ms using an internal
+/// Debounces [SearchQueryChanged] events by 400ms using an internal
 /// [_SearchExecute] event dispatched after the timer fires.
 @injectable
 class SearchBloc extends Bloc<SearchEvent, SearchState> {
@@ -161,6 +161,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
 
   Timer? _debounceTimer;
   String _currentQuery = '';
+  int _searchGen = 0;
 
   /// Generation of the artwork drilldown's result set. Bumped by every fetch
   /// that *replaces* the list (drilldown open, filter change, sort change) and
@@ -195,6 +196,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
 
   void _onQueryChanged(SearchQueryChanged event, Emitter<SearchState> emit) {
     final query = event.query.trim();
+    _searchGen++;
     _currentQuery = query;
     _debounceTimer?.cancel();
 
@@ -216,16 +218,27 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
   ) async {
     if (_currentQuery != event.query) return;
 
-    final result = await Result.guard(() => _repository.search(event.query));
+    final gen = _searchGen;
+    bool isCurrent() => !isClosed && !emit.isDone && gen == _searchGen;
+    final result = await Result.guard(
+      () => _repository.search(
+        event.query,
+        onUpdate: (results) {
+          if (isCurrent()) {
+            emit(SearchState.loaded(results: results, query: event.query));
+          }
+        },
+      ),
+    );
     // The query may have changed while the request was in flight; drop a
     // stale result rather than clobbering the newer search.
-    if (_currentQuery != event.query) return;
+    if (!isCurrent()) return;
 
     switch (result) {
       case ResultSuccess(:final value):
-        // Save to recent searches
-        await _prefs.saveRecentSearch(event.query);
         emit(SearchState.loaded(results: value, query: event.query));
+        // Persistence is best-effort and must not delay visible results.
+        await Result.guard(() => _prefs.saveRecentSearch(event.query));
       case ResultFailure(:final error):
         // Keep stable, actionable copy for users; the raw failure detail
         // (which is error.toString() for `unknown`) goes to logs only.
@@ -236,6 +249,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
 
   void _onClear(SearchClear event, Emitter<SearchState> emit) {
     _debounceTimer?.cancel();
+    _searchGen++;
     _currentQuery = '';
     // Leaving the drilldown invalidates its fetches for the same reason a
     // newer filter does — see [_artworkGen].
@@ -251,6 +265,8 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     SearchRecentSearchTapped event,
     Emitter<SearchState> emit,
   ) {
+    _debounceTimer?.cancel();
+    _searchGen++;
     _currentQuery = event.query;
     emit(const SearchState.loading());
     add(SearchEvent.execute(event.query));
@@ -282,6 +298,9 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     SearchFilterSelected event,
     Emitter<SearchState> emit,
   ) async {
+    _debounceTimer?.cancel();
+    _searchGen++;
+    _currentQuery = '';
     emit(SearchState.filterLoading(filterType: event.filterType));
 
     if (event.filterType.isArtworkBrowse) {
@@ -319,6 +338,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
   }
 
   void _onFilterBack(SearchFilterBack event, Emitter<SearchState> emit) {
+    _searchGen++;
     _currentQuery = '';
     // As in [_onClear]: a drilldown fetch still in flight belongs to a list the
     // user has left, so it must not emit artworkResults over the landing page

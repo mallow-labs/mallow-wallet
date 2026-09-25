@@ -36,7 +36,7 @@ third-party, and this policy does not reach it:
   Font License, with the terms in the accompanying `*-OFL.txt`.
 - `assets/icons/` — from Streamline and Tabler, alongside the `brand_*`
   marks of other companies (Solscan, Solana Beach, Orb, Apple, Google, X,
-  Instagram, Discord and YouTube), bundled to name those
+  Instagram, Discord, YouTube and Ledger), bundled to name those
   services in the interface. THIRD_PARTY_NOTICES.md lists them file by file.
   The Streamline set carries an **attribution condition the app satisfies on
   its About screen**; removing that credit breaks the licence.

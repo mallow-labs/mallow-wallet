@@ -197,10 +197,21 @@ class _SearchSheetState extends State<_SearchSheet> {
           context.read<SearchBloc>().add(SearchEvent.recentSearchTapped(query));
         },
       ),
-    SearchLoading() ||
-    SearchFilterLoading() => const Center(child: MallowLoadingIndicator()),
+    SearchLoading() => const _ResultsList(
+      results: SearchResults(
+        pendingSources: {
+          SearchSource.mallow,
+          SearchSource.curations,
+          SearchSource.tokens,
+        },
+      ),
+    ),
+    SearchFilterLoading() => ListView(
+      padding: const EdgeInsets.all(MallowTheme.spacing20),
+      children: const [_SearchRowsSkeleton(rowCount: 6)],
+    ),
     SearchLoaded(:final results, :final query) =>
-      results.isEmpty
+      results.isEmpty && !results.isLoading
           ? _NoResults(query: query)
           : _ResultsList(results: results),
     SearchError(:final message) => _ErrorView(message: message),
@@ -374,7 +385,7 @@ class _FilterResultsList extends StatelessWidget {
           if (index >= items.length) {
             return const Padding(
               padding: EdgeInsets.symmetric(vertical: 16),
-              child: Center(child: MallowLoadingIndicator()),
+              child: _SearchRowsSkeleton(rowCount: 2),
             );
           }
 
@@ -545,6 +556,16 @@ class _ResultsList extends StatelessWidget {
         bottom: sheetBottomInset(context, gap: 40),
       ),
       children: [
+        if (results.pendingSources.contains(SearchSource.mallow)) ...[
+          const _SectionHeader(title: 'Users'),
+          const SizedBox(height: MallowTheme.spacing12),
+          const _SearchRowsSkeleton(
+            avatarSize: 32,
+            circular: true,
+            subtitle: false,
+          ),
+          const SizedBox(height: 24),
+        ],
         if (results.users.isNotEmpty) ...[
           const _SectionHeader(title: 'Users'),
           const SizedBox(height: MallowTheme.spacing12),
@@ -559,6 +580,12 @@ class _ResultsList extends StatelessWidget {
                   ),
                 ),
               ),
+          const SizedBox(height: 24),
+        ],
+        if (results.pendingSources.contains(SearchSource.mallow)) ...[
+          const _SectionHeader(title: 'Artwork'),
+          const SizedBox(height: MallowTheme.spacing12),
+          const _SearchRowsSkeleton(),
           const SizedBox(height: 24),
         ],
         if (results.artworks.isNotEmpty) ...[
@@ -577,6 +604,12 @@ class _ResultsList extends StatelessWidget {
               ),
           const SizedBox(height: 24),
         ],
+        if (results.pendingSources.contains(SearchSource.mallow)) ...[
+          const _SectionHeader(title: 'Collections'),
+          const SizedBox(height: MallowTheme.spacing12),
+          const _SearchRowsSkeleton(),
+          const SizedBox(height: 24),
+        ],
         if (results.collections.isNotEmpty) ...[
           const _SectionHeader(title: 'Collections'),
           const SizedBox(height: MallowTheme.spacing12),
@@ -593,6 +626,12 @@ class _ResultsList extends StatelessWidget {
               ),
           const SizedBox(height: 24),
         ],
+        if (results.pendingSources.contains(SearchSource.curations)) ...[
+          const _SectionHeader(title: 'Curations'),
+          const SizedBox(height: MallowTheme.spacing12),
+          const _SearchRowsSkeleton(),
+          const SizedBox(height: 24),
+        ],
         if (results.curations.isNotEmpty) ...[
           const _SectionHeader(title: 'Curations'),
           const SizedBox(height: MallowTheme.spacing12),
@@ -607,6 +646,12 @@ class _ResultsList extends StatelessWidget {
                   ),
                 ),
               ),
+          const SizedBox(height: 24),
+        ],
+        if (results.pendingSources.contains(SearchSource.tokens)) ...[
+          const _SectionHeader(title: 'Tokens'),
+          const SizedBox(height: MallowTheme.spacing12),
+          const _SearchRowsSkeleton(circular: true),
           const SizedBox(height: 24),
         ],
         if (results.tokens.isNotEmpty) ...[
@@ -627,6 +672,66 @@ class _ResultsList extends StatelessWidget {
       ],
     );
   }
+}
+
+/// Matches search row geometry so completed sections replace their own skeletons.
+class _SearchRowsSkeleton extends StatelessWidget {
+  const _SearchRowsSkeleton({
+    this.rowCount = 3,
+    this.avatarSize = 48,
+    this.circular = false,
+    this.subtitle = true,
+  });
+
+  final int rowCount;
+  final double avatarSize;
+  final bool circular;
+  final bool subtitle;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: 'Loading results',
+    child: ExcludeSemantics(
+      child: Column(
+        children: List.generate(
+          rowCount,
+          (index) => Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Row(
+              children: [
+                ShimmerBox(
+                  width: avatarSize,
+                  height: avatarSize,
+                  borderRadius: BorderRadius.circular(
+                    circular ? avatarSize / 2 : MallowTheme.radiusPrimary,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      FractionallySizedBox(
+                        widthFactor: index.isEven ? 0.65 : 0.45,
+                        child: const ShimmerBox(height: 14),
+                      ),
+                      if (subtitle) ...[
+                        const SizedBox(height: 8),
+                        const FractionallySizedBox(
+                          widthFactor: 0.35,
+                          child: ShimmerBox(height: 11),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 class _SectionHeader extends StatelessWidget {

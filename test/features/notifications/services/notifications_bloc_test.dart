@@ -7,10 +7,14 @@ import 'package:mocktail/mocktail.dart';
 
 class _MockRepo extends Mock implements NotificationsRepository {}
 
-api.NotificationItem _item({required int id, DateTime? acknowledgedAt}) {
+api.NotificationItem _item({
+  required int id,
+  DateTime? acknowledgedAt,
+  api.NotificationType type = api.NotificationType.test,
+}) {
   return api.NotificationItem(
     id: id,
-    type: api.NotificationType.test,
+    type: type,
     data: const {},
     createdAt: DateTime.utc(2026),
     acknowledgedAt: acknowledgedAt,
@@ -327,6 +331,83 @@ void main() {
       build: buildBloc,
       act: (bloc) => bloc.add(const NotificationsEvent.dismissPushBanner()),
       expect: () => const <NotificationsState>[],
+    );
+  });
+
+  // WHY: `NotificationType.unknown` is what a build produces for a type the
+  // backend shipped after it. Rendering those rows shows a placeholder that
+  // says nothing and links nowhere, so the feed hides them — but the server's
+  // unread flag still counts them, so acknowledgement must keep working off the
+  // unfiltered list or the drawer's bell dot strands above an empty screen.
+  group('unknown notification types', () {
+    blocTest<NotificationsBloc, NotificationsState>(
+      'hides rows this build cannot render',
+      setUp: () {
+        when(repo.getNotifications).thenAnswer(
+          (_) async => [
+            _item(id: 1),
+            _item(id: 2, type: api.NotificationType.unknown),
+            _item(id: 3, type: api.NotificationType.newSubscriber),
+          ],
+        );
+      },
+      build: buildBloc,
+      act: (bloc) => bloc.add(const NotificationsEvent.load()),
+      expect: () => [
+        const NotificationsState.loading(),
+        isA<NotificationsLoaded>().having(
+          (s) => s.notifications.map((n) => n.id).toList(),
+          'visible ids',
+          [1, 3],
+        ),
+      ],
+    );
+
+    blocTest<NotificationsBloc, NotificationsState>(
+      'still acknowledges when every unread row is an unknown type',
+      setUp: () {
+        when(repo.getNotifications).thenAnswer(
+          (_) async => [_item(id: 1, type: api.NotificationType.unknown)],
+        );
+      },
+      build: buildBloc,
+      act: (bloc) => bloc.add(const NotificationsEvent.load()),
+      // The list renders empty, but the badge must still clear — otherwise the
+      // bell dot sits above a screen with nothing on it, forever.
+      verify: (_) {
+        verify(repo.acknowledgeAll).called(1);
+      },
+    );
+
+    blocTest<NotificationsBloc, NotificationsState>(
+      'filters on refresh as well as load',
+      setUp: () {
+        when(repo.getNotifications).thenAnswer(
+          (_) async => [
+            _item(id: 1, type: api.NotificationType.unknown),
+            _item(id: 2),
+          ],
+        );
+      },
+      build: buildBloc,
+      act: (bloc) async {
+        bloc.add(const NotificationsEvent.load());
+        await Future<void>.delayed(Duration.zero);
+        bloc.add(const NotificationsEvent.refresh());
+      },
+      skip: 2,
+      expect: () => [
+        isA<NotificationsLoaded>().having(
+          (s) => s.isRefreshing,
+          'isRefreshing',
+          true,
+        ),
+        isA<NotificationsLoaded>().having(
+          (s) => s.notifications.map((n) => n.id).toList(),
+          'visible ids',
+          [2],
+        ),
+      ],
     );
   });
 }

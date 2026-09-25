@@ -19,6 +19,7 @@ import '../../../core/session/session_manager.dart';
 import '../../../core/services/token_metadata_service.dart';
 import '../../../core/services/token_price_service.dart';
 import '../../../core/services/tx_landed_slots.dart';
+import '../../../core/services/wallet_repository.dart';
 import '../../../core/realtime/market_realtime_service.dart';
 import '../../../core/realtime/models/market_invalidation.dart';
 import '../../../core/router/app_router.dart';
@@ -34,6 +35,7 @@ import '../../../shared/utils/artwork_display.dart';
 import '../../../shared/utils/artwork_mappers.dart';
 import '../../../shared/utils/chain.dart';
 import '../../../shared/utils/price_format.dart' show stripTrailingZeros;
+import '../../../shared/utils/synthetic_master.dart';
 import '../../../shared/utils/user_display.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/widgets/animated_tab_content.dart';
@@ -197,10 +199,19 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
   /// connected via any of their linked wallets passes the cast/share gate.
   final Set<String> _creatorLinkedAddresses = <String>{};
   List<String>? _loadedCreatorAddresses;
+  List<String>? _creatorProfilesResolvedFor;
 
   /// On-chain permissions; null until the DAS lookup completes.
   ArtworkPermissions? _permissions;
-  bool _permissionsLoading = false;
+  String? _permissionsLoadKey;
+  int _permissionsLoadGeneration = 0;
+  ArtworkPermissions? _resolvedOptionsPermissions;
+  bool? _resolvedOptionsCanSign;
+  ArtworkDetails? _optionsArtwork;
+  final ValueNotifier<ArtworkContextMenuState?> _optionsMenuState =
+      ValueNotifier(null);
+  ArtworkContextMenuState? _desiredOptionsMenuState;
+  bool _optionsMenuUpdateScheduled = false;
 
   /// Whether the connected wallet has a live offer on the loaded artwork.
   /// Drives the "Make offer" ↔ "Cancel offer" toggle in the buy /
@@ -342,6 +353,11 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
   /// momentarily hide the just-earned List CTA).
   final Set<String> _pendingClaims = <String>{};
 
+  /// Keeps the optimistic owner permission used after a claim/buy until DAS
+  /// confirms the new owner. A lagging negative result must not hide the
+  /// just-earned List action; later invalidations retry the full menu read.
+  final Set<String> _optimisticPermissionPins = <String>{};
+
   /// Dedup key for the action-state debug logger so the same resolution
   /// doesn't spam the console on every rebuild.
   String? _lastDebugKey;
@@ -384,6 +400,7 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
     // invalidation that fires during the initial `/byMint` fetch isn't missed
     // (the socket doesn't replay).
     _maybeStartRealtime(widget.mintAccount);
+    sl<SessionManager>().addListener(_onPermissionSessionChanged);
     // Like failures revert to the pre-tap state, so they can't be observed
     // from the state stream — the bloc reports them out-of-band.
     _transientErrorSub = context.read<ArtworkBloc>().transientErrors.listen((
@@ -396,10 +413,43 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
 
   @override
   void dispose() {
+    sl<SessionManager>().removeListener(_onPermissionSessionChanged);
+    _optionsMenuState.dispose();
     _realtimeSub?.cancel();
     _transientErrorSub?.cancel();
     _auctionEndTimer?.cancel();
     super.dispose();
+  }
+
+  void _onPermissionSessionChanged() {
+    if (!mounted) return;
+    setState(() {
+      _optimisticPermissionPins.clear();
+      _invalidatePermissions();
+    });
+  }
+
+  void _invalidatePermissions({String? preserveOptimisticFor}) {
+    _permissionsLoadGeneration++;
+    _permissionsLoadKey = null;
+    if (preserveOptimisticFor == null ||
+        !_optimisticPermissionPins.contains(preserveOptimisticFor)) {
+      _permissions = null;
+    }
+    _resolvedOptionsPermissions = null;
+    _resolvedOptionsCanSign = null;
+    _setOptionsMenuState(null);
+  }
+
+  void _setOptionsMenuState(ArtworkContextMenuState? state) {
+    _desiredOptionsMenuState = state;
+    if (_optionsMenuUpdateScheduled) return;
+    _optionsMenuUpdateScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _optionsMenuUpdateScheduled = false;
+      if (!mounted) return;
+      _optionsMenuState.value = _desiredOptionsMenuState;
+    });
   }
 
   @override
@@ -593,7 +643,7 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
                       // false. Clear it so the next rebuild refetches and
                       // the "List artwork" sheet appears for the now-
                       // unlisted owner.
-                      setState(() => _permissions = null);
+                      setState(_invalidatePermissions);
                     } else if (success.actionType == 'buy' &&
                         artworkState is ArtworkLoaded &&
                         _isEditionMasterArtwork(artworkState.artwork)) {
@@ -618,6 +668,7 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
                       final me = sl<AuthService>().currentAddress;
                       if (me != null) {
                         _pendingClaims.add(success.mintAccount);
+                        _optimisticPermissionPins.add(success.mintAccount);
                         context.read<ArtworkBloc>().add(
                           ArtworkEvent.optimisticClaimOwnership(
                             owner: me,
@@ -698,6 +749,7 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
                       // would leave an empty slot until byMint + DAS catch up).
                       final me = sl<AuthService>().currentAddress!;
                       _pendingClaims.add(success.mintAccount);
+                      _optimisticPermissionPins.add(success.mintAccount);
                       context.read<ArtworkBloc>().add(
                         ArtworkEvent.optimisticClaimOwnership(
                           owner: me,
@@ -740,7 +792,7 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
                       // Ownership moved away — the cached "can list" permission
                       // (false while escrow held the NFT) is now irrelevant; drop
                       // it so the viewer sheet isn't held back by a stale read.
-                      setState(() => _permissions = null);
+                      setState(_invalidatePermissions);
                     } else if (success.actionType == 'accept-offer' &&
                         acceptOfferBuyer != null) {
                       // The owner accepted an offer — the NFT leaves for the
@@ -754,7 +806,7 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
                           signature: signature,
                         ),
                       );
-                      setState(() => _permissions = null);
+                      setState(_invalidatePermissions);
                     } else if (success.actionType == 'bid') {
                       // Place bid: keep the sheet visible — the
                       // account-socket overlay + snapshot prime flip it to "You
@@ -796,7 +848,7 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
                       // on-chain owner via DAS and cached once; drop them so
                       // build() re-checks and the now-owner gets the "List
                       // artwork" sheet instead of an empty slot.
-                      if (!wasClaim) _permissions = null;
+                      if (!wasClaim) _invalidatePermissions();
                     });
                     debugPrint(
                       '[LIST-DEBUG] artwork indexed-flip → ArtworkRefresh '
@@ -883,11 +935,12 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
                 final isMarketLoading =
                     marketState
                         is TxFlowPreparing<MarketPrepData, MarketSuccessData>;
-                final loaded = artworkState is ArtworkLoaded
-                    ? artworkState.artwork
+                final loadedState = artworkState is ArtworkLoaded
+                    ? artworkState
                     : null;
+                final loaded = loadedState?.artwork;
                 if (loaded != null) {
-                  _maybeLoadPermissions(loaded);
+                  _maybeLoadPermissions(loaded, loadedState!.revision);
                   _maybeLoadUserOwnOffer(loaded.mintAccount);
                   _maybeLoadHighestOffer(loaded);
                   _maybeLoadCurrencyMetadata(loaded);
@@ -956,6 +1009,7 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
                         onListUnlisted: _onListUnlisted,
                         onSendArtwork: _handleTransfer,
                         onUpdateListing: _onUpdateListing,
+                        onCancelListing: _onCancelListing,
                         onPlaceBid: _onPlaceBid,
                         onCancelAuction: _onCancelAuction,
                         onSettleAuction: _onSettleAuction,

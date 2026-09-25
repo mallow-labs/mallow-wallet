@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_wallet/core/config/remote_config.dart';
 import 'package:mallow_wallet/core/config/remote_config_service.dart';
+import 'package:mallow_wallet/core/config/store_build.dart';
 import 'package:mallow_wallet/core/security/biometric_auth.dart';
 import 'package:mallow_wallet/core/security/secure_storage.dart';
 import 'package:mallow_wallet/core/security/transaction_auth_gate.dart';
@@ -233,6 +234,147 @@ void main() {
         verifyZeroInteractions(biometric);
       },
     );
+  });
+
+  group('authorize (store gate — the third arm)', () {
+    // `kShowNftCommerce` is compile-time and `true` under `flutter test`, so
+    // the hidden branch is driven through the widget-facing override. The
+    // arm sits with the other two flow gates, above the early returns, and
+    // the first test here is the same ordering proof the kill-switch group
+    // carries: auth OFF and a sub-threshold value, so only an arm placed
+    // above both early returns can refuse.
+    tearDown(() => debugShowNftCommerceOverride = null);
+
+    test(
+      'refuses a commerce cell when commerce is hidden — with step-up auth '
+      'OFF and a sub-threshold value — and reports it as a missed entry point',
+      () async {
+        debugShowNftCommerceOverride = false;
+        when(
+          () => storage.loadTransactionAuthEnabled(),
+        ).thenAnswer((_) async => false);
+        const buy = FlowKey.solana(AppFlow.fixedPriceBuy);
+
+        final outcome = await gate.authorize(usdValue: 1.0, flow: buy);
+
+        expect(outcome.isFlowDisabled, isTrue);
+        expect(outcome.disabledMessage, kStoreGatedFlowMessage);
+        // A hidden CTA reaching signing is a UI bug, reported like the
+        // unimplemented-cell case rather than swallowed.
+        expect(unsupportedReports, [buy]);
+        verifyZeroInteractions(biometric);
+        verifyNever(() => storage.loadTransactionAuthEnabled());
+      },
+    );
+
+    test('leaves an escape hatch alone when commerce is hidden', () async {
+      // Cancelling a listing is how an owner gets the asset back; the store
+      // gate must never reach it.
+      debugShowNftCommerceOverride = false;
+      when(
+        () => storage.loadTransactionAuthEnabled(),
+      ).thenAnswer((_) async => false);
+      const cancel = FlowKey.solana(AppFlow.fixedPriceCancel);
+
+      expect(
+        await gate.authorize(usdValue: 1.0, flow: cancel),
+        TransactionAuthOutcome.allowed,
+      );
+      expect(unsupportedReports, isEmpty);
+    });
+
+    test('is inert when commerce is shown', () async {
+      debugShowNftCommerceOverride = true;
+      when(
+        () => storage.loadTransactionAuthEnabled(),
+      ).thenAnswer((_) async => false);
+
+      expect(
+        await gate.authorize(
+          usdValue: 1.0,
+          flow: const FlowKey.solana(AppFlow.fixedPriceBuy),
+        ),
+        TransactionAuthOutcome.allowed,
+      );
+      expect(unsupportedReports, isEmpty);
+    });
+
+    // The second flag on the same arm. It matters that these run with
+    // commerce *shown*: the two flags are independent, and an arm that only
+    // ever checked `showNftCommerce` would pass every test above while
+    // signing swaps in the build that hides them.
+    tearDown(() => debugShowSwapOverride = null);
+
+    test(
+      'refuses a swap cell when swap is hidden — with step-up auth OFF and a '
+      'sub-threshold value — and reports it as a missed entry point',
+      () async {
+        debugShowSwapOverride = false;
+        debugShowNftCommerceOverride = true;
+        when(
+          () => storage.loadTransactionAuthEnabled(),
+        ).thenAnswer((_) async => false);
+
+        final outcome = await gate.authorize(usdValue: 1.0, flow: _swap);
+
+        expect(outcome.isFlowDisabled, isTrue);
+        expect(outcome.disabledMessage, kStoreGatedFlowMessage);
+        expect(unsupportedReports, [_swap]);
+        verifyZeroInteractions(biometric);
+        verifyNever(() => storage.loadTransactionAuthEnabled());
+      },
+    );
+
+    test('refuses liquid staking too — it is the same swap', () async {
+      // `stake-liquid` is one cell for both directions, so this covers the
+      // liquid unstake as well. Hiding it is deliberate: see `kShowSwap`.
+      debugShowSwapOverride = false;
+      when(
+        () => storage.loadTransactionAuthEnabled(),
+      ).thenAnswer((_) async => false);
+      const liquid = FlowKey.solana(AppFlow.stakeLiquid);
+
+      final outcome = await gate.authorize(usdValue: 1.0, flow: liquid);
+
+      expect(outcome.disabledMessage, kStoreGatedFlowMessage);
+      expect(unsupportedReports, [liquid]);
+    });
+
+    test('leaves native staking alone when swap is hidden', () async {
+      // Only the aggregator paths go. Native stake, unstake and withdraw are
+      // not swaps and must still sign.
+      debugShowSwapOverride = false;
+      when(
+        () => storage.loadTransactionAuthEnabled(),
+      ).thenAnswer((_) async => false);
+
+      for (final flow in const [
+        AppFlow.stakeNative,
+        AppFlow.unstakeNative,
+        AppFlow.withdrawStake,
+        AppFlow.tokenSend,
+      ]) {
+        expect(
+          await gate.authorize(usdValue: 1.0, flow: FlowKey.solana(flow)),
+          TransactionAuthOutcome.allowed,
+          reason: flow.wire,
+        );
+      }
+      expect(unsupportedReports, isEmpty);
+    });
+
+    test('is inert when swap is shown', () async {
+      debugShowSwapOverride = true;
+      when(
+        () => storage.loadTransactionAuthEnabled(),
+      ).thenAnswer((_) async => false);
+
+      expect(
+        await gate.authorize(usdValue: 1.0, flow: _swap),
+        TransactionAuthOutcome.allowed,
+      );
+      expect(unsupportedReports, isEmpty);
+    });
   });
 
   group('requiresAuth (pure threshold)', () {

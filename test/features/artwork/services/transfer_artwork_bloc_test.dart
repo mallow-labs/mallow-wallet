@@ -133,6 +133,21 @@ void main() {
 
   group('started — token-standard gating', () {
     blocTest<TransferArtworkBloc, TransferArtworkState>(
+      'synthetic master is blocked before DAS lookup',
+      build: build,
+      act: (b) => b.add(
+        const TransferArtworkEvent.started('cnft-master-collection-hash'),
+      ),
+      skip: 1,
+      expect: () => [
+        isA<TransferInput>()
+            .having((s) => s.isCheckingStandard, 'isCheckingStandard', false)
+            .having((s) => s.unsupportedReason, 'unsupportedReason', isNotNull),
+      ],
+      verify: (_) => verifyNever(dasApi.getAsset(any)),
+    );
+
+    blocTest<TransferArtworkBloc, TransferArtworkState>(
       'legacy NFT is supported (no unsupported reason)',
       setUp: () => when(
         dasApi.getAsset(_mint),

@@ -169,7 +169,7 @@ or the Sheet column says **(no sheet)**.
 | Relationship         | Supply                             | Sheet                 | Primary CTA             | Secondary                                                                          | Status text                                                                                                         | Disabled when                                                    | Data needed                                                         |
 | -------------------- | ---------------------------------- | --------------------- | ----------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------- |
 | `disconnected`       | any                                | `ConnectWalletSheet`  | "Sign in to buy"        | —                                                                                  | listing price + supply progress                                                                                     | —                                                                | `buyNowMetadata` ✅                                                 |
-| `owner`              | any                                | `OwnerListedSheet`    | "Update listing"        | "Accept highest offer" when `highestOffer != null` — **"Cancel listing" is not a secondary button on this sheet**; it lives inside the update sheet (the `_cancelFlow` / "Cancel listing" action in `market/widgets/update_listing_sheet.dart`) | listing price; "Highest offer: X SOL" when present                                                                  | "Update listing" disabled during in-flight tx                    | `buyNowMetadata` ✅, `highestOffer` ✅                              |
+| `owner`              | any                                | `OwnerListedSheet`    | "Update listing"        | "Accept highest offer" when `highestOffer != null` — **"Cancel listing" is not a secondary button on this sheet**; it lives inside the update sheet (the `_cancelFlow` / "Cancel listing" action in `market/widgets/update_listing_sheet.dart`). With commerce hidden (`kShowNftCommerce` off) both buttons go and **"Cancel listing" is rendered directly** — see *Store build — commerce hidden* | listing price; "Highest offer: X SOL" when present                                                                  | "Update listing" disabled during in-flight tx                    | `buyNowMetadata` ✅, `highestOffer` ✅                              |
 | `viewer` / `creator` | `1/1` ∨ `edition-print`            | `BuySheet` (existing) | "Buy"                   | "Make offer" when 1/1 or printed edition                                           | listing price + USD; supply progress when `quantityTotal != null`; block explanation when disabled                  | "Buy" disabled while loading, or on any `ArtworkBuyBlock`        | `buyNowMetadata` ✅                                                 |
 | `viewer` / `creator` | `limited-edition` ∨ `open-edition` | `BuyEditionSheet`     | "Buy edition"           | **not rendered** — the "Make offer" button is commented out in `artwork_buy_edition_sheet.dart` (`// TODO: Unhide when we support master edition offers.`) until edition offers ship | "X / Y sold" supply progress; "Sale ends in …" countdown when `endsAt != null`; "Starts in …" when `startsAt > now` | "Buy edition" disabled when sold out, before start, or after end | `buyNowMetadata` ✅, `isPrintableMasterEdition` ✅, wallet-limit ✅  |
 | any                  | `collection`                       | (no sheet)            | —                       | —                                                                                  | —                                                                                                                   | hidden — collection root has no per-listing actions              | —                                                                   |
@@ -204,8 +204,11 @@ classified the creator as a buyer and left the terminal states with no CTA.
 
 **Ticket purchase links out.** The primary buy CTA is "View on mallow.art",
 not an in-app transaction (`kShowRaffleEntry`, `core/config/store_build.dart`).
-The gates below therefore govern what the sheet *shows and allows* — a
-sold-out, limit-reached or finished raffle must never present a live buy CTA.
+In a store build that also hides commerce (`kShowNftCommerce` off — the iOS
+App Store build) the outlink is not rendered either, and the connect label is
+"Sign in to view" (see *Store build — commerce hidden* below). The gates below
+therefore govern what the sheet *shows and allows* — a sold-out, limit-reached
+or finished raffle must never present a live buy CTA.
 
 | Relationship   | Sub-state                | Sheet                | Primary CTA                                | Secondary | Status text                          |
 | -------------- | ------------------------ | -------------------- | ------------------------------------------ | --------- | ------------------------------------ |
@@ -257,6 +260,40 @@ listing's CTA.
 `jellybean` routes here too. It reaches the branch **before** the owner /
 viewer arms, which is the point: falling through offered "List artwork" and
 "Accept offer" on a Jellybean artwork, both of which the reference web client refuses.
+With commerce hidden (`kShowNftCommerce` off) the sheet keeps its title and
+"This sale runs on the mallow web app." and renders no button — the outlink
+lands on a purchase page.
+
+## Store build — commerce hidden (`kShowNftCommerce` off)
+
+The iOS App Store build hides the paid side of the marketplace (App Store
+Guideline 3.1.1; `lib/core/config/store_build.dart`). The resolver is almost
+untouched — it keeps returning the same states, and the **sheets** drop their
+purchase CTAs while keeping price and status. Two resolver-level effects:
+the connect-wallet label is "Sign in to view" wherever the unlocked action
+would be a purchase (buy-now, live auction, unlisted make-offer, raffle,
+external), and `canList` is forced false for owners (so an owner who also
+cannot send gets no sheet, as before). Everything else, per sheet:
+
+| Sheet                 | Not rendered                                                | Stays                                                                |
+| --------------------- | ----------------------------------------------------------- | -------------------------------------------------------------------- |
+| `BuySheet`            | "Buy", "Make offer" / "Update offer", the funding-wallet line | price + USD, supply progress, blocked-reason caption, disclosures (minus the web-checkout shipping tail), **"Cancel offer"** when the viewer holds one |
+| `BuyEditionSheet`     | "Buy edition", the funding-wallet line                       | price, "X / Y sold", progress bar, "Sale ends in …"                  |
+| `UnlistedViewerSheet` | "Make offer" / "Update offer", the funding-wallet line       | highest-offer panel or "No active offers yet.", "View N offers", **"Cancel offer"** when the viewer holds one |
+| `OwnerUnlistedSheet`  | "Accept Offer", "List artwork" (via `canList`)              | highest-offer panel, "Send artwork"                                  |
+| `OwnerListedSheet`    | "Update listing", "Accept highest offer"                    | price, sold caption / offer caption, **"Cancel listing"** (promoted to the primary slot — it otherwise lives inside the update sheet) |
+| `AuctionBidSheet`     | "Place bid" / "Auction pending start" / "You are the highest bidder" | the live panel: highest bid, reserve, countdown                      |
+| `AuctionClaimSheet`   | observer "Make offer"                                        | seller "Settle auction", winner "Claim NFT", reclaim, the ended panel  |
+| `RaffleSheet`         | "View on mallow.art" (every state)                           | status + summary lines, "Sold out" / "Tickets unavailable" slots, cancel, claims, reclaim |
+| `ExternalLinkSheet`   | "View on mallow web"                                         | title + "This sale runs on the mallow web app."                      |
+| `ConnectWalletSheet`  | —                                                           | label becomes "Sign in to view" for the paid listing types            |
+
+Routes: the mint and sell choosers and forms are `flowGatedScreen`-wrapped on
+cells that are all `kStoreCommerceFlows`, so a deep link into one shows the
+neutral "This action isn't available in the app." sheet and pops. The offers
+inbox's Received rows open the artwork on "View" instead of the accept flow.
+The signing backstop (`TransactionAuthGate.authorize`) refuses any of those
+cells that slips through. None of this touches Android, where the flag is on.
 
 ## Auction Sub-States
 

@@ -67,6 +67,13 @@ void main() {
           builder: (context, state) => const PinSetupScreen(),
         ),
         GoRoute(
+          path: '/onboarding/notifications',
+          builder: (context, state) {
+            navigatedPaths.add('/onboarding/notifications');
+            return const Scaffold(body: Center(child: Text('Push Screen')));
+          },
+        ),
+        GoRoute(
           path: '/',
           builder: (context, state) {
             navigatedPaths.add('/');
@@ -91,7 +98,13 @@ void main() {
   }
 
   group('PinSetupScreen Navigation', () {
-    testWidgets('navigates to home after completing PIN setup', (tester) async {
+    // Onboarding ends on the push-permission step, not on home: the OS
+    // notification dialog gets exactly one shot per install, and asking here
+    // is what stops it being spent on the menu-drawer Notifications screen
+    // most users never open.
+    testWidgets('navigates to the push step after completing PIN setup', (
+      tester,
+    ) async {
       // Set screen size to avoid overflow issues
       tester.view.physicalSize = const Size(400, 900);
       tester.view.devicePixelRatio = 1.0;
@@ -142,12 +155,14 @@ void main() {
       ).called(1);
       verifyNever(() => mockAppLock.add(const AppLockEvent.init()));
 
-      // Verify navigation to home
-      expect(navigatedPaths, contains('/'));
-      expect(find.text('Home Screen'), findsOneWidget);
+      // Verify navigation to the push-permission step
+      expect(navigatedPaths, contains('/onboarding/notifications'));
+      expect(find.text('Push Screen'), findsOneWidget);
     });
 
-    testWidgets('navigates to home after skipping PIN setup', (tester) async {
+    testWidgets('navigates to the push step after skipping PIN setup', (
+      tester,
+    ) async {
       // Set screen size to avoid overflow issues
       tester.view.physicalSize = const Size(400, 900);
       tester.view.devicePixelRatio = 1.0;
@@ -177,9 +192,9 @@ void main() {
       // Verify auth notifier was updated (even without PIN)
       verify(() => mockAuthNotifier.onOnboardingCompleted()).called(1);
 
-      // Verify navigation to home
-      expect(navigatedPaths, contains('/'));
-      expect(find.text('Home Screen'), findsOneWidget);
+      // Verify navigation to the push-permission step
+      expect(navigatedPaths, contains('/onboarding/notifications'));
+      expect(find.text('Push Screen'), findsOneWidget);
     });
 
     testWidgets('shows error when PINs do not match', (tester) async {

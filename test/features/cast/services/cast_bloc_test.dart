@@ -298,6 +298,104 @@ void main() {
     });
   });
 
+  group('suspend / resume', () {
+    test('a suspend parks the session instead of ending it', () async {
+      final bloc = await activatedBloc(pending: item('A'));
+      bloc.add(CastEvent.addToQueue(item('B')));
+      await Future<void>.delayed(Duration.zero);
+
+      service.emitSession(CastSessionState.suspended);
+      await Future<void>.delayed(Duration.zero);
+
+      // Backgrounding the phone or hitting the lock screen suspends the Cast
+      // session on both platforms. Ending it here is what made every
+      // lock-screen round trip drop the user's queue — the SDK resumes the
+      // same session moments later and there is nothing left to resume into.
+      final active = bloc.state as CastActive;
+      expect(active.sessionState, CastSessionState.suspended);
+      expect(active.device.id, 'd1');
+      expect(active.queue.items.map((i) => i.mintAccount), ['A', 'B']);
+      await bloc.close();
+    });
+
+    test('resuming re-pushes the slide the receiver should be on', () async {
+      final bloc = await activatedBloc(pending: item('A'));
+      service.emitSession(CastSessionState.suspended);
+      await Future<void>.delayed(Duration.zero);
+      service.sentMints.clear();
+
+      service.emitSession(CastSessionState.connected);
+      await Future<void>.delayed(Duration.zero);
+
+      // A receiver that idled out while the sender was away reloads blank.
+      // Waiting a whole slideshow interval to discover that is the difference
+      // between "picked up where it left off" and "it's broken".
+      expect(service.sentMints, ['A']);
+      expect(
+        (bloc.state as CastActive).sessionState,
+        CastSessionState.connected,
+      );
+      await bloc.close();
+    });
+
+    test('a repeated connected event does not re-push', () async {
+      final bloc = await activatedBloc(pending: item('A'));
+      service.sentMints.clear();
+
+      // The SDKs re-report `connected` for their own reasons; only a real
+      // interruption warrants spending a send on the receiver.
+      service.emitSession(CastSessionState.connected);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(service.sentMints, isEmpty);
+      await bloc.close();
+    });
+
+    test(
+      'the slideshow stops while suspended and restarts on resume',
+      () async {
+        final bloc = await activatedBloc(pending: item('A'));
+        bloc.add(CastEvent.addToQueue(item('B')));
+        bloc.add(const CastEvent.setInterval(1));
+        await Future<void>.delayed(Duration.zero);
+
+        service.emitSession(CastSessionState.suspended);
+        await Future<void>.delayed(const Duration(milliseconds: 1400));
+
+        // A tick here would push a slide at a transport that cannot carry it,
+        // and the queue would silently run on past whatever the TV is holding.
+        expect((bloc.state as CastActive).queue.currentIndex, 0);
+
+        service.emitSession(CastSessionState.connected);
+        await Future<void>.delayed(const Duration(milliseconds: 1400));
+
+        expect((bloc.state as CastActive).queue.currentIndex, 1);
+        await bloc.close();
+      },
+    );
+
+    test('a resume whose re-push fails still restarts the clock', () async {
+      final bloc = await activatedBloc(pending: item('A'));
+      bloc.add(CastEvent.addToQueue(item('B')));
+      bloc.add(const CastEvent.setInterval(1));
+      await Future<void>.delayed(Duration.zero);
+
+      service.emitSession(CastSessionState.suspended);
+      await Future<void>.delayed(Duration.zero);
+      service.sendMediaError = PlatformException(code: 'NO_SESSION');
+
+      service.emitSession(CastSessionState.connected);
+      await Future<void>.delayed(Duration.zero);
+      service.sendMediaError = null;
+
+      // Fail-soft on purpose: a rejected re-push must not leave a live
+      // session with a dead clock.
+      await Future<void>.delayed(const Duration(milliseconds: 1400));
+      expect((bloc.state as CastActive).queue.currentIndex, 1);
+      await bloc.close();
+    });
+  });
+
   group('discovery failures', () {
     test('a failed scan surfaces instead of spinning forever', () async {
       service.discoveryError = PlatformException(code: 'CAST_UNAVAILABLE');
@@ -336,6 +434,13 @@ class _FakeCastService implements CastService {
   /// backends surface every failure as a thrown [PlatformException].
   Object? connectError;
   Object? discoveryError;
+
+  /// When set, [sendMedia] throws it. A receiver that went away while the
+  /// sender was backgrounded rejects the resume push exactly this way.
+  Object? sendMediaError;
+
+  /// Mints handed to [sendMedia], in order.
+  final sentMints = <String>[];
 
   void emitSession(CastSessionState state) => _sessionController.add(state);
 
@@ -376,7 +481,11 @@ class _FakeCastService implements CastService {
     CastQueueItem item, {
     required CastOverlayConfig overlay,
     String? resolvedUrl,
-  }) async {}
+  }) async {
+    sentMints.add(item.mintAccount);
+    final error = sendMediaError;
+    if (error != null) throw error;
+  }
 
   @override
   Future<void> updateOverlay(CastOverlayConfig config) async {}

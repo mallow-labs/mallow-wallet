@@ -129,6 +129,28 @@ void main() {
     expect(secureStore['mallow_analytics_device_id'], first);
   });
 
+  test(
+    'resetDeviceIdentity mints a new id and drops the queued events',
+    () async {
+      // Regression: the device id survived Reset app, so the next onboarding was
+      // attributed to the previous seed phrase's analytics user — silently
+      // linking two identities the user deliberately separated.
+      when(() => secureStorage.delete(key: any(named: 'key'))).thenAnswer((
+        inv,
+      ) async {
+        secureStore.remove(inv.namedArguments[#key] as String);
+      });
+      final service = await build();
+      final first = secureStore['mallow_analytics_device_id'];
+
+      await service.resetDeviceIdentity();
+
+      final second = secureStore['mallow_analytics_device_id'];
+      expect(second, isNotNull);
+      expect(second, isNot(first));
+    },
+  );
+
   test('offline queue stays capped when the backend is unreachable', () async {
     when(
       () => dio.post<void>(

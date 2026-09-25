@@ -5,6 +5,11 @@ part 'notification.g.dart';
 
 /// Notification type values — mirrors the TypeScript NotificationType enum
 /// (integer-based, 0-indexed).
+///
+/// 🛑 Append only, never insert. The backend enum is implicitly numeric and the
+/// value is persisted as an `Int`, so a value inserted anywhere but the end
+/// silently re-labels every historical row on both sides. Keep [unknown] last;
+/// it carries no `@JsonValue` and is produced only by the decoder's fallback.
 enum NotificationType {
   @JsonValue(0)
   test,
@@ -96,6 +101,18 @@ enum NotificationType {
   newLike,
   @JsonValue(44)
   newStakingRewards,
+  @JsonValue(45)
+  subscribedCreatorListedArtwork,
+  @JsonValue(46)
+  subscribedCreatorGumballLive,
+  @JsonValue(47)
+  subscribedCreatorJellybeanLive,
+  @JsonValue(48)
+  subscribedCreatorPosted,
+  @JsonValue(49)
+  newSubscribers,
+  @JsonValue(50)
+  newSubscriber,
 
   /// Any type the backend ships that this client doesn't know yet.
   ///

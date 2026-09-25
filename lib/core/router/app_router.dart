@@ -14,6 +14,7 @@ import '../../features/accounts/screens/watch_address_screen.dart';
 import '../../features/activity/screens/activity_screen.dart';
 import '../../features/offers/screens/offers_screen.dart';
 import '../../features/ledger/screens/ledger_scan_screen.dart';
+import '../../features/seed_vault/screens/seed_vault_import_screen.dart';
 import '../../features/moderation/screens/blocked_accounts_screen.dart';
 import '../../features/notifications/screens/notifications_screen.dart';
 import '../../features/settings/screens/about_screen.dart';
@@ -46,6 +47,7 @@ import '../../features/artwork/screens/transfer_artwork_chooser_screen.dart';
 import '../../features/onboarding/screens/biometric_setup_screen.dart';
 import '../../features/onboarding/screens/import_wallet_screen.dart';
 import '../../features/onboarding/screens/pin_setup_screen.dart';
+import '../../features/onboarding/screens/push_setup_screen.dart';
 import '../../features/onboarding/screens/seed_phrase_display_screen.dart';
 import '../../features/onboarding/screens/wallet_intro_screen.dart';
 import '../../features/onboarding/screens/wallet_recovery_screen.dart';
@@ -79,6 +81,7 @@ abstract class AppRoutes {
   static const importWallet = '/onboarding/import';
   static const biometricSetup = '/onboarding/biometric';
   static const pinSetup = '/onboarding/pin';
+  static const pushSetup = '/onboarding/notifications';
 
   // Main tabs
   static const home = '/';
@@ -213,6 +216,10 @@ abstract class AppRoutes {
   // Ledger hardware wallet
   static const ledgerScan = '/wallets/ledger-scan';
 
+  // Solana Mobile Seed Vault (Android only — the entry points that push this
+  // route are gated on the device actually having a Seed Vault implementation)
+  static const seedVaultImport = '/wallets/seed-vault';
+
   /// Generate import-from-phrase route for a seed phrase.
   static String importFromPhraseGlobalPath(String seedPhraseId) =>
       '/wallets/import-from-phrase/$seedPhraseId';
@@ -270,6 +277,21 @@ abstract class AppRoutes {
   static final rootNavigatorKey = GlobalKey<NavigatorState>(debugLabel: 'root');
 }
 
+/// Whether [location] is an import route that must survive the no-wallet guard.
+///
+/// These routes are reached from both onboarding ("I already have a wallet")
+/// and the post-onboarding add-wallet flows. They are deliberately *not*
+/// onboarding routes — that would bounce an onboarded user to home — so the
+/// no-wallet redirect has to let them through explicitly.
+///
+/// 🛑 A new import route that is missing here does not fail loudly: during
+/// onboarding the device holds no wallet yet, so the guard redirects to
+/// `/welcome` and the entry point simply appears to do nothing.
+bool isWalletImportLocation(String location) =>
+    location == AppRoutes.importPrivateKeyGlobal ||
+    location == AppRoutes.ledgerScan ||
+    location == AppRoutes.seedVaultImport;
+
 /// Creates and configures the app router.
 ///
 /// Uses GoRouter with [AuthStateNotifier] for reactive auth state handling.
@@ -282,18 +304,20 @@ GoRouter createRouter({required AuthStateNotifier authStateNotifier}) {
     refreshListenable: authStateNotifier,
     observers: [navBarRouteObserver],
     redirect: (context, state) {
+      // The push-permission step is the last screen of the first run, but it
+      // is deliberately NOT an onboarding route: it opens only after
+      // `onOnboardingCompleted()` has run, so the "fully onboarded" rule below
+      // would bounce it straight to home. Excluding it also gives it the right
+      // resume behaviour — a kill here lands on home, not back on the lock
+      // setup the user already finished.
+      final isPushSetup = state.matchedLocation == AppRoutes.pushSetup;
+
       final isOnboarding =
-          state.matchedLocation.startsWith('/onboarding') ||
+          (state.matchedLocation.startsWith('/onboarding') && !isPushSetup) ||
           state.matchedLocation == AppRoutes.welcome ||
           state.matchedLocation == AppRoutes.walletRecovery;
 
-      // Import routes used by both onboarding ("I already have a wallet")
-      // and post-onboarding add-wallet flows. Excluded from `isOnboarding`
-      // so they don't bounce post-onboarding users to home, but allowed
-      // through the no-wallet guard below.
-      final isWalletImportRoute =
-          state.matchedLocation == AppRoutes.importPrivateKeyGlobal ||
-          state.matchedLocation == AppRoutes.ledgerScan;
+      final isWalletImportRoute = isWalletImportLocation(state.matchedLocation);
 
       final hasWallet = authStateNotifier.hasWallet;
       final hasCompletedOnboarding = authStateNotifier.hasCompletedOnboarding;
@@ -388,6 +412,10 @@ GoRouter createRouter({required AuthStateNotifier authStateNotifier}) {
       GoRoute(
         path: AppRoutes.pinSetup,
         builder: (context, state) => const PinSetupScreen(),
+      ),
+      GoRoute(
+        path: AppRoutes.pushSetup,
+        builder: (context, state) => const PushSetupScreen(),
       ),
 
       // Main app with bottom navigation
@@ -557,7 +585,7 @@ GoRouter createRouter({required AuthStateNotifier authStateNotifier}) {
         builder: (context, state) => const BlockedAccountsScreen(),
       ),
 
-      // Delete account route
+      // Delete profile route
       GoRoute(
         path: AppRoutes.deleteAccount,
         builder: (context, state) => const DeleteAccountScreen(),
@@ -674,7 +702,14 @@ GoRouter createRouter({required AuthStateNotifier authStateNotifier}) {
       // Mint flow (NFT creation)
       GoRoute(
         path: AppRoutes.mintChooser,
-        builder: (context, state) => const MintTypeChooserScreen(),
+        // Fronts all three mint kinds — stays open while any is live, and each
+        // destination route below re-checks its own cell. In a store build
+        // that hides commerce all three are off, which is what closes it.
+        builder: (context, state) => flowGatedScreen(const [
+          FlowKey.solana(AppFlow.nftMint),
+          FlowKey.solana(AppFlow.editionMint),
+          FlowKey.solana(AppFlow.collectionMint),
+        ], () => const MintTypeChooserScreen()),
       ),
       GoRoute(
         path: AppRoutes.mint1Of1,
@@ -886,6 +921,12 @@ GoRouter createRouter({required AuthStateNotifier authStateNotifier}) {
       GoRoute(
         path: AppRoutes.ledgerScan,
         builder: (context, state) => const LedgerScanScreen(),
+      ),
+
+      // Solana Mobile Seed Vault
+      GoRoute(
+        path: AppRoutes.seedVaultImport,
+        builder: (context, state) => const SeedVaultImportScreen(),
       ),
     ],
   );

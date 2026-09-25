@@ -407,7 +407,15 @@ class _LoadedContentState extends State<_LoadedContent> {
                         ),
                       ),
                     ),
-                  if (state.groups.isEmpty)
+                  if (state.groups.isEmpty && state.isRefreshing)
+                    // No data is visible yet, but the cache/network read is
+                    // still in flight. Keep the no-tab group surface visibly
+                    // loading instead of presenting a false empty portfolio.
+                    if (state.groupViewMode == PortfolioViewMode.list)
+                      const PortfolioSkeletonList()
+                    else
+                      const PortfolioSkeletonGrid()
+                  else if (state.groups.isEmpty)
                     SliverFillRemaining(
                       hasScrollBody: false,
                       child: _EmptyState(

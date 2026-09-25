@@ -20,6 +20,42 @@ WalletInfo _wallet({
 /// derived getters here are read across the drawer, send/swap surfaces, and
 /// signing gates — a regression in any of them silently shows the wrong UI.
 void main() {
+  group('AccountKind.toDbString / fromDbString', () {
+    test('round-trips every value through its DB string', () {
+      for (final kind in AccountKind.values) {
+        expect(
+          AccountKind.fromDbString(kind.toDbString()),
+          kind,
+          reason: 'round-trip should preserve $kind',
+        );
+      }
+    });
+
+    test('emits the exact DB strings the schema expects', () {
+      // These strings are written into the `kind` column and read back by
+      // `getHardwareAccountByIndex` / `getSeedVaultAccountByIndex`, which match
+      // on the literal. Changing one silently stops those queries finding
+      // existing accounts, and imports start forking new account cards.
+      expect(AccountKind.seed.toDbString(), 'seed');
+      expect(AccountKind.privateKey.toDbString(), 'privateKey');
+      expect(AccountKind.viewOnly.toDbString(), 'viewOnly');
+      expect(AccountKind.social.toDbString(), 'social');
+      expect(AccountKind.hardware.toDbString(), 'hardware');
+      expect(AccountKind.seedVault.toDbString(), 'seedVault');
+    });
+
+    test('Seed Vault is its own kind, distinct from hardware', () {
+      // The whole point of the separate kind: hardware accounts resolve by
+      // derivation index alone, so one shared kind merges a Ledger and a
+      // Seed Vault imported at the same index into one account card.
+      expect(AccountKind.seedVault, isNot(AccountKind.hardware));
+      expect(
+        AccountKind.seedVault.toDbString(),
+        isNot(AccountKind.hardware.toDbString()),
+      );
+    });
+  });
+
   group('WalletType.toDbString / fromDbString', () {
     test('round-trips every value through its DB string', () {
       for (final type in WalletType.values) {
@@ -37,6 +73,7 @@ void main() {
       expect(WalletType.viewOnly.toDbString(), 'view_only');
       expect(WalletType.social.toDbString(), 'social');
       expect(WalletType.ledger.toDbString(), 'ledger');
+      expect(WalletType.seedVault.toDbString(), 'seed_vault');
     });
 
     test('"hardware" string is backward-compatible with ledger', () {
@@ -52,16 +89,54 @@ void main() {
   });
 
   group('WalletType derived flags', () {
-    test('only ledger is hardware', () {
-      expect(WalletType.ledger.isHardware, isTrue);
-      for (final t in WalletType.values.where((t) => t != WalletType.ledger)) {
-        expect(t.isHardware, isFalse, reason: '$t should not be hardware');
+    // Why: `isHardware` is what every "this wallet cannot sign on its own"
+    // decision reads — the drawer badge, the send-source gates, and the
+    // background-login skip that keeps an external approval screen from
+    // appearing with no user action behind it. A hardware type missing from
+    // this set does not fail loudly; it signs silently, or prompts silently.
+    const hardware = {WalletType.ledger, WalletType.seedVault};
+
+    test('ledger and Seed Vault are the hardware types', () {
+      for (final t in WalletType.values) {
+        expect(
+          t.isHardware,
+          hardware.contains(t),
+          reason: '$t hardware-ness is wrong',
+        );
       }
     });
 
     test('needsDeviceForSigning tracks isHardware exactly', () {
       for (final t in WalletType.values) {
         expect(t.needsDeviceForSigning, t.isHardware);
+      }
+    });
+  });
+
+  group('WalletInfo.badge', () {
+    // Why: the badge is the only on-screen signal that a wallet's key is not
+    // on this device. A type that falls through to `null` looks like a plain
+    // HD wallet in the drawer.
+    test('Ledger and Seed Vault carry their own distinct marks', () {
+      // Why: both are hardware, but the badge names *which* device holds the
+      // key, and they demand different things to sign — a paired Ledger over
+      // BLE, or an on-device Seed Vault prompt. Collapsing them back onto one
+      // shared "hardware" icon would tell a Seeker owner to go find a Ledger.
+      expect(_wallet(walletType: WalletType.ledger).badge, WalletBadge.ledger);
+      expect(
+        _wallet(walletType: WalletType.seedVault).badge,
+        WalletBadge.seedVault,
+      );
+    });
+
+    test('only plain local-key types carry no badge', () {
+      for (final t in WalletType.values) {
+        final expectBadge = t != WalletType.hd && t != WalletType.importedKey;
+        expect(
+          _wallet(walletType: t).badge != null,
+          expectBadge,
+          reason: '$t badge presence is wrong',
+        );
       }
     });
   });
@@ -238,6 +313,16 @@ void main() {
         ],
       );
       expect(withLedger.hasHardwareWallet, isTrue);
+
+      final withSeedVault = Account(
+        id: 'a',
+        name: 'A',
+        wallets: [
+          _wallet(),
+          _wallet(id: 'w-2', walletType: WalletType.seedVault),
+        ],
+      );
+      expect(withSeedVault.hasHardwareWallet, isTrue);
     });
 
     test('empty wallets list reports no seed phrase and no hardware', () {
@@ -320,6 +405,31 @@ void main() {
         );
       },
     );
+
+    // Why: Seed Vault exposes exactly one signing purpose,
+    // PURPOSE_SIGN_SOLANA_TRANSACTION, so there is no secp256k1 or Tezos path
+    // to reach. A Seed Vault row is only ever written on Solana; the other two
+    // arms are asserted so that stays true if a row is ever mislabelled.
+    test('Seed Vault signs on Solana only', () {
+      expect(
+        _wallet(walletType: WalletType.seedVault).canSignSendTransfer,
+        isTrue,
+      );
+      expect(
+        _wallet(
+          chain: 'ethereum',
+          walletType: WalletType.seedVault,
+        ).canSignSendTransfer,
+        isFalse,
+      );
+      expect(
+        _wallet(
+          chain: 'tezos',
+          walletType: WalletType.seedVault,
+        ).canSignSendTransfer,
+        isFalse,
+      );
+    });
   });
 
   group('bindsGlobalSigner', () {

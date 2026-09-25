@@ -1,7 +1,7 @@
 name: mallow_wallet
 description: "mallow wallet - Art-first mobile wallet for Solana, Ethereum, and Tezos"
 publish_to: 'none'
-version: 0.15.0+19
+version: 0.17.0+22
 
 environment:
   # Floors track pubspec.lock's resolved `sdks:` block. app_settings 8.x pulled

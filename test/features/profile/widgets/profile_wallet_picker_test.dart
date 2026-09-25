@@ -66,10 +66,10 @@ void main() {
   Finder badgeOf(WalletBadge badge) =>
       find.byWidgetPredicate((w) => w is WalletTypeBadge && w.badge == badge);
 
-  testWidgets('a Ledger wallet row is marked as hardware', (tester) async {
+  testWidgets('a Ledger wallet row carries the Ledger mark', (tester) async {
     await pumpCard(tester, [wallet('7xKX', WalletType.ledger)]);
 
-    expect(badgeOf(WalletBadge.hardware), findsOneWidget);
+    expect(badgeOf(WalletBadge.ledger), findsOneWidget);
   });
 
   testWidgets('a social wallet row carries its provider mark', (tester) async {
@@ -112,7 +112,7 @@ void main() {
       wallet('4bNq', WalletType.hd),
     ]);
 
-    expect(badgeOf(WalletBadge.hardware), findsOneWidget);
+    expect(badgeOf(WalletBadge.ledger), findsOneWidget);
     expect(
       find.byWidgetPredicate((w) => w is WalletTypeBadge && w.badge != null),
       findsOneWidget,

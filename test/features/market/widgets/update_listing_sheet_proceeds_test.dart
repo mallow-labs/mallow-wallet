@@ -89,6 +89,9 @@ void main() {
     await tester.pumpWidget(buildSheet(resolver: () async => _splitsFor));
     await tester.pumpAndSettle();
 
+    expect(find.text('1 SOL'), findsOneWidget);
+    expect(find.text('1.000 SOL'), findsNothing);
+
     // Before a price is entered the rows exist but carry no amount — same
     // treatment as the creation review step, so the layout doesn't jump.
     expect(find.text('Proceeds'), findsOneWidget);

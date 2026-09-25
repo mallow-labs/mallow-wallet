@@ -1,9 +1,11 @@
 import 'package:flutter/foundation.dart' show visibleForTesting;
+import '../../../core/config/store_build.dart';
 
 import '../../../core/services/token_metadata_service.dart'
     show TokenMetadataStatus;
 import '../../../shared/utils/chain.dart'
     show apiOwnerAddress, isEvmOrTezosArtwork;
+import '../../../shared/utils/synthetic_master.dart';
 import '../../market/services/edition_buy_routing.dart'
     show resolvePrintableMasterEdition;
 import '../models/on_chain_asset.dart';
@@ -221,6 +223,12 @@ ArtworkActionState resolveArtworkActionState({
   final clock = now ?? DateTime.now();
   final listingType = artwork.listingType;
 
+  // The edition marketplace acts on a selected real print. This database-only
+  // container has no account and must never enter an asset transaction path.
+  if (isSyntheticSolanaMaster(artwork.mintAccount)) {
+    return const ArtworkNoAction();
+  }
+
   // Every CTA below builds a **Solana** marketplace transaction — the buy,
   // offer, bid, cancel, settle and raffle-claim builders are all Solana-only
   // cells (`AppFlow.chains`). An EVM or Tezos artwork can still arrive here
@@ -397,7 +405,15 @@ ArtworkActionState resolveArtworkActionState({
     // CTA and *only* the List CTA — letting it reach `canSend` would rebuild
     // the exact inversion that stranded an owner's flagged artwork in the app.
     final canSend = permissions?.canTransfer ?? false;
+    // `showNftCommerce` first: listing is the paid side, and a store build
+    // that hides commerce must not offer it. Forcing it here rather than in
+    // the sheet keeps the `!canList && !canSend → no sheet` rule intact: an
+    // owner who also cannot send gets no sheet at all, which on a store build
+    // also drops the highest-offer summary panel that sheet carries. Accepted
+    // — the detail page's Offers tab still lists the offers for any viewer,
+    // and the Accept CTA is hidden on that build anyway.
     final canList =
+        showNftCommerce &&
         (permissions?.canList ?? false) &&
         !artwork.isFlagged &&
         !artwork.creatorIsFlagged &&
@@ -781,26 +797,34 @@ bool _isEditionMaster(ArtworkDetails artwork, EditionLiveState? editionState) =>
       editionState: editionState,
     );
 
+/// The connect-wallet CTA names the action signing in would unlock. Where that
+/// action is not offered by this build — the paid side behind
+/// `kShowNftCommerce`, or raffle entry behind `kShowRaffleEntry` — the label
+/// falls back to the ended-auction wording, "Sign in to view", rather than
+/// promise a purchase the sheet behind it will not offer.
 String _connectLabel(
   ListingType listingType,
   AuctionMetadata? auction,
   DateTime now,
 ) {
+  const view = 'Sign in to view';
   switch (listingType) {
     case ListingType.unlisted:
-      return 'Sign in to make offer';
+      return showNftCommerce ? 'Sign in to make offer' : view;
     case ListingType.buyNow:
-      return 'Sign in to buy';
+      return showNftCommerce ? 'Sign in to buy' : view;
     case ListingType.auction:
-      return _auctionEnded(auction, now)
-          ? 'Sign in to view'
+      return _auctionEnded(auction, now) || !showNftCommerce
+          ? view
           : 'Sign in to place bid';
     case ListingType.raffle:
-      return 'Sign in to buy tickets';
+      return kShowRaffleEntry && showNftCommerce
+          ? 'Sign in to buy tickets'
+          : view;
     case ListingType.gumball:
     case ListingType.airdrop:
     case ListingType.store:
     case ListingType.jellybean:
-      return 'Sign in to participate';
+      return showNftCommerce ? 'Sign in to participate' : view;
   }
 }

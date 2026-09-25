@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:bloc_test/bloc_test.dart';
@@ -23,6 +24,7 @@ import 'package:mallow_wallet/features/portfolio/services/portfolio_bloc.dart';
 import 'package:mallow_wallet/features/profile/data/user_profile_repository.dart';
 import 'package:mallow_wallet/features/wallets/services/profile_lookup_service.dart';
 import 'package:mallow_wallet/shared/theme/mallow_theme.dart';
+import 'package:mallow_wallet/shared/widgets/loading_indicator.dart';
 import 'package:mocktail/mocktail.dart';
 
 class _MockDio extends Mock implements Dio {}
@@ -88,6 +90,15 @@ void main() {
     artworkCount: 0,
     artistAddress: creator,
     collectionMint: mint,
+  );
+
+  ArtGroup artistGroup() => const ArtGroup(
+    id: 'artist-group-1',
+    type: ArtGroupType.artist,
+    name: 'An Artist',
+    thumbnailUrl: null,
+    artworkCount: 0,
+    artistAddress: strangerAddress,
   );
 
   setUpAll(() {
@@ -201,9 +212,7 @@ void main() {
     drop<SessionManager>();
   });
 
-  /// Mounts the drilldown for a collection created by [creator] and opens the
-  /// kebab menu.
-  Future<void> openCollectionMenu(WidgetTester tester, String creator) async {
+  Future<void> mountGroup(WidgetTester tester, ArtGroup group) async {
     tester.view.physicalSize = const Size(1200, 3000);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -211,11 +220,18 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: MallowTheme.lightTheme,
-        home: PortfolioGroupScreen(group: groupFor(creator)),
+        home: PortfolioGroupScreen(group: group),
       ),
     );
     await tester.pump();
+  }
 
+  /// Mounts the drilldown for a collection created by [creator].
+  Future<void> mountCollection(WidgetTester tester, String creator) async {
+    await mountGroup(tester, groupFor(creator));
+  }
+
+  Future<void> tapCollectionMenu(WidgetTester tester) async {
     final kebab = find.byWidgetPredicate(
       (w) =>
           w is SvgPicture &&
@@ -229,6 +245,11 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
   }
 
+  Future<void> openCollectionMenu(WidgetTester tester, String creator) async {
+    await mountCollection(tester, creator);
+    await tapCollectionMenu(tester);
+  }
+
   /// Pops the open sheet while the tree is still mounted so the module-global
   /// `runGuardedSheet` key is released for the next test.
   Future<void> closeSheet(WidgetTester tester) async {
@@ -236,6 +257,24 @@ void main() {
     if (nav.canPop()) nav.pop();
     await tester.pumpAndSettle();
   }
+
+  testWidgets(
+    'creator permissions start before the menu opens and are reused',
+    (tester) async {
+      await mountCollection(tester, linkedAddress);
+
+      // Why: this screen represents one stable collection, so waiting for the
+      // kebab tap would add avoidable DAS latency before creator actions can
+      // resolve.
+      verify(() => permissions.checkPermissions(mint)).called(1);
+      clearInteractions(permissions);
+
+      await tapCollectionMenu(tester);
+
+      verifyNever(() => permissions.checkPermissions(any()));
+      await closeSheet(tester);
+    },
+  );
 
   testWidgets(
     'collection created by a non-active session wallet keeps the creator rows',
@@ -267,7 +306,107 @@ void main() {
     expect(find.text('Burn collection'), findsNothing);
     // The non-creator rows still render, proving the sheet actually opened.
     expect(find.text('Share collection'), findsOneWidget);
+    verifyNever(() => permissions.checkPermissions(any()));
 
     await closeSheet(tester);
+  });
+
+  testWidgets(
+    'owned action shimmers resolve in the already-open collection menu',
+    (tester) async {
+      final firstPage = Completer<PortfolioArtworksResult>();
+      when(
+        () => portfolioRepo.getGroupArtworks(any(), page: any(named: 'page')),
+      ).thenAnswer((_) => firstPage.future);
+
+      await openCollectionMenu(tester, strangerAddress);
+
+      // Why: an unresolved first page makes the entire action list unstable.
+      // Do not mix actionable labels with placeholders while it settles.
+      expect(
+        find.byKey(const ValueKey('collection-actions-loading')),
+        findsOneWidget,
+      );
+      expect(find.byType(ShimmerBox), findsNWidgets(8));
+      expect(find.text('View collection'), findsNothing);
+      expect(find.text('Share collection'), findsNothing);
+      expect(find.text('Cast collection'), findsNothing);
+      expect(find.text('Download artworks'), findsNothing);
+
+      firstPage.complete(
+        PortfolioArtworksResult(
+          artworks: [
+            PortfolioArtwork(
+              mintAccount: 'ARTWORK_MINT',
+              title: 'Owned artwork',
+              imageUrl: '',
+              artistName: 'Artist',
+            ),
+          ],
+          total: 1,
+        ),
+      );
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('collection-actions-loading')),
+        findsNothing,
+      );
+      expect(find.text('View collection'), findsOneWidget);
+      expect(find.text('Share collection'), findsOneWidget);
+      expect(find.text('Cast collection'), findsOneWidget);
+      expect(find.text('Download artworks'), findsOneWidget);
+
+      tester.firstState<NavigatorState>(find.byType(Navigator)).pop();
+      await tester.pump(const Duration(milliseconds: 400));
+    },
+  );
+
+  testWidgets('artist actions resolve together in the already-open menu', (
+    tester,
+  ) async {
+    final firstPage = Completer<PortfolioArtworksResult>();
+    when(
+      () => portfolioRepo.getGroupArtworks(any(), page: any(named: 'page')),
+    ).thenAnswer((_) => firstPage.future);
+
+    await mountGroup(tester, artistGroup());
+    await tapCollectionMenu(tester);
+
+    // Why: artist View/Share must not look ready while the owned-artwork
+    // actions that belong to the same menu are still being determined.
+    expect(
+      find.byKey(const ValueKey('artist-actions-loading')),
+      findsOneWidget,
+    );
+    expect(find.byType(ShimmerBox), findsNWidgets(8));
+    expect(find.text('View artist'), findsNothing);
+    expect(find.text('Share artist'), findsNothing);
+    expect(find.text('Cast to screen'), findsNothing);
+    expect(find.text('Download artworks'), findsNothing);
+
+    firstPage.complete(
+      PortfolioArtworksResult(
+        artworks: [
+          PortfolioArtwork(
+            mintAccount: 'ARTIST_ARTWORK_MINT',
+            title: 'Owned artist artwork',
+            imageUrl: '',
+            artistName: 'An Artist',
+          ),
+        ],
+        total: 1,
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('artist-actions-loading')), findsNothing);
+    expect(find.text('View artist'), findsOneWidget);
+    expect(find.text('Share artist'), findsOneWidget);
+    expect(find.text('Cast to screen'), findsOneWidget);
+    expect(find.text('Download artworks'), findsOneWidget);
+
+    tester.firstState<NavigatorState>(find.byType(Navigator)).pop();
+    await tester.pump(const Duration(milliseconds: 400));
   });
 }

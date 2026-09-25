@@ -63,6 +63,18 @@ void main() {
     });
   });
 
+  group('formatBalance', () {
+    test('strips insignificant zeros from plain and abbreviated balances', () {
+      expect(formatBalance(1.20), '1.2');
+      expect(formatBalance(1000000), '1M');
+      expect(formatBalance(1250000), '1.25M');
+    });
+
+    test('preserves meaningful dust precision', () {
+      expect(formatBalance(0.001230), '0.00123');
+    });
+  });
+
   group('groupThousands / formatCount', () {
     // A returning webapp user reads every number the webapp grouped for them
     // (JS `toLocaleString`). Ungrouped, "1234 sold" and "$1234567" of volume

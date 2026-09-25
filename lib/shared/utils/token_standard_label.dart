@@ -23,5 +23,6 @@ String tokenStandardLabelFromWire(String wire) {
   for (final ts in TokenStandard.values) {
     if (ts.wireValue == wire) return tokenStandardLabel(ts);
   }
+  if (wire == 'unknown') return 'Unknown';
   return wire;
 }

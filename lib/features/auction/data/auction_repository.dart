@@ -13,10 +13,20 @@ class AuctionRepository {
   final MallowApiV2Client _apiV2;
 
   /// Build an unsigned `createAuction` transaction via the v2
-  /// `POST /v2/tx/auctions/create` route. Returns the base64-encoded
-  /// serialized message ready for the wallet to sign.
-  Future<String> getCreateAuctionTx(CreateAuctionTxRequest args) async {
-    final response = await _apiV2.createAuctionTx(args);
-    return response.result.tx;
+  /// `POST /v2/tx/auctions/create` route. The payload is wrapped in the
+  /// `{ result }` envelope: [UnsignedTxWithSetupResponse.tx] is always the
+  /// listing transaction, and a compressed NFT whose eventual settle would not
+  /// fit the 1232-byte packet raw *also* carries
+  /// [UnsignedTxWithSetupResponse.setupTx] — the address-lookup-table
+  /// transaction `tx` is compiled against.
+  ///
+  /// The envelope is returned whole (rather than just `tx`) because the caller
+  /// must sign and confirm `setupTx` FIRST: dropping it broadcasts a
+  /// transaction naming a lookup table that does not exist yet, which fails
+  /// on-chain. Mirrors [FixedPriceRepository.getCreateBuyNowTx].
+  Future<ApiResponse<UnsignedTxWithSetupResponse>> getCreateAuctionTx(
+    CreateAuctionTxRequest args,
+  ) async {
+    return _apiV2.createAuctionTx(args);
   }
 }

@@ -91,6 +91,25 @@ void main() {
     });
   });
 
+  testWidgets('token balances omit insignificant fractional zeros', (
+    tester,
+  ) async {
+    const token = TokenBalance(
+      mint: usdcMint,
+      symbol: 'USDC',
+      name: 'USD Coin',
+      decimals: 6,
+      rawBalance: 1230000,
+      uiBalance: 1.2300,
+      isVerified: true,
+    );
+
+    await tester.pumpWidget(host(const TokenSelectorModal(tokens: [token])));
+
+    expect(find.text('1.23'), findsOneWidget);
+    expect(find.text('1.2300'), findsNothing);
+  });
+
   testWidgets('titles of any length start at the same leading edge', (
     tester,
   ) async {

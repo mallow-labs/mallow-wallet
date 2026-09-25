@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
+import '../../../../core/config/store_build.dart';
 import '../../../../shared/theme/mallow_theme.dart';
 import '../../../../shared/utils/price_format.dart';
 import '../../../../shared/utils/balance_check.dart';
@@ -174,54 +175,59 @@ class ArtworkBuyEditionSheet extends StatelessWidget {
             ),
           ],
           ListingDisclosures(artwork: artwork),
-          const SizedBox(height: MallowTheme.spacingMd),
-          ArtworkFundingSource(
-            currencyMint: artwork.currency,
-            builder: (context, switching) =>
-                BlocBuilder<TokenBalanceBloc, TokenBalanceState>(
-                  builder: (context, balanceState) {
-                    final balanceResult = canBuy
-                        ? checkBalanceOrSkip(
-                            paymentMint: artwork.currency,
-                            requiredRawAmount: artwork.price?.round(),
-                            balanceState: balanceState,
-                            // A print costs SOL beyond the listing price —
-                            // asset rent + Metaplex protocol fee (+ ATA rent on
-                            // the legacy standard). Webapp gates the buy on it
-                            // (`useBuyNow`'s `requiredSolLamports`), and on
-                            // an SPL-priced edition it is the *only* SOL the
-                            // buyer needs, so a price-only gate saw none of it.
-                            // The marketplace print fee is owed too but is only
-                            // known once the on-chain config is read; the
-                            // confirm sheet adds it. Quoting the fixed part
-                            // here can only under-require, never false-block.
-                            additionalSolLamports: editionPrintSolFeeLamports(
-                              tokenStandard:
-                                  editionState?.tokenStandard ??
-                                  artwork.tokenStandard,
-                            ),
-                          )
-                        : const BalanceCheckResult.sufficient();
-                    return MallowButton(
-                      label: buyLabel,
-                      enabled: canBuy && !isLoading && !switching,
-                      isLoading: isLoading && canBuy,
-                      onPressed: !canBuy || isLoading
-                          ? null
-                          : () {
-                              if (!ensureSufficientBalance(
-                                context,
-                                balanceResult,
-                              )) {
-                                return;
-                              }
-                              onBuyEdition();
-                            },
-                      isFullWidth: true,
-                    );
-                  },
-                ),
-          ),
+          // The purchase CTA and its funding line go with `kShowNftCommerce`;
+          // a store build that hides commerce keeps price, supply progress
+          // and timing as status.
+          if (showNftCommerce) ...[
+            const SizedBox(height: MallowTheme.spacingMd),
+            ArtworkFundingSource(
+              currencyMint: artwork.currency,
+              builder: (context, switching) =>
+                  BlocBuilder<TokenBalanceBloc, TokenBalanceState>(
+                    builder: (context, balanceState) {
+                      final balanceResult = canBuy
+                          ? checkBalanceOrSkip(
+                              paymentMint: artwork.currency,
+                              requiredRawAmount: artwork.price?.round(),
+                              balanceState: balanceState,
+                              // A print costs SOL beyond the listing price —
+                              // asset rent + Metaplex protocol fee (+ ATA rent on
+                              // the legacy standard). Webapp gates the buy on it
+                              // (`useBuyNow`'s `requiredSolLamports`), and on
+                              // an SPL-priced edition it is the *only* SOL the
+                              // buyer needs, so a price-only gate saw none of it.
+                              // The marketplace print fee is owed too but is only
+                              // known once the on-chain config is read; the
+                              // confirm sheet adds it. Quoting the fixed part
+                              // here can only under-require, never false-block.
+                              additionalSolLamports: editionPrintSolFeeLamports(
+                                tokenStandard:
+                                    editionState?.tokenStandard ??
+                                    artwork.tokenStandard,
+                              ),
+                            )
+                          : const BalanceCheckResult.sufficient();
+                      return MallowButton(
+                        label: buyLabel,
+                        enabled: canBuy && !isLoading && !switching,
+                        isLoading: isLoading && canBuy,
+                        onPressed: !canBuy || isLoading
+                            ? null
+                            : () {
+                                if (!ensureSufficientBalance(
+                                  context,
+                                  balanceResult,
+                                )) {
+                                  return;
+                                }
+                                onBuyEdition();
+                              },
+                        isFullWidth: true,
+                      );
+                    },
+                  ),
+            ),
+          ],
           // TODO: Unhide when we support master edition offers.
           // const SizedBox(height: MallowTheme.spacingSm),
           // MallowButton(

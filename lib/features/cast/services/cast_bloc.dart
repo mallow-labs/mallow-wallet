@@ -908,7 +908,26 @@ class CastBloc extends Bloc<CastEvent, CastState> {
             unawaited(_preloadLookahead(initialQueue));
           }
         } else if (currentState is CastActive) {
+          final wasInterrupted =
+              currentState.sessionState != CastSessionState.connected;
           emit(currentState.copyWith(sessionState: CastSessionState.connected));
+          if (wasInterrupted) await _resumeSession(currentState);
+        }
+
+      case CastSessionState.suspended:
+        // The sender was backgrounded / locked, or the network blipped. The
+        // queue, the device and the slide the receiver is holding are all
+        // still valid, so the session stays open — only the clock stops, since
+        // a tick here would push a slide at a transport that cannot carry it.
+        // The SDK reports `connected` again on the way back, and
+        // [_resumeSession] picks up from there.
+        // Distinct name from the `connected` arm above: Dart switch cases
+        // share one scope.
+        final activeState = state;
+        if (activeState is! CastActive) return;
+        _stopSlideshowTimer();
+        if (activeState.sessionState != CastSessionState.suspended) {
+          emit(activeState.copyWith(sessionState: CastSessionState.suspended));
         }
 
       case CastSessionState.disconnected:
@@ -928,6 +947,32 @@ class CastBloc extends Bloc<CastEvent, CastState> {
         // Handled by connectToDevice — no state change needed here.
         break;
     }
+  }
+
+  /// Bring a session that came back from [CastSessionState.suspended] up to
+  /// date: re-push the current slide, then restart the clock.
+  ///
+  /// The re-push is not redundant. A receiver that idled out while the sender
+  /// was away reloads the receiver app on resume and comes back blank, and
+  /// waiting a whole slideshow interval to find that out is the difference
+  /// between "it picked up where it left off" and "it's broken". The send is
+  /// fail-soft on purpose: the timer must restart either way, or a live
+  /// session is left with a dead clock.
+  Future<void> _resumeSession(CastActive session) async {
+    final item = session.queue.currentItem;
+    if (item != null) {
+      try {
+        await _castService.sendMedia(
+          item,
+          overlay: CastOverlayConfigFromQueue.from(session.queue, item),
+        );
+      } catch (e) {
+        debugPrint('[Cast] resume re-send failed (non-fatal): $e');
+      }
+    }
+    if (session.queue.isPaused) return;
+    _restartSlideshowTimer(session.queue.slideshowIntervalSeconds);
+    unawaited(_preloadLookahead(session.queue));
   }
 
   // ---------------------------------------------------------------------------

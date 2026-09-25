@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
@@ -13,6 +14,7 @@ import '../../../shared/utils/artwork_display.dart';
 import '../../../shared/utils/artwork_web_link.dart';
 import '../../../shared/widgets/app_snack_bar.dart';
 import '../../../shared/widgets/filled_heart_svg.dart';
+import '../../../shared/widgets/loading_indicator.dart';
 import '../../../shared/widgets/mallow_network_image.dart';
 import '../../../shared/widgets/mallow_sheet.dart';
 import '../../../shared/widgets/nsfw_obscured.dart';
@@ -35,9 +37,12 @@ import '../services/artwork_permission_service.dart';
 /// curation screen passes [showRemoveFromCuration]; the artwork detail
 /// screen hides [showViewArtwork] and enables [showSyncToken]).
 ///
-/// Permissions (Transfer/Edit/Burn) are fetched on-chain via the DAS API
-/// asynchronously after the sheet opens. Universal actions (Share, View, etc.)
-/// are available immediately.
+/// The menu shows a full options shimmer until permissions resolve, then builds
+/// only the actions the current user may take. The artwork detail screen passes
+/// [liveState] so its prefetch is reused and an open menu follows live changes.
+/// Other single-artwork surfaces may pass [permissionsFuture] to reuse a
+/// lookup started before the menu opens. When neither is supplied, the sheet
+/// starts the lookup on open as usual.
 ///
 /// Signing-dependent actions are automatically hidden when the active wallet
 /// is view-only (canSign = false).
@@ -60,7 +65,6 @@ Future<ArtworkContextMenuAction?> showArtworkContextMenu(
   bool showSyncToken = false,
   bool showViewMasterEdition = false,
   bool inGroupedSale = false,
-  List<String> ownerAddresses = const [],
   String? collectionMint,
   bool? canCastOverride,
   bool? initialIsLiked,
@@ -78,13 +82,18 @@ Future<ArtworkContextMenuAction?> showArtworkContextMenu(
   /// signer auto-switch (the artwork detail screen) pass this; other screens
   /// leave it empty so their menu stays active-wallet-only.
   Set<String> sessionAddresses = const {},
+  Future<ArtworkPermissions>? permissionsFuture,
+  ValueListenable<ArtworkContextMenuState?>? liveState,
 }) async {
   final action = await runGuardedSheet<ArtworkContextMenuAction>(
     'artworkContextMenu',
     () async {
-      final wallet = await sl<WalletRepository>().getActiveWallet();
-      final canSign = wallet?.canSign ?? true;
-      final activeAddress = wallet?.address;
+      final wallet = liveState == null
+          ? await sl<WalletRepository>().getActiveWallet()
+          : null;
+      final canSign = liveState == null
+          ? wallet?.canSign ?? true
+          : liveState.value?.canSign ?? false;
 
       if (!context.mounted) return null;
 
@@ -94,19 +103,19 @@ Future<ArtworkContextMenuAction?> showArtworkContextMenu(
         builder: (_) => _ArtworkContextMenuSheet(
           artwork: artwork,
           canSign: canSign,
-          activeAddress: activeAddress,
           showRemoveFromCuration: showRemoveFromCuration,
           showViewArtwork: showViewArtwork,
           showHide: showHide,
           showSyncToken: showSyncToken,
           showViewMasterEdition: showViewMasterEdition,
           inGroupedSale: inGroupedSale,
-          ownerAddresses: ownerAddresses,
           showViewCollection: collectionMint != null,
           canCastOverride: canCastOverride,
           initialIsLiked: initialIsLiked,
           onToggleLike: onToggleLike,
           sessionAddresses: sessionAddresses,
+          permissionsFuture: permissionsFuture,
+          liveState: liveState,
         ),
       );
     },
@@ -150,6 +159,29 @@ Future<ArtworkContextMenuAction?> showArtworkContextMenu(
   }
 }
 
+/// Fully resolved state for a live artwork-detail options sheet.
+///
+/// A null value in the listenable passed to [showArtworkContextMenu] means
+/// that one or more permission inputs are still being resolved. Keeping the
+/// artwork alongside the verdicts lets an already-open sheet react to live
+/// ownership, listing, auction, and edition-supply changes.
+@immutable
+class ArtworkContextMenuState {
+  const ArtworkContextMenuState({
+    required this.artwork,
+    required this.permissions,
+    required this.canCast,
+    required this.canSign,
+    required this.inGroupedSale,
+  });
+
+  final PortfolioArtwork artwork;
+  final ArtworkPermissions permissions;
+  final bool canCast;
+  final bool canSign;
+  final bool inGroupedSale;
+}
+
 /// Actions the user can take from the artwork context menu.
 ///
 /// [share], [viewArtist], [viewCollection], [edit] and [reportArtwork] are
@@ -177,28 +209,29 @@ class _ArtworkContextMenuSheet extends StatefulWidget {
   const _ArtworkContextMenuSheet({
     required this.artwork,
     required this.canSign,
-    required this.activeAddress,
     required this.showRemoveFromCuration,
     required this.showViewArtwork,
     required this.showHide,
     required this.showSyncToken,
     required this.showViewMasterEdition,
     required this.inGroupedSale,
-    required this.ownerAddresses,
     required this.showViewCollection,
     required this.canCastOverride,
     required this.initialIsLiked,
     required this.onToggleLike,
     this.sessionAddresses = const {},
+    this.permissionsFuture,
+    this.liveState,
   });
 
   final PortfolioArtwork artwork;
   final bool canSign;
-  final String? activeAddress;
 
   /// Session-wide signer set for the Transfer / Burn / Edit gates; empty for
   /// screens that don't wire the auto-switch. See [showArtworkContextMenu].
   final Set<String> sessionAddresses;
+  final Future<ArtworkPermissions>? permissionsFuture;
+  final ValueListenable<ArtworkContextMenuState?>? liveState;
 
   /// Shown when opened from a curation the viewer owns.
   final bool showRemoveFromCuration;
@@ -220,12 +253,6 @@ class _ArtworkContextMenuSheet extends StatefulWidget {
   /// multi-edition grouped sale, even if the chain would allow the edit.
   /// Only the detail payload carries grouped-sale info; grids pass false.
   final bool inGroupedSale;
-
-  /// Indexer-known owner addresses. When the active wallet is among them,
-  /// Transfer/Burn render as disabled placeholders during the DAS
-  /// roundtrip instead of popping in (and stay visible-but-disabled if the
-  /// chain ultimately denies). Empty when the caller has no owner info.
-  final List<String> ownerAddresses;
 
   /// Only true when the caller can navigate to the collection (i.e. it has
   /// the collection mint — `PortfolioArtwork` alone doesn't carry it).
@@ -251,23 +278,23 @@ class _ArtworkContextMenuSheet extends StatefulWidget {
 }
 
 class _ArtworkContextMenuSheetState extends State<_ArtworkContextMenuSheet> {
-  late final Future<ArtworkPermissions> _permissionsFuture;
+  Future<ArtworkPermissions>? _permissionsFuture;
   late bool _isLiked;
   bool _likeInFlight = false;
 
   @override
   void initState() {
     super.initState();
-    _permissionsFuture = sl<ArtworkPermissionService>().checkPermissions(
-      widget.artwork.mintAccount,
-      sessionAddresses: widget.sessionAddresses,
-      // Indexer listing state — the only signal that catches listings which
-      // neither escrow nor freeze the asset, so Transfer / Burn refuse instead
-      // of confirming a tx that orphans the listing. See
-      // [ArtworkPermissionService.isListedForSale].
-      listingType: widget.artwork.listingType,
-      inGroupedSale: widget.inGroupedSale,
-    );
+    if (widget.liveState == null) {
+      _permissionsFuture =
+          widget.permissionsFuture ??
+          sl<ArtworkPermissionService>().checkPermissions(
+            widget.artwork.mintAccount,
+            sessionAddresses: widget.sessionAddresses,
+            listingType: widget.artwork.listingType,
+            inGroupedSale: widget.inGroupedSale,
+          );
+    }
     _isLiked =
         widget.initialIsLiked ??
         sl<AuthService>().isLiked(widget.artwork.mintAccount, ContentType.nft);
@@ -316,15 +343,7 @@ class _ArtworkContextMenuSheetState extends State<_ArtworkContextMenuSheet> {
     }
   }
 
-  /// Optimistic stand-in for the permission-gated rows (Download/Cast)
-  /// while the DAS lookup is in flight: the active wallet is an
-  /// indexer-known owner or the artwork's update authority.
-  bool get _isLikelyOwnerOrCreator =>
-      widget.activeAddress != null &&
-      (widget.ownerAddresses.contains(widget.activeAddress) ||
-          widget.activeAddress == widget.artwork.updateAuth);
-
-  Widget _castRows({required bool visible, bool enabled = true}) {
+  Widget _castRows({required bool visible}) {
     if (!visible) return const SizedBox.shrink();
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -332,7 +351,6 @@ class _ArtworkContextMenuSheetState extends State<_ArtworkContextMenuSheet> {
         SheetMenuRow(
           assetPath: 'assets/icons/cast.svg',
           label: 'Cast to screen',
-          enabled: enabled,
           onTap: () =>
               Navigator.of(context).pop(ArtworkContextMenuAction.castToScreen),
         ),
@@ -342,7 +360,6 @@ class _ArtworkContextMenuSheetState extends State<_ArtworkContextMenuSheet> {
           SheetMenuRow(
             assetPath: 'assets/icons/add_to_cast.svg',
             label: 'Add to cast',
-            enabled: enabled,
             onTap: () => Navigator.of(
               context,
             ).pop(ArtworkContextMenuAction.addToCastQueue),
@@ -371,298 +388,244 @@ class _ArtworkContextMenuSheetState extends State<_ArtworkContextMenuSheet> {
           Divider(height: 1, color: colors.dividerLight),
           // The menu grows the sheet until it runs out of room under the
           // header, and only then scrolls.
-          Flexible(
-            child: SingleChildScrollView(
-              child: Column(
-                children: [
-                  const SizedBox(height: 12),
-                  // Group 1 — Primary actions
-                  SheetMenuRow(
-                    assetPath: 'assets/icons/export.svg',
-                    label: 'Share',
-                    onTap: () => Navigator.of(
-                      context,
-                    ).pop(ArtworkContextMenuAction.share),
-                  ),
-                  if (widget.showViewArtwork)
-                    SheetMenuRow(
-                      assetPath: 'assets/icons/stamp.svg',
-                      label: 'View artwork',
-                      onTap: () => Navigator.of(
-                        context,
-                      ).pop(ArtworkContextMenuAction.viewArtwork),
-                    ),
-                  if (widget.showRemoveFromCuration)
-                    SheetMenuRow(
-                      assetPath: 'assets/icons/minus.svg',
-                      label: 'Remove from curation',
-                      onTap: () => Navigator.of(
-                        context,
-                      ).pop(ArtworkContextMenuAction.removeFromCuration),
-                    ),
-                  if (widget.canSign) ...[
-                    SheetMenuRow(
-                      assetPath: 'assets/icons/add_to_curation.svg',
-                      label: 'Add to curation',
-                      onTap: () => Navigator.of(
-                        context,
-                      ).pop(ArtworkContextMenuAction.addToCuration),
-                    ),
-                    _LikeRow(isLiked: _isLiked, onTap: _toggleLike),
-                    // Download is offered only for artworks the user owns or
-                    // created (resolved on-chain against every wallet they
-                    // control). Like Edit/Burn below, the row renders as a
-                    // disabled placeholder during the DAS roundtrip whenever
-                    // the active wallet is an indexer-known owner or the
-                    // update authority, instead of popping in — and stays
-                    // visible-but-disabled if the chain ultimately denies.
-                    FutureBuilder<ArtworkPermissions>(
-                      future: _permissionsFuture,
-                      builder: (context, snapshot) {
-                        final perms = snapshot.data ?? ArtworkPermissions.none;
-                        final showDownload =
-                            perms.canDownload || _isLikelyOwnerOrCreator;
-                        if (!showDownload) return const SizedBox.shrink();
-                        return SheetMenuRow(
-                          assetPath: 'assets/icons/download.svg',
-                          label: 'Download to device',
-                          enabled: perms.canDownload,
-                          onTap: () => Navigator.of(
-                            context,
-                          ).pop(ArtworkContextMenuAction.download),
-                        );
-                      },
-                    ),
-                    // Cast actions are gated on the same on-chain permissions
-                    // that gate transfer/edit: only the current owner or the
-                    // update authority (creator) can cast an artwork. The
-                    // detail screen overrides this with its richer creator
-                    // check (royalty splits + linked addresses). Like
-                    // Download above, the rows render as disabled
-                    // placeholders during the DAS roundtrip when the active
-                    // wallet is a likely owner/creator, and stay
-                    // visible-but-disabled if the chain ultimately denies.
-                    if (widget.canCastOverride != null)
-                      _castRows(visible: widget.canCastOverride!)
-                    else
-                      FutureBuilder<ArtworkPermissions>(
-                        future: _permissionsFuture,
-                        builder: (context, snapshot) {
-                          final perms =
-                              snapshot.data ?? ArtworkPermissions.none;
-                          // `canDownload` is the owned-or-created gate (the
-                          // same one `ownedOrCreatedMints` applies to the bulk
-                          // cast/download actions) and, unlike canTransfer /
-                          // canEdit, it is independent of listing state —
-                          // casting an artwork you have listed for sale must
-                          // keep working. Kept as an OR so the historical
-                          // transfer/edit arms still unlock cast on surfaces
-                          // where the download gate's profile cache is cold.
-                          final canCast =
-                              perms.canDownload ||
-                              perms.canTransfer ||
-                              perms.canEdit;
-                          return _castRows(
-                            visible: canCast || _isLikelyOwnerOrCreator,
-                            enabled: canCast,
-                          );
-                        },
-                      ),
-                    // Hide / Unhide from the owner's profile. Gated on
-                    // [ArtworkPermissions.canHide], which mirrors the backend's
-                    // signed-login authorization exactly: the item's owner or
-                    // creator must be on the LOGIN wallet's profile. This is
-                    // narrower than Download's session-wide gate — in Account
-                    // mode an artwork held by a non-login session wallet always
-                    // 403s, so the row must stay hidden there. Eye/slash + label
-                    // mirror the webapp's "..." menu and the collection options
-                    // sheet. Suppressed entirely on surfaces that can't supply
-                    // the real hidden state (see [showHide]).
-                    if (widget.showHide)
-                      FutureBuilder<ArtworkPermissions>(
-                        future: _permissionsFuture,
-                        builder: (context, snapshot) {
-                          final perms =
-                              snapshot.data ?? ArtworkPermissions.none;
-                          if (!perms.canHide) return const SizedBox.shrink();
-                          final hidden = widget.artwork.isHidden;
-                          return SheetMenuRow(
-                            assetPath: hidden
-                                ? 'assets/icons/eye.svg'
-                                : 'assets/icons/invisible.svg',
-                            label: hidden ? 'Unhide artwork' : 'Hide artwork',
-                            onTap: () => Navigator.of(
-                              context,
-                            ).pop(ArtworkContextMenuAction.hideArtwork),
-                          );
-                        },
-                      ),
-                  ],
-                  if (widget.showSyncToken)
-                    SheetMenuRow(
-                      assetPath: 'assets/icons/sync.svg',
-                      label: 'Sync token',
-                      onTap: () => Navigator.of(
-                        context,
-                      ).pop(ArtworkContextMenuAction.syncToken),
-                    ),
-                  if (widget.showViewMasterEdition)
-                    SheetMenuRow(
-                      assetPath: 'assets/icons/edition.svg',
-                      label: 'View master edition',
-                      onTap: () => Navigator.of(
-                        context,
-                      ).pop(ArtworkContextMenuAction.viewMasterEdition),
-                    ),
-                  // Group 2 — Navigation actions
-                  if (widget.artwork.artistUsername?.isNotEmpty ?? false)
-                    SheetMenuRow(
-                      assetPath: 'assets/icons/user_square.svg',
-                      label: 'View artist',
-                      onTap: () => Navigator.of(
-                        context,
-                      ).pop(ArtworkContextMenuAction.viewArtist),
-                    ),
-                  // Group 3 — Collection actions
-                  if (widget.showViewCollection)
-                    SheetMenuRow(
-                      assetPath: 'assets/icons/view_collection.svg',
-                      label: 'View collection',
-                      onTap: () => Navigator.of(
-                        context,
-                      ).pop(ArtworkContextMenuAction.viewCollection),
-                    ),
-                  // Group 4 — Owner actions (loaded asynchronously via DAS API).
-                  // When the active wallet matches the artwork's on-chain
-                  // update authority, the Edit / Burn rows render as
-                  // disabled placeholders immediately so the user sees the
-                  // actions are coming before the DAS roundtrip resolves.
-                  if (widget.canSign)
-                    FutureBuilder<ArtworkPermissions>(
-                      future: _permissionsFuture,
-                      builder: (context, snapshot) {
-                        final isLoading =
-                            snapshot.connectionState != ConnectionState.done;
-                        final perms = snapshot.data ?? ArtworkPermissions.none;
-                        final isLikelyUpdateAuth =
-                            widget.activeAddress != null &&
-                            widget.artwork.updateAuth != null &&
-                            widget.activeAddress == widget.artwork.updateAuth;
-                        // Transfer/Burn are gated on *ownership*, not update
-                        // authority. Surface them optimistically from the
-                        // indexer-known owners (when the caller has them) so
-                        // the rows show disabled during the DAS roundtrip.
-                        final isLikelyOwner =
-                            widget.activeAddress != null &&
-                            widget.ownerAddresses.contains(
-                              widget.activeAddress,
-                            );
-
-                        if (isLoading &&
-                            !isLikelyUpdateAuth &&
-                            !isLikelyOwner) {
-                          return const SizedBox.shrink();
-                        }
-
-                        // Rows stay visible whenever we already know the
-                        // wallet is the update authority / indexer-known
-                        // owner, even if the resolved permission ultimately
-                        // says no — they just render disabled in that case.
-                        // Webapp parity (`ArtworkOptionsButton`, and
-                        // `useCanTransfer` for transfer): neither burn nor
-                        // transfer is offered inside a grouped sale or while
-                        // listed — a listed asset must be delisted first. The
-                        // on-chain frozen check inside canBurn/canTransfer
-                        // covers escrow-style listings only: edition listings
-                        // install a delegate record, non-custodial and
-                        // external-market listings set nothing on-chain, so
-                        // without this indexer term the transfer confirms and
-                        // orphans the listing.
-                        final isListed =
-                            ArtworkPermissionService.isListedForSale(
-                              listingType: widget.artwork.listingType,
-                              inGroupedSale: widget.inGroupedSale,
-                            );
-                        final showTransfer =
-                            !isListed &&
-                            (perms.canTransfer ||
-                                isLikelyUpdateAuth ||
-                                isLikelyOwner);
-                        final showEdit =
-                            !widget.inGroupedSale &&
-                            (perms.canEdit || isLikelyUpdateAuth);
-                        // Open/Limited Edition masters can't be burned once
-                        // prints exist — burning the master while editions are
-                        // outstanding would orphan them. Hide the option while
-                        // supply > 0 (1/1s and edition prints are unaffected).
-                        final hasOutstandingPrints =
-                            widget.artwork.isPrintable &&
-                            (widget.artwork.supply ?? 0) > 0;
-                        final burnEligible = !isListed && !hasOutstandingPrints;
-                        final showBurn =
-                            burnEligible &&
-                            (perms.canBurn ||
-                                isLikelyUpdateAuth ||
-                                isLikelyOwner);
-
-                        return Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (showTransfer)
-                              SheetMenuRow(
-                                assetPath: 'assets/icons/send.svg',
-                                label: 'Transfer artwork',
-                                enabled: perms.canTransfer,
-                                onTap: () => Navigator.of(
-                                  context,
-                                ).pop(ArtworkContextMenuAction.transfer),
-                              ),
-                            if (showEdit)
-                              SheetMenuRow(
-                                assetPath: 'assets/icons/edit.svg',
-                                label: 'Edit artwork',
-                                enabled: perms.canEdit,
-                                onTap: () => Navigator.of(
-                                  context,
-                                ).pop(ArtworkContextMenuAction.edit),
-                              ),
-                            if (showBurn)
-                              SheetMenuRow(
-                                assetPath: 'assets/icons/burn.svg',
-                                label: 'Burn artwork',
-                                isDestructive: true,
-                                enabled: perms.canBurn,
-                                onTap: () => Navigator.of(
-                                  context,
-                                ).pop(ArtworkContextMenuAction.burn),
-                              ),
-                          ],
-                        );
-                      },
-                    ),
-                  // Group 5 — Moderation. Always offered, on every artwork and
-                  // for every viewer: an entry point that appears only on
-                  // "other people's" content is one a reviewer can fail to
-                  // find, and the owner/creator resolution here is async and
-                  // occasionally wrong.
-                  SheetMenuRow(
-                    assetPath: 'assets/icons/alert_triangle.svg',
-                    label: 'Report artwork',
-                    isWarning: true,
-                    onTap: () => Navigator.of(
-                      context,
-                    ).pop(ArtworkContextMenuAction.reportArtwork),
-                  ),
-                  // Bottom safe area padding
-                  SizedBox(height: sheetBottomInset(context)),
-                ],
-              ),
-            ),
-          ),
+          Flexible(child: _buildOptions()),
         ],
       ),
     );
   }
+
+  Widget _buildOptions() {
+    final liveState = widget.liveState;
+    if (liveState != null) {
+      return ValueListenableBuilder<ArtworkContextMenuState?>(
+        valueListenable: liveState,
+        builder: (context, state, _) => state == null
+            ? const _ArtworkOptionsShimmer()
+            : _buildResolvedOptions(state),
+      );
+    }
+    return FutureBuilder<ArtworkPermissions>(
+      future: _permissionsFuture,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData && !snapshot.hasError) {
+          return const _ArtworkOptionsShimmer();
+        }
+        final permissions = snapshot.data ?? ArtworkPermissions.none;
+        final canCast =
+            permissions.canDownload ||
+            permissions.canTransfer ||
+            permissions.canEdit;
+        return _buildResolvedOptions(
+          ArtworkContextMenuState(
+            artwork: widget.artwork,
+            permissions: permissions,
+            canCast: canCast,
+            canSign: widget.canSign,
+            inGroupedSale: widget.inGroupedSale,
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildResolvedOptions(ArtworkContextMenuState state) {
+    final artwork = state.artwork;
+    final perms = state.permissions;
+    final inGroupedSale = state.inGroupedSale;
+    final isListed = ArtworkPermissionService.isListedForSale(
+      listingType: artwork.listingType,
+      inGroupedSale: inGroupedSale,
+    );
+    final hasOutstandingPrints =
+        artwork.isPrintable && (artwork.supply ?? 0) > 0;
+
+    return SingleChildScrollView(
+      child: Column(
+        children: [
+          const SizedBox(height: 12),
+          // Group 1 — Primary actions
+          SheetMenuRow(
+            assetPath: 'assets/icons/export.svg',
+            label: 'Share',
+            onTap: () =>
+                Navigator.of(context).pop(ArtworkContextMenuAction.share),
+          ),
+          if (widget.showViewArtwork)
+            SheetMenuRow(
+              assetPath: 'assets/icons/stamp.svg',
+              label: 'View artwork',
+              onTap: () => Navigator.of(
+                context,
+              ).pop(ArtworkContextMenuAction.viewArtwork),
+            ),
+          if (widget.showRemoveFromCuration)
+            SheetMenuRow(
+              assetPath: 'assets/icons/minus.svg',
+              label: 'Remove from curation',
+              onTap: () => Navigator.of(
+                context,
+              ).pop(ArtworkContextMenuAction.removeFromCuration),
+            ),
+          if (state.canSign) ...[
+            SheetMenuRow(
+              assetPath: 'assets/icons/add_to_curation.svg',
+              label: 'Add to curation',
+              onTap: () => Navigator.of(
+                context,
+              ).pop(ArtworkContextMenuAction.addToCuration),
+            ),
+            _LikeRow(isLiked: _isLiked, onTap: _toggleLike),
+            // Download is offered only for artworks the user owns or created,
+            // resolved on-chain against every wallet they control.
+            if (perms.canDownload)
+              SheetMenuRow(
+                assetPath: 'assets/icons/download.svg',
+                label: 'Download to device',
+                onTap: () => Navigator.of(
+                  context,
+                ).pop(ArtworkContextMenuAction.download),
+              ),
+            // Detail's live state includes the richer creator check (royalty
+            // splits and linked addresses); other surfaces may override the
+            // on-chain owner/update-authority fallback explicitly.
+            _castRows(
+              visible: widget.liveState != null
+                  ? state.canCast
+                  : widget.canCastOverride ?? state.canCast,
+            ),
+            // Hide / Unhide from the owner's profile. Gated on
+            // [ArtworkPermissions.canHide], which mirrors the backend's
+            // signed-login authorization exactly: the item's owner or
+            // creator must be on the LOGIN wallet's profile. This is
+            // narrower than Download's session-wide gate — in Account
+            // mode an artwork held by a non-login session wallet always
+            // 403s, so the row must stay hidden there. Eye/slash + label
+            // mirror the webapp's "..." menu and the collection options
+            // sheet. Suppressed entirely on surfaces that can't supply
+            // the real hidden state (see [showHide]).
+            if (widget.showHide && perms.canHide)
+              SheetMenuRow(
+                assetPath: artwork.isHidden
+                    ? 'assets/icons/eye.svg'
+                    : 'assets/icons/invisible.svg',
+                label: artwork.isHidden ? 'Unhide artwork' : 'Hide artwork',
+                onTap: () => Navigator.of(
+                  context,
+                ).pop(ArtworkContextMenuAction.hideArtwork),
+              ),
+          ],
+          if (widget.showSyncToken)
+            SheetMenuRow(
+              assetPath: 'assets/icons/sync.svg',
+              label: 'Sync token',
+              onTap: () =>
+                  Navigator.of(context).pop(ArtworkContextMenuAction.syncToken),
+            ),
+          if (widget.showViewMasterEdition)
+            SheetMenuRow(
+              assetPath: 'assets/icons/edition.svg',
+              label: 'View master edition',
+              onTap: () => Navigator.of(
+                context,
+              ).pop(ArtworkContextMenuAction.viewMasterEdition),
+            ),
+          // Group 2 — Navigation actions
+          if (artwork.artistUsername?.isNotEmpty ?? false)
+            SheetMenuRow(
+              assetPath: 'assets/icons/user_square.svg',
+              label: 'View artist',
+              onTap: () => Navigator.of(
+                context,
+              ).pop(ArtworkContextMenuAction.viewArtist),
+            ),
+          // Group 3 — Collection actions
+          if (widget.showViewCollection)
+            SheetMenuRow(
+              assetPath: 'assets/icons/view_collection.svg',
+              label: 'View collection',
+              onTap: () => Navigator.of(
+                context,
+              ).pop(ArtworkContextMenuAction.viewCollection),
+            ),
+          // Group 4 — owner actions. Denied actions are omitted entirely.
+          if (state.canSign)
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!isListed && perms.canTransfer)
+                  SheetMenuRow(
+                    assetPath: 'assets/icons/send.svg',
+                    label: 'Transfer artwork',
+                    onTap: () => Navigator.of(
+                      context,
+                    ).pop(ArtworkContextMenuAction.transfer),
+                  ),
+                if (!inGroupedSale && perms.canEdit)
+                  SheetMenuRow(
+                    assetPath: 'assets/icons/edit.svg',
+                    label: 'Edit artwork',
+                    enabled: perms.canEdit,
+                    onTap: () => Navigator.of(
+                      context,
+                    ).pop(ArtworkContextMenuAction.edit),
+                  ),
+                if (!isListed && !hasOutstandingPrints && perms.canBurn)
+                  SheetMenuRow(
+                    assetPath: 'assets/icons/burn.svg',
+                    label: 'Burn artwork',
+                    isDestructive: true,
+                    onTap: () => Navigator.of(
+                      context,
+                    ).pop(ArtworkContextMenuAction.burn),
+                  ),
+              ],
+            ),
+          // Group 5 — Moderation. Always offered, on every artwork and
+          // for every viewer: an entry point that appears only on
+          // "other people's" content is one a reviewer can fail to
+          // find, and the owner/creator resolution here is async and
+          // occasionally wrong.
+          SheetMenuRow(
+            assetPath: 'assets/icons/alert_triangle.svg',
+            label: 'Report artwork',
+            isWarning: true,
+            onTap: () => Navigator.of(
+              context,
+            ).pop(ArtworkContextMenuAction.reportArtwork),
+          ),
+          // Bottom safe area padding
+          SizedBox(height: sheetBottomInset(context)),
+        ],
+      ),
+    );
+  }
+}
+
+class _ArtworkOptionsShimmer extends StatelessWidget {
+  const _ArtworkOptionsShimmer();
+
+  @override
+  Widget build(BuildContext context) => SingleChildScrollView(
+    key: const ValueKey('artwork-options-loading'),
+    child: Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Column(
+        children: List.generate(
+          8,
+          (_) => const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+            child: Row(
+              children: [
+                ShimmerBox(width: 24, height: 24),
+                SizedBox(width: 16),
+                Expanded(child: ShimmerBox(height: 16)),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 /// Artwork preview header inside the context menu.

@@ -348,6 +348,58 @@ void main() {
     );
   });
 
+  group('SolanaRpcService transaction reads', () {
+    Future<({SolanaRpcService rpc, List<Map<String, dynamic>> requests})>
+    servingTransactionReads() async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final requests = <Map<String, dynamic>>[];
+      server.listen((req) async {
+        final body =
+            jsonDecode(await utf8.decoder.bind(req).join())
+                as Map<String, dynamic>;
+        requests.add(body);
+        req.response.headers.contentType = ContentType.json;
+        req.response.write(
+          jsonEncode({'jsonrpc': '2.0', 'id': body['id'], 'result': null}),
+        );
+        await req.response.close();
+      });
+      Config.debugOverrides['RPC_PROXY_BASE_URL'] =
+          'http://127.0.0.1:${server.port}';
+      return (
+        rpc: SolanaRpcService(_DummyWalletManager(), TxLandedSlots()),
+        requests: requests,
+      );
+    }
+
+    int? requestedMaxVersion(Map<String, dynamic> request) {
+      final params = request['params'] as List<dynamic>;
+      final config = params[1] as Map<String, dynamic>;
+      return config['maxSupportedTransactionVersion'] as int?;
+    }
+
+    test('typed reads opt into v1 so a landed v1 transaction does not fail '
+        'with unsupported-version RPC error', () async {
+      final (:rpc, :requests) = await servingTransactionReads();
+
+      await rpc.getTransaction('typed-signature');
+
+      expect(requests, hasLength(1));
+      expect(requestedMaxVersion(requests.single), 1);
+    });
+
+    test('JSON reads opt into v1 so post-confirmation reconciliation can read '
+        'v1 transaction balances', () async {
+      final (:rpc, :requests) = await servingTransactionReads();
+
+      await rpc.getTransactionJson('json-signature');
+
+      expect(requests, hasLength(1));
+      expect(requestedMaxVersion(requests.single), 1);
+    });
+  });
+
   group('SolanaRpcService.transactionStatus', () {
     /// Serves one canned `getSignatureStatuses` value and points the service's
     /// RPC URL at it.

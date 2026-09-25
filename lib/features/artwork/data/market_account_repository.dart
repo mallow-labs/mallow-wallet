@@ -8,6 +8,7 @@ import 'package:solana/solana.dart';
 
 import '../../../core/data/mallow_market.dart';
 import '../../../core/realtime/models/account_update.dart';
+import '../../../shared/utils/synthetic_master.dart';
 
 /// Outcome of a single on-chain account read. The distinction between
 /// [absent] (the chain authoritatively has no such account — a `404`
@@ -51,6 +52,7 @@ class MarketAccountRepository {
 
   /// `["listing", mint]` under [kMallowMarketProgramId].
   Future<String> deriveListingPda(String mint) async {
+    if (isSyntheticSolanaMaster(mint)) return '';
     final mintKey = Ed25519HDPublicKey.fromBase58(mint);
     final programId = Ed25519HDPublicKey.fromBase58(kMallowMarketProgramId);
     final pda = await Ed25519HDPublicKey.findProgramAddress(
@@ -62,6 +64,7 @@ class MarketAccountRepository {
 
   /// `[mint, "auction_config"]` under [kMallowAuctionProgramId].
   Future<String> deriveAuctionConfigPda(String mint) async {
+    if (isSyntheticSolanaMaster(mint)) return '';
     final mintKey = Ed25519HDPublicKey.fromBase58(mint);
     final programId = Ed25519HDPublicKey.fromBase58(kMallowAuctionProgramId);
     final pda = await Ed25519HDPublicKey.findProgramAddress(
@@ -74,6 +77,7 @@ class MarketAccountRepository {
   /// `["offer", buyer, mint]` under [kMallowMarketProgramId] — the canonical
   /// codama 3-seed Offer PDA (see [kOfferSeed]).
   Future<String> deriveOfferPda(String buyer, String mint) async {
+    if (isSyntheticSolanaMaster(mint)) return '';
     final buyerKey = Ed25519HDPublicKey.fromBase58(buyer);
     final mintKey = Ed25519HDPublicKey.fromBase58(mint);
     final programId = Ed25519HDPublicKey.fromBase58(kMallowMarketProgramId);
@@ -107,7 +111,7 @@ class MarketAccountRepository {
     String program,
     String accountType,
   ) async {
-    if (mint.isEmpty) {
+    if (mint.isEmpty || isSyntheticSolanaMaster(mint)) {
       return (
         status: OnChainReadStatus.unknown,
         account: null,

@@ -17,6 +17,7 @@ class DigitalAsset {
     required this.freezeDelegateFrozen,
     required this.permanentFreezeDelegateFrozen,
     required this.hasMasterEditionPlugin,
+    this.delegated = false,
     this.owner,
     this.updateAuthority,
     this.currentSize,
@@ -188,6 +189,7 @@ class DigitalAsset {
           ownership['frozen'] == true ||
           freezeDelegateFrozen ||
           permanentFreezeDelegateFrozen,
+      delegated: ownership['delegated'] == true,
       supply: supply,
       freezeDelegateFrozen: freezeDelegateFrozen,
       permanentFreezeDelegateFrozen: permanentFreezeDelegateFrozen,
@@ -220,8 +222,15 @@ class DigitalAsset {
   /// Whether the asset metadata is mutable
   final bool isMutable;
 
-  /// Whether the asset/token account is frozen
+  /// Whether the asset/token account is frozen.
+  ///
+  /// NOT a synonym for "the owner cannot act" — see [heldByThirdParty]. Every
+  /// pNFT reads `true` here.
   final bool frozen;
+
+  /// Whether DAS reports a delegate on the token. For a pNFT this — not
+  /// [frozen] — separates "staked or listed elsewhere" from "in the wallet".
+  final bool delegated;
 
   /// Print current supply (NFT/pNFT) — 0 means eligible for burn
   final int supply;
@@ -302,6 +311,23 @@ class DigitalAsset {
   /// reads it directly. Always `false` for Core / CoreCollection assets,
   /// which classify off owner-vs-update-authority instead.
   final bool primarySaleHappened;
+
+  /// Is someone other than the owner holding this asset — listed elsewhere,
+  /// staked, or otherwise delegated away?
+  ///
+  /// [frozen] answers that for every standard except pNFT, whose token account
+  /// is ALWAYS frozen: Token Metadata freezes it to enforce the programmable
+  /// rules, and its own transfer path thaws, moves and refreezes it. Read
+  /// alone the flag is `true` for every pNFT ever minted, which disabled
+  /// Transfer / Burn / List / Accept Offer for the whole standard. The tell
+  /// there is the delegate — staking locks the token record and an escrowless
+  /// listing leaves a Sale delegate, and the owner can sign away neither.
+  ///
+  /// Mirrors the backend's `isHeldByThirdParty` and the
+  /// webapp's `isOwnedUnfrozen` pNFT branch. DAS reports only that *a*
+  /// delegate exists, not which kind, so any delegated pNFT counts as held.
+  bool get heldByThirdParty =>
+      tokenStandard == TokenStandard.pnft ? frozen && delegated : frozen;
 }
 
 /// On-chain creator entry as returned by DAS for token-metadata assets.

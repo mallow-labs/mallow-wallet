@@ -29,7 +29,9 @@ enum TokenMetadataStatus {
 
 /// Resolves symbol / decimals / logo for tokens the static [tokenByMint]
 /// registry doesn't key — listing currencies, and the legs of a swap the
-/// activity feed reports by mint alone.
+/// activity feed reports by mint alone. It also enriches registered tokens
+/// with remote logos when no bundled image exists, without replacing their
+/// curated transaction metadata.
 ///
 /// Seven memecoin currencies (WEN, SILLY, GUAC, FWOG, VALUE, PXLPSHR, ART)
 /// were deliberately dropped from `mallow_tokens.dart` — see its header. That
@@ -139,6 +141,31 @@ class TokenMetadataService {
   /// CDN wrapping.
   String? imageUrlFor(String? mint) =>
       mint == null ? null : _cache[mint]?.imageUrl;
+
+  /// Resolves the logo for any Solana mint, including a static registry mint.
+  ///
+  /// Registry entries already carry trusted symbol, decimals and listing
+  /// rules, so [resolve] deliberately skips them. Their image metadata can
+  /// still change independently, though, and newly registered currencies may
+  /// not have a bundled asset yet. This method enriches only the image cache;
+  /// [registerResolvedToken] keeps the curated registry entry authoritative.
+  Future<String?> resolveImageUrl(String? mint, {String? chain}) async {
+    if (mint == null || mint.isEmpty) return null;
+    final parsed = Chain.tryParse(chain);
+    if (parsed != null && parsed != Chain.solana) return null;
+
+    final cached = _cache[mint];
+    if (cached != null && !cached.isStale(clock())) return cached.imageUrl;
+    if (_isFailed(mint)) return cached?.imageUrl;
+
+    final pending = _inFlight[mint] ?? (_inFlight[mint] = _fetch(mint));
+    if (cached != null) {
+      unawaited(pending);
+      return cached.imageUrl;
+    }
+    await pending;
+    return _cache[mint]?.imageUrl;
+  }
 
   /// Resolve [mint], hitting DAS only when [needsLookup] says so.
   ///

@@ -155,6 +155,22 @@ void main() {
         result: UnsignedTxResponse(tx: testTransactionBase64),
       ),
     );
+    // The builders whose cNFT arm can answer with a prerequisite
+    // lookup-table `setupTx` alongside the tx: offers/accept,
+    // fixed-price/cancel, auctions/cancel and auctions/settle.
+    provideDummy<ApiResponse<UnsignedTxWithSetupResponse>>(
+      ApiResponse<UnsignedTxWithSetupResponse>(
+        result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
+      ),
+    );
+    // fixed-price/buy carries the same optional `setupTx` but its own
+    // envelope, in which `tx` is OPTIONAL — the builder answers with a
+    // `swapTx` instead when the buyer pays in another token.
+    provideDummy<ApiResponse<BuyFixedPriceTxResponse>>(
+      ApiResponse<BuyFixedPriceTxResponse>(
+        result: BuyFixedPriceTxResponse(tx: testTransactionBase64),
+      ),
+    );
     provideDummy<ApiResponse<ArtworkResult>>(
       const ApiResponse<ArtworkResult>(
         result: ArtworkResult(
@@ -248,8 +264,8 @@ void main() {
           'uses the v2 fixed-price route for a SOL 1/1 buy',
           setUp: () {
             when(mockApiV2.buyFixedPriceTx(any)).thenAnswer(
-              (_) async => ApiResponse<UnsignedTxResponse>(
-                result: UnsignedTxResponse(tx: testTransactionBase64),
+              (_) async => ApiResponse<BuyFixedPriceTxResponse>(
+                result: BuyFixedPriceTxResponse(tx: testTransactionBase64),
               ),
             );
           },
@@ -291,13 +307,114 @@ void main() {
           },
         );
 
+        // A compressed NFT's buy is compiled against an address lookup table
+        // the chain may not have yet; `setupTx` creates it. The executor
+        // signs/sends/CONFIRMS each tx before starting the next, so the setup
+        // leading the batch is the confirmation barrier. Broadcast in the other
+        // order, the buy names a table that does not exist and fails on-chain
+        // with an error that reads like a bug — and the buyer has paid the
+        // table's rent for nothing.
+        blocTest<MarketBloc, MarketState>(
+          'a 1/1 buy WITH setupTx puts it FIRST in the batch so the lookup '
+          'table exists before the buy is broadcast',
+          setUp: () {
+            when(mockApiV2.buyFixedPriceTx(any)).thenAnswer(
+              (_) async => ApiResponse<BuyFixedPriceTxResponse>(
+                result: BuyFixedPriceTxResponse(
+                  tx: testTransactionBase64,
+                  setupTx: setupTransactionBase64,
+                ),
+              ),
+            );
+          },
+          build: () => MarketBloc(
+            mockApi,
+            mockApiV2,
+            mockWalletManager,
+            mockRpcService,
+            mockAuthService,
+            mockDasApi,
+            makeFlow(),
+            mockPriceService,
+            const FeeConfig(),
+            mockMarketplaceConfig,
+            mockMarketAccounts,
+            mockCurationAttribution,
+          ),
+          act: (bloc) => bloc.add(
+            const MarketEvent.buy(
+              mintAccount: testMintAccount,
+              supplyType: SupplyType.oneOfOne,
+            ),
+          ),
+          expect: () => [
+            const TxFlowPreparing<MarketPrepData, MarketSuccessData>(),
+            isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+                .having(
+                  (s) => s.data.transactionsBase64,
+                  'transactionsBase64',
+                  [setupTransactionBase64, testTransactionBase64],
+                )
+                // Drives [_onSimulate]'s skip: the leading tx's lamport delta
+                // is the table's rent, not the price of the artwork, so
+                // simulating it would quote the buyer the wrong number.
+                .having((s) => s.data.hasSetupTx, 'hasSetupTx', isTrue),
+          ],
+        );
+
+        // `tx` is optional on this response because the builder answers with a
+        // `swapTx` instead when the buyer pays in a token other than the
+        // listing's currency. That route starts with a swap quote the wallet
+        // never sends, so it should be unreachable — but a `!` here would turn
+        // a server answer we simply cannot act on into a null-check crash that
+        // says nothing about what came back.
+        blocTest<MarketBloc, MarketState>(
+          'a buy response carrying only swapTx fails with copy that names the '
+          'swap instead of crashing on a null assertion',
+          setUp: () {
+            when(mockApiV2.buyFixedPriceTx(any)).thenAnswer(
+              (_) async => ApiResponse<BuyFixedPriceTxResponse>(
+                result: BuyFixedPriceTxResponse(swapTx: testTransactionBase64),
+              ),
+            );
+          },
+          build: () => MarketBloc(
+            mockApi,
+            mockApiV2,
+            mockWalletManager,
+            mockRpcService,
+            mockAuthService,
+            mockDasApi,
+            makeFlow(),
+            mockPriceService,
+            const FeeConfig(),
+            mockMarketplaceConfig,
+            mockMarketAccounts,
+            mockCurationAttribution,
+          ),
+          act: (bloc) => bloc.add(
+            const MarketEvent.buy(
+              mintAccount: testMintAccount,
+              supplyType: SupplyType.oneOfOne,
+            ),
+          ),
+          expect: () => [
+            const TxFlowPreparing<MarketPrepData, MarketSuccessData>(),
+            isA<TxFlowFailure<MarketPrepData, MarketSuccessData>>().having(
+              (s) => s.failure.message,
+              'failure message',
+              contains('token swap'),
+            ),
+          ],
+        );
+
         blocTest<MarketBloc, MarketState>(
           'threads listing currency + price into totalCost (USDC) and '
           'routes the token 1/1 buy through the v2 fixed-price route',
           setUp: () {
             when(mockApiV2.buyFixedPriceTx(any)).thenAnswer(
-              (_) async => ApiResponse<UnsignedTxResponse>(
-                result: UnsignedTxResponse(tx: testTransactionBase64),
+              (_) async => ApiResponse<BuyFixedPriceTxResponse>(
+                result: BuyFixedPriceTxResponse(tx: testTransactionBase64),
               ),
             );
           },
@@ -761,8 +878,8 @@ void main() {
           'the master-edition print builder',
           setUp: () {
             when(mockApiV2.buyFixedPriceTx(any)).thenAnswer(
-              (_) async => ApiResponse<UnsignedTxResponse>(
-                result: UnsignedTxResponse(tx: testTransactionBase64),
+              (_) async => ApiResponse<BuyFixedPriceTxResponse>(
+                result: BuyFixedPriceTxResponse(tx: testTransactionBase64),
               ),
             );
           },
@@ -865,8 +982,8 @@ void main() {
           'open-edition supplyType and takes the fixed-price builder',
           setUp: () {
             when(mockApiV2.buyFixedPriceTx(any)).thenAnswer(
-              (_) async => ApiResponse<UnsignedTxResponse>(
-                result: UnsignedTxResponse(tx: testTransactionBase64),
+              (_) async => ApiResponse<BuyFixedPriceTxResponse>(
+                result: BuyFixedPriceTxResponse(tx: testTransactionBase64),
               ),
             );
           },
@@ -967,6 +1084,275 @@ void main() {
             verify(mockApi.getBuyEditionTxs(any)).called(1);
           },
         );
+
+        // ── Which copy did I buy? ──────────────────────────────────────────
+        //
+        // `BuyEditionTxItem` pairs each print's transaction with the address
+        // that print will occupy and states the entries are NOT
+        // interchangeable: the transaction is already partially signed for
+        // that one ephemeral mint key, so it can only ever land there. The
+        // wallet used to throw the addresses away (`map((e) => e.tx)`) and
+        // report the buy against the MASTER edition, which is the one address
+        // the buyer definitely does not now own a new copy of.
+        //
+        // Two byte-distinct print txs and two distinct mints, so an
+        // implementation that zips them in the wrong order fails these tests
+        // rather than passing by symmetry.
+        final firstPrintTx = _buildParseableTxBase64(
+          testWalletAddress,
+          lamports: 3,
+        );
+        final secondPrintTx = _buildParseableTxBase64(
+          testWalletAddress,
+          lamports: 4,
+        );
+        const firstPrintMint = 'Pr1nt111111111111111111111111111111111111111';
+        const secondPrintMint = 'Pr1nt222222222222222222222222222222222222222';
+        const setupSignature = 'S1gSetup11111111111111111111111111111111111';
+        const firstPrintSignature = 'S1gPr1nt111111111111111111111111111111111';
+        const secondPrintSignature =
+            'S1gPr1nt222222222222222222222222222222222';
+
+        blocTest<MarketBloc, MarketState>(
+          'keeps every print tx paired with the mint address it is partially '
+          'signed for',
+          setUp: () {
+            when(mockApiV2.buyEditionTx(any)).thenAnswer(
+              (_) async => BuyEditionTxsResponse(
+                result: [
+                  BuyEditionTxItem(
+                    mintAccount: firstPrintMint,
+                    tx: firstPrintTx,
+                  ),
+                  BuyEditionTxItem(
+                    mintAccount: secondPrintMint,
+                    tx: secondPrintTx,
+                  ),
+                ],
+              ),
+            );
+          },
+          build: () => MarketBloc(
+            mockApi,
+            mockApiV2,
+            mockWalletManager,
+            mockRpcService,
+            mockAuthService,
+            mockDasApi,
+            makeFlow(),
+            mockPriceService,
+            const FeeConfig(),
+            mockMarketplaceConfig,
+            mockMarketAccounts,
+            mockCurationAttribution,
+          ),
+          act: (bloc) => bloc.add(
+            const MarketEvent.buy(
+              mintAccount: testMintAccount,
+              supplyType: SupplyType.limitedEdition,
+              quantity: 2,
+            ),
+          ),
+          expect: () => [
+            const TxFlowPreparing<MarketPrepData, MarketSuccessData>(),
+            isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+                .having(
+                  (s) => s.data.transactionsBase64,
+                  'transactionsBase64',
+                  [firstPrintTx, secondPrintTx],
+                )
+                // Same order as the txs above — entry i belongs to print i,
+                // and only to print i.
+                .having((s) => s.data.printMintAccounts, 'printMintAccounts', [
+                  firstPrintMint,
+                  secondPrintMint,
+                ]),
+          ],
+        );
+
+        blocTest<MarketBloc, MarketState>(
+          'reports the prints it bought, not the master edition, and names the '
+          'last print for the signature it returns',
+          setUp: () {
+            when(mockApiV2.buyEditionTx(any)).thenAnswer(
+              (_) async => BuyEditionTxsResponse(
+                result: [
+                  BuyEditionTxItem(
+                    mintAccount: firstPrintMint,
+                    tx: firstPrintTx,
+                  ),
+                  BuyEditionTxItem(
+                    mintAccount: secondPrintMint,
+                    tx: secondPrintTx,
+                  ),
+                ],
+                // The setup tx leads the batch and mints nothing, so it must
+                // not shift the tx ↔ mint pairing by one.
+                setupTx: setupTransactionBase64,
+              ),
+            );
+            when(
+              mockWalletManager.signCompiledTx(
+                unsignedTx: anyNamed('unsignedTx'),
+                additionalSigners: anyNamed('additionalSigners'),
+              ),
+            ).thenAnswer(
+              (invocation) async =>
+                  invocation.namedArguments[#unsignedTx] as SignedTx,
+            );
+            // One signature per BROADCAST TX, keyed off the bytes rather than
+            // the call order: the assertion below is that the mint reported
+            // belongs to the transaction whose signature came back, and a
+            // call-counter stub would let a reordered batch pass.
+            when(mockRpcService.sendTransaction(any)).thenAnswer((
+              invocation,
+            ) async {
+              final sent = (invocation.positionalArguments.first as SignedTx)
+                  .encode();
+              if (sent == setupTransactionBase64) return setupSignature;
+              if (sent == firstPrintTx) return firstPrintSignature;
+              if (sent == secondPrintTx) return secondPrintSignature;
+              fail('broadcast a tx that was not in the prepared batch');
+            });
+            when(
+              mockRpcService.awaitConfirmationOrThrow(
+                any,
+                rebroadcast: anyNamed('rebroadcast'),
+              ),
+            ).thenAnswer((_) async {});
+            // The post-broadcast indexer poll is fire-and-forget and outlives
+            // this test; ack it on the first attempt so it stops instead of
+            // logging swallowed MissingStubErrors into whichever test is
+            // running a second later.
+            when(
+              mockApi.checkTx(any),
+            ).thenAnswer((_) async => <String, dynamic>{});
+            when(
+              mockApi.checkEntry(any),
+            ).thenAnswer((_) async => <String, dynamic>{});
+          },
+          build: () => MarketBloc(
+            mockApi,
+            mockApiV2,
+            mockWalletManager,
+            mockRpcService,
+            mockAuthService,
+            mockDasApi,
+            makeFlow(),
+            mockPriceService,
+            const FeeConfig(),
+            mockMarketplaceConfig,
+            mockMarketAccounts,
+            mockCurationAttribution,
+          ),
+          act: (bloc) async {
+            bloc.add(
+              const MarketEvent.buy(
+                mintAccount: testMintAccount,
+                supplyType: SupplyType.limitedEdition,
+                quantity: 2,
+              ),
+            );
+            await bloc.stream.firstWhere(
+              (s) => s is TxFlowReady<MarketPrepData, MarketSuccessData>,
+            );
+            bloc.add(const MarketEvent.confirmAndSign());
+            await bloc.stream.firstWhere(
+              (s) => s is TxFlowSuccess<MarketPrepData, MarketSuccessData>,
+            );
+          },
+          verify: (bloc) {
+            final state =
+                bloc.state as TxFlowSuccess<MarketPrepData, MarketSuccessData>;
+            // The executor confirms the batch in order and returns the LAST
+            // signature, which is the second print's.
+            expect(state.signature, secondPrintSignature);
+            // So the copy this success names has to be that same print's mint
+            // — not the first print's, and not the master edition's. Both
+            // copies are reported, in broadcast order.
+            expect(state.result.printMintAccounts, [
+              firstPrintMint,
+              secondPrintMint,
+            ]);
+            expect(state.result.printMintAccounts.last, secondPrintMint);
+            expect(
+              state.result.printMintAccounts,
+              isNot(contains(testMintAccount)),
+            );
+            // `mintAccount` deliberately stays the master edition: it is the
+            // artwork the buyer acted on and the mint every post-action
+            // consumer keys its refresh and gating off (`notifyArtworkEdited`,
+            // the artwork screen's pending-indexer set, curation attribution).
+            expect(state.result.mintAccount, testMintAccount);
+          },
+        );
+
+        // The v1 fallback carries the same `{ mintAccount, tx }` entries and
+        // the same partial signature per print, so an off-chain-Merkle-gated
+        // edition must not be the one buy that cannot say what it bought.
+        blocTest<MarketBloc, MarketState>(
+          'keeps the print pairing on the v1 getBuyEditionTxs fallback too',
+          setUp: () {
+            when(mockApiV2.buyEditionTx(any)).thenThrow(
+              DioException(
+                requestOptions: RequestOptions(
+                  path: '/tx/fixed-price/buy-edition',
+                ),
+                response: Response(
+                  requestOptions: RequestOptions(
+                    path: '/tx/fixed-price/buy-edition',
+                  ),
+                  statusCode: 400,
+                  data: const {
+                    'error': {'message': 'User is not whitelisted'},
+                  },
+                ),
+              ),
+            );
+            when(mockApi.getBuyEditionTxs(any)).thenAnswer(
+              (_) async => ApiResponse<List<BuyEditionTx>>(
+                result: [
+                  BuyEditionTx(mintAccount: firstPrintMint, tx: firstPrintTx),
+                  BuyEditionTx(mintAccount: secondPrintMint, tx: secondPrintTx),
+                ],
+              ),
+            );
+          },
+          build: () => MarketBloc(
+            mockApi,
+            mockApiV2,
+            mockWalletManager,
+            mockRpcService,
+            mockAuthService,
+            mockDasApi,
+            makeFlow(),
+            mockPriceService,
+            const FeeConfig(),
+            mockMarketplaceConfig,
+            mockMarketAccounts,
+            mockCurationAttribution,
+          ),
+          act: (bloc) => bloc.add(
+            const MarketEvent.buy(
+              mintAccount: testMintAccount,
+              supplyType: SupplyType.limitedEdition,
+              quantity: 2,
+            ),
+          ),
+          expect: () => [
+            const TxFlowPreparing<MarketPrepData, MarketSuccessData>(),
+            isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+                .having(
+                  (s) => s.data.transactionsBase64,
+                  'transactionsBase64',
+                  [firstPrintTx, secondPrintTx],
+                )
+                .having((s) => s.data.printMintAccounts, 'printMintAccounts', [
+                  firstPrintMint,
+                  secondPrintMint,
+                ]),
+          ],
+        );
       });
 
       // SYOP ("set your own price") listings carry an on-chain price of 0, and
@@ -994,8 +1380,8 @@ void main() {
           'sends the entered price as maxPrice on a SYOP 1/1 buy',
           setUp: () {
             when(mockApiV2.buyFixedPriceTx(any)).thenAnswer(
-              (_) async => ApiResponse<UnsignedTxResponse>(
-                result: UnsignedTxResponse(tx: testTransactionBase64),
+              (_) async => ApiResponse<BuyFixedPriceTxResponse>(
+                result: BuyFixedPriceTxResponse(tx: testTransactionBase64),
               ),
             );
           },
@@ -1093,8 +1479,8 @@ void main() {
               mockCurationAttribution.shareSlugFor(testMintAccount),
             ).thenReturn('ABCDEFGH');
             when(mockApiV2.buyFixedPriceTx(any)).thenAnswer(
-              (_) async => ApiResponse<UnsignedTxResponse>(
-                result: UnsignedTxResponse(tx: testTransactionBase64),
+              (_) async => ApiResponse<BuyFixedPriceTxResponse>(
+                result: BuyFixedPriceTxResponse(tx: testTransactionBase64),
               ),
             );
           },
@@ -1135,8 +1521,8 @@ void main() {
           'curation view for the mint',
           setUp: () {
             when(mockApiV2.buyFixedPriceTx(any)).thenAnswer(
-              (_) async => ApiResponse<UnsignedTxResponse>(
-                result: UnsignedTxResponse(tx: testTransactionBase64),
+              (_) async => ApiResponse<BuyFixedPriceTxResponse>(
+                result: BuyFixedPriceTxResponse(tx: testTransactionBase64),
               ),
             );
           },
@@ -1334,8 +1720,8 @@ void main() {
           'maxPrice: 0 rather than refusing',
           setUp: () {
             when(mockApiV2.buyFixedPriceTx(any)).thenAnswer(
-              (_) async => ApiResponse<UnsignedTxResponse>(
-                result: UnsignedTxResponse(tx: testTransactionBase64),
+              (_) async => ApiResponse<BuyFixedPriceTxResponse>(
+                result: BuyFixedPriceTxResponse(tx: testTransactionBase64),
               ),
             );
           },
@@ -1390,8 +1776,8 @@ void main() {
           'ceiling, so a price raised behind the indexer cannot overcharge',
           setUp: () {
             when(mockApiV2.buyFixedPriceTx(any)).thenAnswer(
-              (_) async => ApiResponse<UnsignedTxResponse>(
-                result: UnsignedTxResponse(tx: testTransactionBase64),
+              (_) async => ApiResponse<BuyFixedPriceTxResponse>(
+                result: BuyFixedPriceTxResponse(tx: testTransactionBase64),
               ),
             );
           },
@@ -1473,8 +1859,8 @@ void main() {
           'every paid listing',
           setUp: () {
             when(mockApiV2.buyFixedPriceTx(any)).thenAnswer(
-              (_) async => ApiResponse<UnsignedTxResponse>(
-                result: UnsignedTxResponse(tx: testTransactionBase64),
+              (_) async => ApiResponse<BuyFixedPriceTxResponse>(
+                result: BuyFixedPriceTxResponse(tx: testTransactionBase64),
               ),
             );
           },
@@ -1678,12 +2064,74 @@ void main() {
         },
       );
 
+      // `_onBurn` runs TWO gates: this bloc's own `supported` set, and
+      // `ArtworkPermissionService.canBurnAsset` right behind it. They must
+      // agree, and for cNFTs they did not: `canBurnAsset` allows a cNFT its
+      // owner holds (the v2 route has dispatched `TokenStandard::Cnft` to
+      // `build_cnft_burn_ixs` all along), while the allowlist here omitted it
+      // — so the artwork sheet offered Burn and the tap died on
+      // "Burning is not supported for this asset type." A cNFT burn needs
+      // nothing extra on the wire: the leaf, its Merkle proof and (V2) its
+      // collection are resolved server-side from the same
+      // `{authority, asset, tokenStandard}` body every other standard sends.
       blocTest<MarketBloc, MarketState>(
-        'rejects unsupported standards (cnft) without hitting the API',
+        'builds a cNFT burn instead of refusing it — the allowlist must not '
+        'veto a standard canBurnAsset and the v2 route both accept',
         setUp: () {
           when(
             mockDasApi.getAsset(testMintAccount),
           ).thenAnswer((_) async => dasFor(standard: TokenStandard.cnft));
+        },
+        build: () => MarketBloc(
+          mockApi,
+          mockApiV2,
+          mockWalletManager,
+          mockRpcService,
+          mockAuthService,
+          mockDasApi,
+          makeFlow(),
+          mockPriceService,
+          const FeeConfig(),
+          mockMarketplaceConfig,
+          mockMarketAccounts,
+          mockCurationAttribution,
+        ),
+        act: (bloc) =>
+            bloc.add(const MarketEvent.burn(mintAccount: testMintAccount)),
+        expect: () => [
+          const TxFlowPreparing<MarketPrepData, MarketSuccessData>(),
+          isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+              .having((s) => s.data.actionType, 'actionType', 'burn')
+              .having((s) => s.data.mintAccount, 'mintAccount', testMintAccount)
+              .having((s) => s.data.transactionsBase64, 'transactions', [
+                testTransactionBase64,
+              ]),
+        ],
+        verify: (_) {
+          final req =
+              verify(mockApiV2.getBurnTx(captureAny)).captured.single
+                  as BurnTxRequest;
+          expect(req.authority, testWalletAddress);
+          expect(req.asset, testMintAccount);
+          // One wire value for both tree versions — the handler reads V1 vs V2
+          // off the merkle tree's owning program, so the wallet must never
+          // send `cnft-v2` (which the burn route rejects).
+          expect(req.tokenStandard.value, 'cnft');
+          // Leaf / proof / collection are the server's job; a cNFT burn pays
+          // for no extra client-side lookup.
+          verifyNever(mockApi.getArtworkByMint(any));
+        },
+      );
+
+      blocTest<MarketBloc, MarketState>(
+        'still refuses a standard the burn route cannot build (objkt) '
+        'without hitting the API — the allowlist mirrors what '
+        '/v2/tx/assets/burn accepts, so a guaranteed 400 never leaves the '
+        'device',
+        setUp: () {
+          when(
+            mockDasApi.getAsset(testMintAccount),
+          ).thenAnswer((_) async => dasFor(standard: TokenStandard.objkt));
         },
         build: () => MarketBloc(
           mockApi,
@@ -1889,6 +2337,22 @@ void main() {
         owner: testWalletAddress,
       );
 
+      /// A plain pNFT sitting in the seller's wallet. `frozen: true` is not a
+      /// listing here — Token Metadata freezes every pNFT token account for
+      /// life to enforce the programmable rules — and `delegated: false` says
+      /// nobody else holds it.
+      const plainPnftAsset = DigitalAsset(
+        id: testMintAccount,
+        tokenStandard: TokenStandard.pnft,
+        isMutable: true,
+        frozen: true,
+        supply: 0,
+        freezeDelegateFrozen: false,
+        permanentFreezeDelegateFrozen: false,
+        hasMasterEditionPlugin: false,
+        owner: testWalletAddress,
+      );
+
       MarketBloc buildBloc() => MarketBloc(
         mockApi,
         mockApiV2,
@@ -1985,8 +2449,8 @@ void main() {
               }),
             );
             when(mockApiV2.acceptOfferTx(any)).thenAnswer(
-              (_) async => ApiResponse<UnsignedTxResponse>(
-                result: UnsignedTxResponse(tx: testTransactionBase64),
+              (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+                result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
               ),
             );
           },
@@ -2003,6 +2467,74 @@ void main() {
             isA<TxFlowReady<MarketPrepData, MarketSuccessData>>(),
           ],
           verify: (_) => verify(mockApiV2.acceptOfferTx(any)).called(1),
+        );
+
+        // Every pNFT is frozen, so the frozen arm alone refused every offer on
+        // an unlisted pNFT — the accept the seller most wants to make.
+        blocTest<MarketBloc, MarketState>(
+          'allows an unlisted pNFT, whose token account is frozen by the '
+          'standard rather than by a listing',
+          setUp: () {
+            when(
+              mockDasApi.getAsset(testMintAccount),
+            ).thenAnswer((_) async => plainPnftAsset);
+            when(mockApiV2.acceptOfferTx(any)).thenAnswer(
+              (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+                result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
+              ),
+            );
+          },
+          build: buildBloc,
+          act: (bloc) => bloc.add(
+            const MarketEvent.acceptOffer(
+              mintAccount: testMintAccount,
+              buyer: buyer,
+              amount: acceptAmount,
+            ),
+          ),
+          expect: () => [
+            const TxFlowPreparing<MarketPrepData, MarketSuccessData>(),
+            isA<TxFlowReady<MarketPrepData, MarketSuccessData>>(),
+          ],
+          verify: (_) => verify(mockApiV2.acceptOfferTx(any)).called(1),
+        );
+
+        blocTest<MarketBloc, MarketState>(
+          'still refuses a delegated pNFT with no mallow listing — a Sale or '
+          'staking delegate really does stop the accept',
+          setUp: () {
+            when(mockDasApi.getAsset(testMintAccount)).thenAnswer(
+              (_) async => const DigitalAsset(
+                id: testMintAccount,
+                tokenStandard: TokenStandard.pnft,
+                isMutable: true,
+                frozen: true,
+                delegated: true,
+                supply: 0,
+                freezeDelegateFrozen: false,
+                permanentFreezeDelegateFrozen: false,
+                hasMasterEditionPlugin: false,
+                owner: testWalletAddress,
+              ),
+            );
+          },
+          build: buildBloc,
+          act: (bloc) => bloc.add(
+            const MarketEvent.acceptOffer(
+              mintAccount: testMintAccount,
+              buyer: buyer,
+              amount: acceptAmount,
+            ),
+          ),
+          expect: () => [
+            const TxFlowPreparing<MarketPrepData, MarketSuccessData>(),
+            isA<TxFlowFailure<MarketPrepData, MarketSuccessData>>().having(
+              (s) => s.failure.message,
+              'message',
+              'This artwork is frozen',
+            ),
+          ],
+          verify: (_) => verifyNever(mockApiV2.acceptOfferTx(any)),
         );
 
         blocTest<MarketBloc, MarketState>(
@@ -2130,8 +2662,8 @@ void main() {
               ),
             );
             when(mockApiV2.acceptOfferTx(any)).thenAnswer(
-              (_) async => ApiResponse<UnsignedTxResponse>(
-                result: UnsignedTxResponse(tx: testTransactionBase64),
+              (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+                result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
               ),
             );
           },
@@ -2151,12 +2683,56 @@ void main() {
         );
       });
 
+      // Accepting an offer on a compressed NFT can be compiled against an
+      // address lookup table the chain does not have yet; `setupTx` creates it.
+      // The executor signs/sends/CONFIRMS each tx before starting the next, so
+      // the setup leading the batch is the confirmation barrier. Broadcast in
+      // the other order, the accept names a table that does not exist and the
+      // seller's sale fails on-chain with an error that reads like a bug.
+      blocTest<MarketBloc, MarketState>(
+        'an accept WITH setupTx puts it FIRST in the batch so the lookup table '
+        'exists before the accept is broadcast',
+        setUp: () {
+          when(
+            mockDasApi.getAsset(testMintAccount),
+          ).thenAnswer((_) async => eligibleAsset);
+          when(mockApiV2.acceptOfferTx(any)).thenAnswer(
+            (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+              result: UnsignedTxWithSetupResponse(
+                tx: testTransactionBase64,
+                setupTx: setupTransactionBase64,
+              ),
+            ),
+          );
+        },
+        build: buildBloc,
+        act: (bloc) => bloc.add(
+          const MarketEvent.acceptOffer(
+            mintAccount: testMintAccount,
+            buyer: buyer,
+            amount: acceptAmount,
+          ),
+        ),
+        expect: () => [
+          const TxFlowPreparing<MarketPrepData, MarketSuccessData>(),
+          isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+              .having((s) => s.data.transactionsBase64, 'transactionsBase64', [
+                setupTransactionBase64,
+                testTransactionBase64,
+              ])
+              // Without this the sheet's own simulate — and the toggle
+              // re-prepare's, which the bloc fires itself — would inspect the
+              // leading setup tx and quote the table's rent as the sale.
+              .having((s) => s.data.hasSetupTx, 'hasSetupTx', isTrue),
+        ],
+      );
+
       blocTest<MarketBloc, MarketState>(
         'defaults enablePrimarySplit to false on the AcceptOfferTxRequest',
         setUp: () {
           when(mockApiV2.acceptOfferTx(any)).thenAnswer(
-            (_) async => ApiResponse<UnsignedTxResponse>(
-              result: UnsignedTxResponse(tx: testTransactionBase64),
+            (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+              result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
             ),
           );
           // Gate lookup — irrelevant to the request threading; the asset is
@@ -2200,8 +2776,8 @@ void main() {
         'forwards an explicit disablePrimarySplit:false (toggle checked)',
         setUp: () {
           when(mockApiV2.acceptOfferTx(any)).thenAnswer(
-            (_) async => ApiResponse<UnsignedTxResponse>(
-              result: UnsignedTxResponse(tx: testTransactionBase64),
+            (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+              result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
             ),
           );
           when(
@@ -2248,8 +2824,8 @@ void main() {
         'never signs the pre-toggle tx',
         setUp: () {
           when(mockApiV2.acceptOfferTx(any)).thenAnswer(
-            (_) async => ApiResponse<UnsignedTxResponse>(
-              result: UnsignedTxResponse(tx: testTransactionBase64),
+            (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+              result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
             ),
           );
           when(
@@ -2333,8 +2909,8 @@ void main() {
         'a toggle re-prepare re-simulates the rebuilt tx and flips the split',
         setUp: () {
           when(mockApiV2.acceptOfferTx(any)).thenAnswer(
-            (_) async => ApiResponse<UnsignedTxResponse>(
-              result: UnsignedTxResponse(tx: testTransactionBase64),
+            (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+              result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
             ),
           );
           when(
@@ -2416,8 +2992,8 @@ void main() {
           when(mockApiV2.acceptOfferTx(any)).thenAnswer((_) async {
             calls++;
             if (calls == 1) {
-              return ApiResponse<UnsignedTxResponse>(
-                result: UnsignedTxResponse(tx: testTransactionBase64),
+              return ApiResponse<UnsignedTxWithSetupResponse>(
+                result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
               );
             }
             throw Exception('transient rebuild failure');
@@ -2496,8 +3072,8 @@ void main() {
       group('proceeds fallback when the simulation cannot answer', () {
         void stubSimulateInputs() {
           when(mockApiV2.acceptOfferTx(any)).thenAnswer(
-            (_) async => ApiResponse<UnsignedTxResponse>(
-              result: UnsignedTxResponse(tx: testTransactionBase64),
+            (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+              result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
             ),
           );
           when(
@@ -2665,6 +3241,73 @@ void main() {
             expect(proceeds.marketFeeRaw, 20000000);
           },
         );
+
+        // A batch led by a lookup-table setup tx has nothing simulatable — the
+        // first tx's lamport delta is the table's rent and the accept behind it
+        // reads a table that does not exist yet. Skipping the simulation is
+        // right; skipping the fallback with it is not, because "You'll receive"
+        // is resolved from the simulation alone and would shimmer forever while
+        // the seller is asked to confirm an irreversible sale.
+        blocTest<MarketBloc, MarketState>(
+          'a batch led by a setupTx skips the simulation but still resolves '
+          'the arithmetic split, so the seller is never left shimmering',
+          setUp: () {
+            when(
+              mockDasApi.getAsset(testMintAccount),
+            ).thenAnswer((_) async => eligibleAsset);
+            when(mockApiV2.acceptOfferTx(any)).thenAnswer(
+              (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+                result: UnsignedTxWithSetupResponse(
+                  tx: testTransactionBase64,
+                  setupTx: setupTransactionBase64,
+                ),
+              ),
+            );
+          },
+          build: () => MarketBloc(
+            mockApi,
+            mockApiV2,
+            mockWalletManager,
+            mockRpcService,
+            mockAuthService,
+            mockDasApi,
+            makeFlow(),
+            mockPriceService,
+            const FeeConfig(),
+            mockMarketplaceConfig,
+            mockMarketAccounts,
+            mockCurationAttribution,
+          ),
+          act: (bloc) async {
+            bloc.add(
+              const MarketEvent.acceptOffer(
+                mintAccount: testMintAccount,
+                buyer: buyer,
+                amount: acceptAmount,
+              ),
+            );
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+            bloc.add(const MarketEvent.simulate());
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+          },
+          verify: (bloc) {
+            final state =
+                bloc.state as TxFlowReady<MarketPrepData, MarketSuccessData>;
+            expect(state.data.hasSetupTx, isTrue);
+            expect(state.data.isSimulating, isFalse);
+            final proceeds = state.data.settleProceeds!;
+            expect(proceeds.isResolved, isTrue);
+            expect(proceeds.marketFeeRaw, 50000000);
+            expect(proceeds.sellerEarningsRaw, 950000000);
+            // Not one round-trip was spent simulating a table-creation tx.
+            verifyNever(
+              mockRpcService.simulateEncodedTransaction(
+                any,
+                inspectAccounts: anyNamed('inspectAccounts'),
+              ),
+            );
+          },
+        );
       });
 
       // The one exception to R5's revert: a remote kill. Reverting would drop it
@@ -2679,8 +3322,8 @@ void main() {
           when(mockApiV2.acceptOfferTx(any)).thenAnswer((_) async {
             calls++;
             if (calls == 1) {
-              return ApiResponse<UnsignedTxResponse>(
-                result: UnsignedTxResponse(tx: testTransactionBase64),
+              return ApiResponse<UnsignedTxWithSetupResponse>(
+                result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
               );
             }
             throw const TransactionFlowDisabledException(
@@ -2805,8 +3448,8 @@ void main() {
         'update authority',
         setUp: () {
           when(mockApiV2.acceptOfferTx(any)).thenAnswer(
-            (_) async => ApiResponse<UnsignedTxResponse>(
-              result: UnsignedTxResponse(tx: testTransactionBase64),
+            (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+              result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
             ),
           );
           when(mockDasApi.getAsset(testMintAccount)).thenAnswer(
@@ -2854,8 +3497,8 @@ void main() {
         'the seller is the update authority',
         setUp: () {
           when(mockApiV2.acceptOfferTx(any)).thenAnswer(
-            (_) async => ApiResponse<UnsignedTxResponse>(
-              result: UnsignedTxResponse(tx: testTransactionBase64),
+            (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+              result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
             ),
           );
           when(mockDasApi.getAsset(testMintAccount)).thenAnswer(
@@ -2901,8 +3544,8 @@ void main() {
         'collection (second getAsset)',
         setUp: () {
           when(mockApiV2.acceptOfferTx(any)).thenAnswer(
-            (_) async => ApiResponse<UnsignedTxResponse>(
-              result: UnsignedTxResponse(tx: testTransactionBase64),
+            (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+              result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
             ),
           );
           when(mockDasApi.getAsset(testMintAccount)).thenAnswer(
@@ -2959,8 +3602,8 @@ void main() {
         'throws',
         setUp: () {
           when(mockApiV2.acceptOfferTx(any)).thenAnswer(
-            (_) async => ApiResponse<UnsignedTxResponse>(
-              result: UnsignedTxResponse(tx: testTransactionBase64),
+            (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+              result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
             ),
           );
           when(mockDasApi.getAsset(testMintAccount)).thenAnswer(
@@ -3027,8 +3670,8 @@ void main() {
         setUp: () {
           gate = Completer<DigitalAsset>();
           when(mockApiV2.settleAuctionTx(any)).thenAnswer(
-            (_) async => ApiResponse<UnsignedTxResponse>(
-              result: UnsignedTxResponse(tx: testTransactionBase64),
+            (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+              result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
             ),
           );
           when(
@@ -3074,6 +3717,192 @@ void main() {
             'gross winning bid',
             1000000000,
           ),
+        ],
+      );
+
+      // Settling a compressed NFT's auction can be compiled against an address
+      // lookup table the chain does not have yet; `setupTx` creates it. The
+      // executor signs/sends/CONFIRMS each tx before starting the next, so the
+      // setup leading the batch is the confirmation barrier. Broadcast in the
+      // other order, the settle names a table that does not exist and fails
+      // on-chain — leaving the winner unpaid and the asset unmoved.
+      blocTest<MarketBloc, MarketState>(
+        'a settle WITH setupTx puts it FIRST in the batch so the lookup table '
+        'exists before the settle is broadcast',
+        setUp: () {
+          when(mockApiV2.settleAuctionTx(any)).thenAnswer(
+            (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+              result: UnsignedTxWithSetupResponse(
+                tx: testTransactionBase64,
+                setupTx: setupTransactionBase64,
+              ),
+            ),
+          );
+          when(
+            mockDasApi.getAsset(testMintAccount),
+          ).thenAnswer((_) async => settledAsset);
+        },
+        build: () => MarketBloc(
+          mockApi,
+          mockApiV2,
+          mockWalletManager,
+          mockRpcService,
+          mockAuthService,
+          mockDasApi,
+          makeFlow(),
+          mockPriceService,
+          const FeeConfig(),
+          mockMarketplaceConfig,
+          mockMarketAccounts,
+          mockCurationAttribution,
+        ),
+        act: (bloc) => bloc.add(
+          const MarketEvent.settleAuction(
+            mintAccount: testMintAccount,
+            winningBid: winningBid,
+          ),
+        ),
+        expect: () => [
+          isA<TxFlowPreparing<MarketPrepData, MarketSuccessData>>(),
+          isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+              .having((s) => s.data.transactionsBase64, 'transactionsBase64', [
+                setupTransactionBase64,
+                testTransactionBase64,
+              ])
+              // Keeps the sheet's simulate off the leading table-creation tx,
+              // whose lamport delta is rent rather than the seller's payout.
+              .having((s) => s.data.hasSetupTx, 'hasSetupTx', isTrue),
+        ],
+      );
+    });
+
+    // Delisting after the leaf's proof has drifted since it was listed, and
+    // cancelling a compressed NFT's auction, can each need an address lookup
+    // table the chain does not have yet. Same barrier as every other route:
+    // the executor confirms each tx before starting the next, so the setup has
+    // to lead — the cancel is compiled against the table it creates and fails
+    // on-chain if broadcast first.
+    group('Cancel listing event', () {
+      blocTest<MarketBloc, MarketState>(
+        'a delist WITH setupTx puts it FIRST in the batch so the lookup table '
+        'exists before the delist is broadcast',
+        setUp: () {
+          when(mockApiV2.cancelFixedPriceTx(any)).thenAnswer(
+            (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+              result: UnsignedTxWithSetupResponse(
+                tx: testTransactionBase64,
+                setupTx: setupTransactionBase64,
+              ),
+            ),
+          );
+        },
+        build: () => MarketBloc(
+          mockApi,
+          mockApiV2,
+          mockWalletManager,
+          mockRpcService,
+          mockAuthService,
+          mockDasApi,
+          makeFlow(),
+          mockPriceService,
+          const FeeConfig(),
+          mockMarketplaceConfig,
+          mockMarketAccounts,
+          mockCurationAttribution,
+        ),
+        act: (bloc) => bloc.add(
+          const MarketEvent.cancelListing(mintAccount: testMintAccount),
+        ),
+        expect: () => [
+          const TxFlowPreparing<MarketPrepData, MarketSuccessData>(),
+          isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+              .having((s) => s.data.actionType, 'actionType', 'cancel-listing')
+              .having((s) => s.data.transactionsBase64, 'transactionsBase64', [
+                setupTransactionBase64,
+                testTransactionBase64,
+              ])
+              .having((s) => s.data.hasSetupTx, 'hasSetupTx', isTrue),
+        ],
+      );
+
+      blocTest<MarketBloc, MarketState>(
+        'a delist with no setupTx keeps the batch a single tx — no extra '
+        'prompt, no rent, for the listings that need no table',
+        setUp: () {
+          when(mockApiV2.cancelFixedPriceTx(any)).thenAnswer(
+            (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+              result: UnsignedTxWithSetupResponse(tx: testTransactionBase64),
+            ),
+          );
+        },
+        build: () => MarketBloc(
+          mockApi,
+          mockApiV2,
+          mockWalletManager,
+          mockRpcService,
+          mockAuthService,
+          mockDasApi,
+          makeFlow(),
+          mockPriceService,
+          const FeeConfig(),
+          mockMarketplaceConfig,
+          mockMarketAccounts,
+          mockCurationAttribution,
+        ),
+        act: (bloc) => bloc.add(
+          const MarketEvent.cancelListing(mintAccount: testMintAccount),
+        ),
+        expect: () => [
+          const TxFlowPreparing<MarketPrepData, MarketSuccessData>(),
+          isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+              .having((s) => s.data.transactionsBase64, 'transactionsBase64', [
+                testTransactionBase64,
+              ])
+              .having((s) => s.data.hasSetupTx, 'hasSetupTx', isFalse),
+        ],
+      );
+    });
+
+    group('Cancel auction event', () {
+      blocTest<MarketBloc, MarketState>(
+        'a cancel WITH setupTx puts it FIRST in the batch so the lookup table '
+        'exists before the cancel is broadcast',
+        setUp: () {
+          when(mockApiV2.cancelAuctionTx(any)).thenAnswer(
+            (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+              result: UnsignedTxWithSetupResponse(
+                tx: testTransactionBase64,
+                setupTx: setupTransactionBase64,
+              ),
+            ),
+          );
+        },
+        build: () => MarketBloc(
+          mockApi,
+          mockApiV2,
+          mockWalletManager,
+          mockRpcService,
+          mockAuthService,
+          mockDasApi,
+          makeFlow(),
+          mockPriceService,
+          const FeeConfig(),
+          mockMarketplaceConfig,
+          mockMarketAccounts,
+          mockCurationAttribution,
+        ),
+        act: (bloc) => bloc.add(
+          const MarketEvent.cancelAuction(mintAccount: testMintAccount),
+        ),
+        expect: () => [
+          const TxFlowPreparing<MarketPrepData, MarketSuccessData>(),
+          isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+              .having((s) => s.data.actionType, 'actionType', 'cancel-auction')
+              .having((s) => s.data.transactionsBase64, 'transactionsBase64', [
+                setupTransactionBase64,
+                testTransactionBase64,
+              ])
+              .having((s) => s.data.hasSetupTx, 'hasSetupTx', isTrue),
         ],
       );
     });
@@ -3845,8 +4674,8 @@ void main() {
         'and drops the late ack so exactly one flip is observed',
         setUp: () {
           when(mockApiV2.buyFixedPriceTx(any)).thenAnswer(
-            (_) async => ApiResponse<UnsignedTxResponse>(
-              result: UnsignedTxResponse(tx: testTransactionBase64),
+            (_) async => ApiResponse<BuyFixedPriceTxResponse>(
+              result: BuyFixedPriceTxResponse(tx: testTransactionBase64),
             ),
           );
         },
@@ -3917,8 +4746,8 @@ void main() {
         'does not re-flip an already-acked success when a second flow starts',
         setUp: () {
           when(mockApiV2.buyFixedPriceTx(any)).thenAnswer(
-            (_) async => ApiResponse<UnsignedTxResponse>(
-              result: UnsignedTxResponse(tx: testTransactionBase64),
+            (_) async => ApiResponse<BuyFixedPriceTxResponse>(
+              result: BuyFixedPriceTxResponse(tx: testTransactionBase64),
             ),
           );
         },

@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:drift/drift.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:injectable/injectable.dart';
 import 'package:uuid/uuid.dart';
 
@@ -14,6 +15,7 @@ import '../crypto/mnemonic_generator.dart';
 import '../crypto/private_key_parser.dart';
 import '../database/database.dart';
 import '../models/account.dart';
+import '../observability/app_logger.dart';
 import '../security/secure_storage.dart';
 import 'preferences_service.dart';
 
@@ -24,6 +26,141 @@ class DuplicateWalletException implements Exception {
 
   @override
   String toString() => 'A wallet with this address already exists';
+}
+
+/// Thrown when a removal cannot prune the recovery graph. The graph write is
+/// the commit point of a removal: nothing is deleted until it succeeds, so a
+/// caller that sees this can tell the user nothing changed.
+class GraphSyncException implements Exception {
+  GraphSyncException(this.cause);
+  final Object cause;
+
+  @override
+  String toString() => 'Could not update recovery data: $cause';
+}
+
+/// What [WalletRepository.restoreDormantFromGraph] did on this launch.
+class DormantRestoreResult {
+  const DormantRestoreResult({
+    this.seedPhrasesRestored = 0,
+    this.walletsRestored = 0,
+    this.duplicatesDropped = 0,
+    this.skipped = 0,
+    this.liveSeedUnreadable = false,
+  });
+
+  final int seedPhrasesRestored;
+  final int walletsRestored;
+
+  /// Dormant entries whose secret equals a live one — pruned and deleted.
+  final int duplicatesDropped;
+
+  /// Dormant entries whose secret could not be read this launch; left in the
+  /// graph for the next one.
+  final int skipped;
+
+  /// A *live* seed's mnemonic did not read, so no dormant seed could be
+  /// compared and every one of them was skipped. Correct for one launch, and
+  /// invisible forever if that seed never reads again: the dormant seeds are
+  /// then skipped at every cold start with nothing to say why. Reported so the
+  /// permanent case can be told from the transient one.
+  ///
+  /// Not part of [isEmpty]: the flag is only ever set on the way to skipping
+  /// the dormant seed that asked for the comparison, so [skipped] is already
+  /// non-zero whenever it is true.
+  final bool liveSeedUnreadable;
+
+  bool get isEmpty =>
+      seedPhrasesRestored == 0 &&
+      walletsRestored == 0 &&
+      duplicatesDropped == 0 &&
+      skipped == 0;
+}
+
+/// Outcome of [WalletRepository.restoreFromGraph].
+sealed class RestoreResult {
+  const RestoreResult();
+}
+
+/// The graph was written — every row of it, or (after an opt-in
+/// `readableOnly` restore) every row whose secret could be read.
+class RestoreRestored extends RestoreResult {
+  const RestoreRestored({
+    required this.seedPhrases,
+    required this.wallets,
+    this.skippedSeedPhrases = 0,
+    this.skippedImportedKeys = 0,
+  });
+
+  final int seedPhrases;
+  final int wallets;
+
+  /// Entries a `readableOnly` restore left alone because their secret did not
+  /// read. They stay in the graph, so the boot-time dormant restore retries
+  /// them and a later restore can still pick them up.
+  final int skippedSeedPhrases;
+  final int skippedImportedKeys;
+}
+
+/// Nothing was written: at least one seed phrase or imported key listed in
+/// the graph could not be read from the vault. Counts are for the message;
+/// ids are deliberately not carried (they name secrets).
+class RestoreAborted extends RestoreResult {
+  const RestoreAborted({
+    required this.missingSeedPhrases,
+    required this.totalSeedPhrases,
+    required this.missingImportedKeys,
+    required this.totalImportedKeys,
+    this.readableWallets = 0,
+  });
+
+  final int missingSeedPhrases;
+  final int totalSeedPhrases;
+  final int missingImportedKeys;
+  final int totalImportedKeys;
+
+  /// Wallets in the graph a partial restore could still write **and that
+  /// could then sign**: an HD wallet of a readable seed, an imported key whose
+  /// own secret reads, or a social row (a re-login recovers its key).
+  ///
+  /// View-only and hardware rows (Ledger, Seed Vault) are deliberately
+  /// excluded. They restore fine — and a partial restore does write them — but
+  /// they carry no key, so a graph of {one unreadable seed + one watch-only
+  /// address} must not count as "something can be read": that partial
+  /// restore would put a wallet in the database, report success, and take
+  /// the Restore screen away from a user whose seed is still unrecovered.
+  final int readableWallets;
+
+  bool get hasMissing => missingSeedPhrases > 0 || missingImportedKeys > 0;
+
+  /// Whether a `readableOnly: true` restore would write anything the user can
+  /// sign with. When false the only ways forward are a retry and Start fresh.
+  bool get hasReadable =>
+      totalSeedPhrases - missingSeedPhrases > 0 ||
+      totalImportedKeys - missingImportedKeys > 0 ||
+      readableWallets > 0;
+}
+
+/// The graph could not be parsed, or the transactional write failed (and was
+/// rolled back).
+class RestoreFailed extends RestoreResult {
+  const RestoreFailed(this.error);
+
+  final Object error;
+}
+
+/// The restore pre-check's answer: the [RestoreAborted] a full restore would
+/// return, plus the ids behind its counts so a partial restore can skip them.
+class _MissingSecrets {
+  const _MissingSecrets({
+    required this.aborted,
+    required this.seedPhraseIds,
+    required this.importedKeyIds,
+  });
+
+  final RestoreAborted aborted;
+  final Set<String> seedPhraseIds;
+  final Set<String> importedKeyIds;
 }
 
 /// Info about a derived address for the HD picker screen.
@@ -113,9 +250,41 @@ class WalletRepository {
   final SecureWalletStorage _storage;
   final PreferencesService _prefs;
 
-  // Serializes seed-phrase creation so dedupe-by-mnemonic is race-safe
-  // against concurrent callers (e.g. a double-tapped onboarding button).
-  Future<void> _seedPhraseCreateLock = Future.value();
+  // Serializes every mutation of the wallet set. Not a nicety: the recovery
+  // graph is rebuilt from the *whole* database on each mutation, so two of
+  // them in flight un-prune each other. A removal prunes an entry, then
+  // deletes its rows and secrets; a plain sync (a rename, a reorder, a wallet
+  // switch) landing in that gap rebuilds the graph from a database that still
+  // holds the row and writes the pruned entry straight back — indexing a
+  // secret the removal is about to delete. That entry is a zombie: the boot
+  // restore aborts on it forever, and the only way out erases the readable
+  // seeds too. It also makes dedupe-by-mnemonic race-safe against a
+  // double-tapped onboarding button, which is what it originally guarded.
+  //
+  // Taken by the public entry points only. Nothing below them may take it
+  // again — a nested take waits for its own caller and deadlocks.
+  Future<void> _mutationLock = Future.value();
+
+  Future<T> _locked<T>(Future<T> Function() body) {
+    final op = _mutationLock.then((_) => body());
+    _mutationLock = op.then((_) {
+      walletsRevision.value++;
+    }, onError: (_) {});
+    return op;
+  }
+
+  /// Bumped after every successful mutation taken through [_locked].
+  ///
+  /// Deliberately hung off the lock rather than off individual call sites: the
+  /// push-token sync has to mirror the wallets on this device, and wiring it to
+  /// each add/remove/import/reset entry point means the next one added silently
+  /// stops syncing. Every mutation already goes through here, so nothing can
+  /// opt out.
+  ///
+  /// A revision counter, not the wallet list: it fires for renames and reorders
+  /// too, and listeners are expected to re-read and no-op when nothing they care
+  /// about changed.
+  final ValueNotifier<int> walletsRevision = ValueNotifier(0);
 
   // ---------------------------------------------------------------------------
   // Read
@@ -295,16 +464,12 @@ class WalletRepository {
   Future<SeedPhraseInfo> _createSeedPhraseFromMnemonic(
     String normalizedMnemonic, {
     bool autoDerive = true,
-  }) {
-    final operation = _seedPhraseCreateLock.then(
-      (_) => _createSeedPhraseFromMnemonicLocked(
-        normalizedMnemonic,
-        autoDerive: autoDerive,
-      ),
-    );
-    _seedPhraseCreateLock = operation.then((_) {}, onError: (_) {});
-    return operation;
-  }
+  }) => _locked(
+    () => _createSeedPhraseFromMnemonicLocked(
+      normalizedMnemonic,
+      autoDerive: autoDerive,
+    ),
+  );
 
   Future<SeedPhraseInfo> _createSeedPhraseFromMnemonicLocked(
     String normalizedMnemonic, {
@@ -348,7 +513,9 @@ class WalletRepository {
             const [0],
           );
       final first = addresses.first;
-      await importAccountsFromPhrase(seedPhraseId, [
+      // The private body, not the public entry point: this already holds the
+      // mutation lock, and taking it again would wait for itself.
+      await _importAccountsFromPhraseLocked(seedPhraseId, [
         WalletImportSelection(
           index: 0,
           chain: Chain.solana,
@@ -400,6 +567,11 @@ class WalletRepository {
   /// there, or a view-only wallet was cleared. Returns false when a signing
   /// wallet already holds the address, i.e. a genuine duplicate the caller must
   /// reject (or skip).
+  ///
+  /// Throws [GraphSyncException] when the view-only wallet's prune from the
+  /// recovery graph fails: that write is the commit point of its removal, so
+  /// nothing was deleted and the import cannot proceed — every signing-import
+  /// caller surfaces that as a recovery-data error and adds nothing.
   Future<bool> _clearWatchOnlyForSigningImport(String address) async {
     final existing = await _lookupWalletByAddress(address);
     if (existing == null) return true;
@@ -407,21 +579,22 @@ class WalletRepository {
       return false;
     }
 
-    // A view-only wallet is always alone in its account (see addViewOnlyWallet).
-    // Remove the wallet — cleaning up its cached balances and re-selecting a
-    // replacement if it was active — then drop the emptied account row so no
-    // dangling watch-only account remains.
-    final accountId = existing.accountId;
-    await removeWallet(existing.id);
-    if (accountId != null) {
-      final remaining = await _db.getWalletsForAccount(accountId);
-      if (remaining.isEmpty) await _db.deleteAccountById(accountId);
-    }
+    // A view-only wallet is always alone in its account (see
+    // addViewOnlyWallet), so removing it empties the account and the removal
+    // takes the account row with it — inside the same graph prune, rather than
+    // leaving a dangling watch-only account for the next sync to write out.
+    //
+    // The private removal, not [removeWallet]: every caller of this already
+    // holds the mutation lock, and taking it again would wait for itself.
+    await _removeWallets([existing.id]);
     return true;
   }
 
   /// Add an imported private key wallet.
-  Future<WalletInfo> addImportedKeyWallet(
+  Future<WalletInfo> addImportedKeyWallet(String privateKey, String name) =>
+      _locked(() => _addImportedKeyWalletLocked(privateKey, name));
+
+  Future<WalletInfo> _addImportedKeyWalletLocked(
     String privateKey,
     String name,
   ) async {
@@ -473,7 +646,13 @@ class WalletRepository {
   }
 
   /// Add a view-only wallet.
-  Future<WalletInfo> addViewOnlyWallet(String address, String name) async {
+  Future<WalletInfo> addViewOnlyWallet(String address, String name) =>
+      _locked(() => _addViewOnlyWalletLocked(address, name));
+
+  Future<WalletInfo> _addViewOnlyWalletLocked(
+    String address,
+    String name,
+  ) async {
     final existing = await _lookupWalletByAddress(address);
     if (existing != null) throw DuplicateWalletException(address);
 
@@ -527,6 +706,24 @@ class WalletRepository {
     SolanaDerivationScheme derivationScheme = SolanaDerivationScheme.standard,
     Chain chain = Chain.solana,
     String? ledgerDeviceId,
+  }) => _locked(
+    () => _addLedgerWalletLocked(
+      address,
+      name,
+      derivationIndex: derivationIndex,
+      derivationScheme: derivationScheme,
+      chain: chain,
+      ledgerDeviceId: ledgerDeviceId,
+    ),
+  );
+
+  Future<WalletInfo> _addLedgerWalletLocked(
+    String address,
+    String name, {
+    required int derivationIndex,
+    required SolanaDerivationScheme derivationScheme,
+    required Chain chain,
+    required String? ledgerDeviceId,
   }) async {
     // A signing import supersedes a watch-only wallet of the same address; a
     // real signer already there is a genuine duplicate.
@@ -575,6 +772,79 @@ class WalletRepository {
     return wallet;
   }
 
+  /// Add a Seed Vault wallet.
+  ///
+  /// [addLedgerWallet] minus the device-id write: Seed Vault holds the key
+  /// itself and is addressed by the running device, so there is nothing of ours
+  /// to store — no secret, and no new row shape. The chain is always Solana
+  /// because Seed Vault defines exactly one signing purpose.
+  ///
+  /// [derivationIndex] and [derivationScheme] are persisted for display, the
+  /// `Account NN` grouping and the import picker; the path actually signed with
+  /// is the one the vault itself reports, never one rebuilt from these.
+  Future<WalletInfo> addSeedVaultWallet(
+    String address,
+    String name, {
+    int derivationIndex = 0,
+    SolanaDerivationScheme derivationScheme = SolanaDerivationScheme.standard,
+  }) => _locked(
+    () => _addSeedVaultWalletLocked(
+      address,
+      name,
+      derivationIndex: derivationIndex,
+      derivationScheme: derivationScheme,
+    ),
+  );
+
+  Future<WalletInfo> _addSeedVaultWalletLocked(
+    String address,
+    String name, {
+    required int derivationIndex,
+    required SolanaDerivationScheme derivationScheme,
+  }) async {
+    // A signing import supersedes a watch-only wallet of the same address; a
+    // real signer already there is a genuine duplicate.
+    if (!await _clearWatchOnlyForSigningImport(address)) {
+      throw DuplicateWalletException(address);
+    }
+
+    final walletId = _generateId();
+    final sortIndex = await _db.maxWalletSortIndex() + 1;
+    final accountId = await _ensureSeedVaultAccount(derivationIndex);
+
+    await _db.upsertWalletEntry(
+      WalletsCompanion.insert(
+        id: walletId,
+        accountId: Value(accountId),
+        address: address,
+        name: name,
+        walletType: WalletType.seedVault.toDbString(),
+        derivationIndex: Value(derivationIndex),
+        derivationScheme: Value(derivationScheme.name),
+        chain: Value(Chain.solana.toDbString()),
+        createdAt: _nowSeconds(),
+        sortIndex: Value(sortIndex),
+      ),
+    );
+
+    final wallet = WalletInfo(
+      id: walletId,
+      address: address,
+      name: name,
+      walletType: WalletType.seedVault,
+      chain: Chain.solana.toDbString(),
+      derivationIndex: derivationIndex,
+      derivationScheme: derivationScheme,
+      accountId: accountId,
+    );
+
+    if (await _storage.loadSelectedWalletId() == null) {
+      await _storage.storeSelectedWalletId(walletId);
+    }
+    await _syncWalletGraph();
+    return wallet;
+  }
+
   /// Add — or complete — the multi-chain account behind a social login.
   ///
   /// One social identity becomes one [AccountKind.social] account holding one
@@ -595,6 +865,22 @@ class WalletRepository {
   /// [DuplicateWalletException] — checked for all three addresses before
   /// anything is written, so a collision cannot leave a half-built account.
   Future<({List<WalletInfo> wallets, bool existed})> addSocialAccount({
+    required String provider,
+    required String name,
+    required SocialChainCredential solana,
+    required SocialChainCredential ethereum,
+    required SocialChainCredential tezos,
+  }) => _locked(
+    () => _addSocialAccountLocked(
+      provider: provider,
+      name: name,
+      solana: solana,
+      ethereum: ethereum,
+      tezos: tezos,
+    ),
+  );
+
+  Future<({List<WalletInfo> wallets, bool existed})> _addSocialAccountLocked({
     required String provider,
     required String name,
     required SocialChainCredential solana,
@@ -723,7 +1009,7 @@ class WalletRepository {
   // ---------------------------------------------------------------------------
 
   /// Set the active wallet and persist.
-  Future<WalletInfo> setActiveWallet(String walletId) async {
+  Future<WalletInfo> setActiveWallet(String walletId) => _locked(() async {
     final row = await _db.getWalletById(walletId);
     if (row == null) throw StateError('Wallet not found: $walletId');
 
@@ -731,7 +1017,7 @@ class WalletRepository {
 
     await _syncWalletGraph();
     return _walletRowToInfo(row);
-  }
+  });
 
   // ---------------------------------------------------------------------------
   // HD Address Picker
@@ -820,11 +1106,24 @@ class WalletRepository {
   /// selected wallet under it. Already-imported addresses are skipped. The
   /// first imported Solana wallet is auto-selected when nothing is selected yet
   /// so the post-import session logs in as that account.
+  ///
+  /// Throws [StateError] when [seedPhraseId] has no row: the picker resolved
+  /// it before the user chose, and a removal in between deletes the row *and*
+  /// the mnemonic. HD rows written under it would show wallets that cannot
+  /// sign, and a restore would faithfully bring them back that way.
   Future<List<WalletInfo>> importAccountsFromPhrase(
+    String seedPhraseId,
+    List<WalletImportSelection> selections,
+  ) => _locked(() => _importAccountsFromPhraseLocked(seedPhraseId, selections));
+
+  Future<List<WalletInfo>> _importAccountsFromPhraseLocked(
     String seedPhraseId,
     List<WalletImportSelection> selections,
   ) async {
     if (selections.isEmpty) return const [];
+    if (await _db.getSeedPhraseById(seedPhraseId) == null) {
+      throw StateError('seed phrase $seedPhraseId not found');
+    }
 
     // Group by index, preserving ascending index order.
     final byIndex = <int, List<WalletImportSelection>>{};
@@ -934,100 +1233,272 @@ class WalletRepository {
   ///
   /// [orderedWalletIds] is the wallet IDs in the desired display order.
   /// Assigns sortIndex 0, 1, 2... to each wallet and persists to the graph.
-  Future<void> reorderWalletsInGroup(List<String> orderedWalletIds) async {
-    for (var i = 0; i < orderedWalletIds.length; i++) {
-      await _db.updateWalletSortIndex(orderedWalletIds[i], i);
-    }
-    await _syncWalletGraph();
-  }
+  Future<void> reorderWalletsInGroup(List<String> orderedWalletIds) =>
+      _locked(() async {
+        for (var i = 0; i < orderedWalletIds.length; i++) {
+          await _db.updateWalletSortIndex(orderedWalletIds[i], i);
+        }
+        await _syncWalletGraph();
+      });
 
   // ---------------------------------------------------------------------------
   // Rename
   // ---------------------------------------------------------------------------
 
   /// Rename a wallet and sync the wallet graph.
-  Future<void> renameWallet(String walletId, String newName) async {
-    await _db.updateWalletName(walletId, newName);
-    await _syncWalletGraph();
-  }
+  Future<void> renameWallet(String walletId, String newName) =>
+      _locked(() async {
+        await _db.updateWalletName(walletId, newName);
+        await _syncWalletGraph();
+      });
 
   /// Rename an account and sync the wallet graph.
-  Future<void> renameAccount(String accountId, String newName) async {
-    await _db.updateAccountName(accountId, newName);
-    await _syncWalletGraph();
-  }
+  Future<void> renameAccount(String accountId, String newName) =>
+      _locked(() async {
+        await _db.updateAccountName(accountId, newName);
+        await _syncWalletGraph();
+      });
 
   /// Update an account's generated-avatar seed and sync the wallet graph.
-  Future<void> updateAccountAvatarSeed(String accountId, String seed) async {
-    await _db.updateAccountAvatarSeed(accountId, seed);
-    await _syncWalletGraph();
-  }
+  Future<void> updateAccountAvatarSeed(String accountId, String seed) =>
+      _locked(() async {
+        await _db.updateAccountAvatarSeed(accountId, seed);
+        await _syncWalletGraph();
+      });
 
   /// Reorder accounts; persists the new sortIndex for each in list order.
-  Future<void> reorderAccounts(List<String> orderedAccountIds) async {
-    for (var i = 0; i < orderedAccountIds.length; i++) {
-      await _db.updateAccountSortIndex(orderedAccountIds[i], i);
-    }
-    await _syncWalletGraph();
-  }
+  Future<void> reorderAccounts(List<String> orderedAccountIds) =>
+      _locked(() async {
+        for (var i = 0; i < orderedAccountIds.length; i++) {
+          await _db.updateAccountSortIndex(orderedAccountIds[i], i);
+        }
+        await _syncWalletGraph();
+      });
 
-  /// Remove an entire account: deletes each of its wallets (cleaning up
-  /// secrets/cached data via [removeWallet]) then the account row. Returns the
+  /// Remove an entire account: its wallets and then its row. Returns the
   /// replacement active wallet id, or null if no wallets remain.
-  Future<String?> removeAccount(String accountId) async {
+  ///
+  /// Graph-first and all-or-nothing, like [removeWallet]: one prune names the
+  /// account and every wallet it holds, and it is the commit point — a
+  /// [GraphSyncException] from it leaves the whole account in place.
+  Future<String?> removeAccount(String accountId) => _locked(() async {
     final wallets = await _db.getWalletsForAccount(accountId);
-    String? replacement;
-    for (final w in wallets) {
-      replacement = await removeWallet(w.id);
-    }
-    await _db.deleteAccountById(accountId);
-    await _syncWalletGraph();
-    return replacement;
-  }
+    return _removeWallets(
+      wallets.map((w) => w.id),
+      removedAccountIds: {accountId},
+    );
+  });
 
   // ---------------------------------------------------------------------------
-  // Remove Single Wallet
+  // Remove Wallets
   // ---------------------------------------------------------------------------
 
   /// Remove a single wallet, cleaning up secrets and cached data.
   ///
   /// Returns the ID of the replacement active wallet, or null if no wallets
   /// remain (caller should redirect to welcome/onboarding).
-  Future<String?> removeWallet(String walletId) async {
-    final walletRow = await _db.getWalletById(walletId);
-    if (walletRow == null) return null;
+  Future<String?> removeWallet(String walletId) =>
+      _locked(() => _removeWallets([walletId]));
 
-    final address = walletRow.address;
-    final seedPhraseId = walletRow.seedPhraseId;
-    final walletType = WalletType.fromDbString(walletRow.walletType);
+  /// Remove several wallets as one all-or-nothing operation, cleaning up
+  /// secrets and cached data. Prefer this over a loop of [removeWallet]: one
+  /// graph prune covers the whole set, so a failure removes none of them.
+  ///
+  /// Returns the ID of the replacement active wallet, or null if no wallets
+  /// remain (caller should redirect to welcome/onboarding).
+  Future<String?> removeWallets(Iterable<String> walletIds) =>
+      _locked(() => _removeWallets(walletIds));
 
-    // Delete the private key for wallets that own one — imported-key wallets
-    // and social wallets, whose per-chain key is captured at login and stored
-    // in the same imported-key format (see [addSocialAccount]).
-    if (walletType == WalletType.importedKey ||
-        walletType == WalletType.social) {
-      await _storage.deletePrivateKey(walletId);
+  /// The one removal path — [removeWallet], [removeWallets] and
+  /// [removeAccount] all run through it, so they cannot drift apart.
+  ///
+  /// A seed phrase goes when *every* wallet holding it is in this removal set.
+  /// That is computed across the whole set, not per wallet: removing the last
+  /// two siblings one at a time would decide "not the last one" for the first
+  /// of them.
+  ///
+  /// One graph prune covers the whole set and is the commit point; only after
+  /// it succeeds is anything deleted. Removing wallets one call at a time
+  /// instead commits a prune per wallet, so a failure partway leaves earlier
+  /// wallets already gone while the caller reports that nothing was removed.
+  ///
+  /// [removedAccountIds] rows are deleted here too, after their wallets — and
+  /// so is every account this removal empties. Nothing cascades in the
+  /// database (an account's seed phrase is a plain nullable column), so an
+  /// account left behind keeps its place in the graph, comes back on a restore
+  /// and shows as a card with no wallets under a seed phrase that is gone.
+  ///
+  /// The one prune is the only graph write: it is computed from the database
+  /// *as it will be*, so a plain sync afterwards would rebuild byte-identical
+  /// content. That includes the selection — the replacement is decided before
+  /// the prune and stored right after it, so from the moment this method
+  /// returns, success or [GraphSyncException], both the stored graph's
+  /// `selectedWalletId` and the selection in secure storage name a live wallet
+  /// or are null. A crash in between leaves the older of the two, which still
+  /// names a wallet whose row has not been deleted yet.
+  ///
+  /// Returns null without touching anything when no id resolves to a wallet
+  /// row and there is no account to remove.
+  Future<String?> _removeWallets(
+    Iterable<String> walletIds, {
+    Set<String> removedAccountIds = const {},
+  }) async {
+    final rows = <Wallet>[];
+    for (final id in walletIds.toSet()) {
+      final row = await _db.getWalletById(id);
+      if (row != null) rows.add(row);
     }
+    if (rows.isEmpty && removedAccountIds.isEmpty) return null;
 
-    // Delete Ledger device ID for hardware wallets
-    if (walletType == WalletType.ledger) {
-      await _storage.deleteLedgerDeviceId(walletId);
-    }
+    final removedWalletIds = rows.map((r) => r.id).toSet();
 
-    // Delete wallet-sig cookie
-    await _storage.deleteWalletSigCookie(address);
-
-    // Delete wallet row from DB
-    await _db.deleteWalletById(walletId);
-
-    // If this was the last wallet for a seed phrase, delete the seed phrase
-    if (seedPhraseId != null) {
-      final remaining = await _db.getWalletsForSeedPhrase(seedPhraseId);
-      if (remaining.isEmpty) {
-        await _db.deleteSeedPhraseById(seedPhraseId);
-        await _storage.deleteMnemonicForSeedPhrase(seedPhraseId);
+    // Last wallets of their seed phrases? Then those seed phrases (and their
+    // mnemonics) go too — decided up front so the graph prune below can name
+    // them.
+    final removedSeedPhraseIds = <String>{};
+    final seedPhraseIds = {
+      for (final r in rows)
+        if (r.seedPhraseId != null) r.seedPhraseId!,
+    };
+    for (final seedPhraseId in seedPhraseIds) {
+      final siblings = await _db.getWalletsForSeedPhrase(seedPhraseId);
+      if (siblings.every((w) => removedWalletIds.contains(w.id))) {
+        removedSeedPhraseIds.add(seedPhraseId);
       }
     }
+
+    // Accounts this removal empties go with their wallets — including the
+    // accounts of a seed phrase that is going, which can hold no wallet at all
+    // (an import whose every selection was already taken leaves the account
+    // row it created behind).
+    final candidateAccountIds = {
+      for (final r in rows)
+        if (r.accountId != null) r.accountId!,
+    };
+    if (removedSeedPhraseIds.isNotEmpty) {
+      for (final a in await _db.getAllAccounts()) {
+        if (removedSeedPhraseIds.contains(a.seedPhraseId)) {
+          candidateAccountIds.add(a.id);
+        }
+      }
+    }
+    final prunedAccountIds = {...removedAccountIds};
+    for (final accountId in candidateAccountIds) {
+      if (prunedAccountIds.contains(accountId)) continue;
+      final held = await _db.getWalletsForAccount(accountId);
+      if (held.every((w) => removedWalletIds.contains(w.id))) {
+        prunedAccountIds.add(accountId);
+      }
+    }
+
+    // The replacement for an active wallet that is going, decided before the
+    // commit point so the pruned graph can carry it. Prefer a row that binds
+    // the global signer — Solana, see [WalletInfo.bindsGlobalSigner]. Solana
+    // signing resolves its keypair from the *selection*, not an explicit
+    // wallet id, so parking the selection on a Tezos or Ethereum row leaves
+    // `getPublicKey()` / `signMessage()` with no Solana key to load. Falls
+    // back to the first row when no Solana row remains.
+    final currentSelection = await _storage.loadSelectedWalletId();
+    final selectionRemoved =
+        currentSelection != null && removedWalletIds.contains(currentSelection);
+    String? replacement;
+    if (selectionRemoved) {
+      final survivors = (await _db.getAllWallets())
+          .where((w) => !removedWalletIds.contains(w.id))
+          .toList();
+      if (survivors.isNotEmpty) {
+        replacement = survivors
+            .firstWhere(
+              (w) => _walletRowToInfo(w).bindsGlobalSigner,
+              orElse: () => survivors.first,
+            )
+            .id;
+      }
+    }
+
+    // Commit point: prune the recovery graph BEFORE deleting anything. The
+    // graph carries over every entry the DB lacks, so an entry must be named
+    // as removed here or it would come back on the next sync. If this write
+    // fails it throws GraphSyncException and nothing below runs — the wallets,
+    // their secrets, their rows and the selection are all still there.
+    await _syncWalletGraph(
+      removedWalletIds: removedWalletIds,
+      removedSeedPhraseIds: removedSeedPhraseIds,
+      removedAccountIds: prunedAccountIds,
+      replacementSelectedWalletId: replacement,
+    );
+
+    // Storage follows the graph immediately, while every row still exists, so
+    // the two never disagree about what is selected.
+    if (selectionRemoved) {
+      if (replacement != null) {
+        await _storage.storeSelectedWalletId(replacement);
+      } else {
+        await _storage.deleteSelectedWalletId();
+      }
+    }
+
+    for (final row in rows) {
+      await _deleteWalletData(row);
+    }
+
+    // Seed phrases whose last holder just went: the row and the mnemonic go
+    // with them, once each. A vault delete that fails (iOS returns
+    // `delete_failed` for a Keychain status it cannot classify) leaves an
+    // orphan the wipe sweep collects — nothing indexes it any more, since the
+    // prune already dropped it. Failing the removal over that would report
+    // "nothing was removed" for a removal that is already done.
+    for (final seedPhraseId in removedSeedPhraseIds) {
+      await _db.deleteSeedPhraseById(seedPhraseId);
+      try {
+        await _storage.deleteMnemonicForSeedPhrase(seedPhraseId);
+      } catch (e) {
+        // Reported through AppLogger only: it prints the same console line in
+        // debug and drops it in release, where a bare `debugPrint` would still
+        // reach logcat/OSLog — and an exception's own message can quote the
+        // item it failed on.
+        AppLogger.warn(
+          'WalletRepository',
+          'Mnemonic for $seedPhraseId not erased: ${_errorLabel(e)}',
+        );
+      }
+    }
+
+    for (final accountId in prunedAccountIds) {
+      await _db.deleteAccountById(accountId);
+    }
+
+    // No closing sync: the prune above already wrote what the database now
+    // holds. Nothing cascades, so the deletes removed exactly the ids it was
+    // told to filter out, and re-reading the stored graph would carry the same
+    // dormant entries over again — a byte-identical write.
+    return selectionRemoved ? replacement : currentSelection;
+  }
+
+  /// Delete everything one wallet row owns, after [_removeWallets] has pruned
+  /// the recovery graph. The seed phrase is not this row's to delete: whether
+  /// it goes is decided across the whole removal set, by the caller.
+  ///
+  /// Rows first, secrets last — the same order the seed phrase branch uses,
+  /// and for the same reason. A step here can throw, and the state it leaves
+  /// behind has to be one the user can still work with: a row whose secret is
+  /// gone is a wallet that shows on screen and cannot sign, and the next plain
+  /// sync writes it back into the graph, where the restore pre-check counts it
+  /// as a missing imported key and aborts *every* restore from then on. A
+  /// secret whose row is gone is only an orphan the wipe sweep collects.
+  ///
+  /// So the secret deletes are logged and swallowed rather than thrown: they
+  /// run after the row is already gone (and after the graph prune that
+  /// committed the removal), and a vault delete can fail on its own — iOS
+  /// reports `delete_failed` for a Keychain status it cannot classify. Rethrown,
+  /// it would abandon the deletes after it and tell the caller nothing was
+  /// removed, for a removal that has already happened.
+  Future<void> _deleteWalletData(Wallet row) async {
+    final address = row.address;
+    final walletType = WalletType.fromDbString(row.walletType);
+
+    // Delete wallet row from DB
+    await _db.deleteWalletById(row.id);
 
     // Delete cached balances for this wallet
     await _db.deleteBalances(address);
@@ -1037,68 +1508,141 @@ class WalletRepository {
     // deletion path — a wallet merely dropped from the session keeps its rows.
     await _db.deletePendingEvmTransactionsForWallet(apiOwnerAddress(address));
 
-    // If deleted wallet was the active one, select a replacement
-    final currentSelection = await _storage.loadSelectedWalletId();
-    if (currentSelection == walletId) {
-      final allWallets = await _db.getAllWallets();
-      if (allWallets.isNotEmpty) {
-        // Prefer a row that binds the global signer — Solana, see
-        // [WalletInfo.bindsGlobalSigner]. Solana signing resolves its keypair
-        // from the *selection*, not an explicit wallet id, so parking the
-        // selection on a Tezos or Ethereum row leaves `getPublicKey()` /
-        // `signMessage()` with no Solana key to load. Falls back to the first
-        // row when no Solana row remains.
-        final replacement = allWallets
-            .firstWhere(
-              (w) => _walletRowToInfo(w).bindsGlobalSigner,
-              orElse: () => allWallets.first,
-            )
-            .id;
-        await _storage.storeSelectedWalletId(replacement);
-        await _syncWalletGraph();
-        return replacement;
-      } else {
-        // No wallets remain
-        await _storage.deleteSelectedWalletId();
-        await _syncWalletGraph();
-        return null;
-      }
+    // Delete the private key for wallets that own one — imported-key wallets
+    // and social wallets, whose per-chain key is captured at login and stored
+    // in the same imported-key format (see [addSocialAccount]).
+    if (walletType == WalletType.importedKey ||
+        walletType == WalletType.social) {
+      await _deleteSecret(
+        'private key for ${row.id}',
+        () => _storage.deletePrivateKey(row.id),
+      );
     }
 
-    await _syncWalletGraph();
-    return currentSelection;
+    // Delete Ledger device ID for hardware wallets
+    if (walletType == WalletType.ledger) {
+      await _deleteSecret(
+        'ledger device id for ${row.id}',
+        () => _storage.deleteLedgerDeviceId(row.id),
+      );
+    }
+
+    // Delete wallet-sig cookie
+    await _deleteSecret(
+      'wallet-sig cookie for ${row.id}',
+      () => _storage.deleteWalletSigCookie(address),
+    );
   }
+
+  /// Run one post-commit secret delete, logging and continuing on failure.
+  /// See [_deleteWalletData] for why a failure here is not the caller's.
+  ///
+  /// Reported through [AppLogger]: a swallowed erase leaves key material on
+  /// the device that nothing else ever mentions. Not `debugPrint` — that line
+  /// survives into release, where it reaches logcat/OSLog, and it would carry
+  /// the exception's own message, which can quote the item.
+  Future<void> _deleteSecret(
+    String what,
+    Future<void> Function() delete,
+  ) async {
+    try {
+      await delete();
+    } catch (e) {
+      AppLogger.warn('WalletRepository', '$what not erased: ${_errorLabel(e)}');
+    }
+  }
+
+  /// A log-safe label for a failed secret delete: what went wrong, never what
+  /// it went wrong on. The platform code (`delete_failed`, a Keychain status)
+  /// is the diagnostic part; the exception's message can quote the item.
+  static String _errorLabel(Object e) => e is PlatformException
+      ? 'PlatformException(${e.code})'
+      : e.runtimeType.toString();
 
   // ---------------------------------------------------------------------------
   // Delete
   // ---------------------------------------------------------------------------
 
-  /// Delete all seed phrases, wallets, their secrets, and every stored
-  /// preference.
+  /// Delete all seed phrases, wallets, their secrets, the database file, and
+  /// every stored preference — the storage half of a factory reset.
   ///
-  /// This backs Settings → "Reset app", which users read as a factory reset,
-  /// so device-local preferences go too — not just the account counter.
-  /// Leaving them behind meant the previous identity's recent send recipients
-  /// (and searches, recently-viewed, buy history) were still suggested after
-  /// re-onboarding with a different seed phrase.
+  /// This backs Settings → "Reset app" and the reinstall screen's "Start
+  /// fresh", which users read as a factory reset, so device-local preferences
+  /// go too — not just the account counter. Leaving them behind meant the
+  /// previous identity's recent send recipients (and searches, recently-viewed,
+  /// buy history) were still suggested after re-onboarding with a different
+  /// seed phrase.
   ///
-  /// Not to be confused with the profile-only "Delete account" in Settings →
+  /// Best-effort: every step runs even when an earlier one fails, and the
+  /// failures come back so the caller can tell the user. Secrets are erased
+  /// by enumeration ([SecureWalletStorage.eraseAllSecrets]) — the id lists
+  /// below only feed the readable inventory; the sweep behind them catches
+  /// every item the lists do not know. The database *file* is deleted along
+  /// with its encryption key ([MallowDatabase.resetStorage]); if that fails,
+  /// the rows are cleared instead so no wallet outlives the reset.
+  ///
+  /// Rows go **before** the secrets, for the same reason every removal path
+  /// puts them first: a reset the user kills part-way (or that the OS ends)
+  /// between the two must not leave wallet rows on disk with no secrets
+  /// behind them. That state boots into a session with wallets, and the eager
+  /// backfill writes a recovery graph naming secrets that are already gone —
+  /// every restore from then on aborts on entries nothing can satisfy. The
+  /// file delete still runs after, so the file and its key go together.
+  ///
+  /// Not to be confused with the profile-only "Delete profile" in Settings →
   /// Security & Privacy, which deliberately leaves wallets and the recovery
   /// phrase intact.
-  Future<void> resetAll() async {
-    final seedPhrases = await _db.getAllSeedPhrases();
-    final wallets = await _db.getAllWallets();
+  Future<List<EraseFailure>> resetAll() => _locked(_resetAllLocked);
 
-    await _storage.clearAll(
-      seedPhraseIds: seedPhrases.map((s) => s.id).toList(),
-      walletIds: wallets.map((w) => w.id).toList(),
+  Future<List<EraseFailure>> _resetAllLocked() async {
+    final failures = <EraseFailure>[];
+
+    var seedPhraseIds = const <String>[];
+    var walletIds = const <String>[];
+    try {
+      seedPhraseIds = (await _db.getAllSeedPhrases()).map((s) => s.id).toList();
+      walletIds = (await _db.getAllWallets()).map((w) => w.id).toList();
+    } catch (e) {
+      // The enumeration sweep does not need these; carry on.
+      failures.add(EraseFailure('db.listIds', e.runtimeType.toString()));
+    }
+
+    // Rows first (see above). Best-effort like every other step: the file
+    // delete below normally takes them anyway.
+    try {
+      await _db.clearAll();
+    } catch (e) {
+      failures.add(EraseFailure('db.clearRows', e.runtimeType.toString()));
+    }
+
+    failures.addAll(
+      await _storage.eraseAllSecrets(
+        seedPhraseIds: seedPhraseIds,
+        walletIds: walletIds,
+      ),
     );
 
-    await _db.clearAll();
+    try {
+      await _db.resetStorage();
+    } catch (e) {
+      failures.add(EraseFailure('db.resetStorage', e.runtimeType.toString()));
+      try {
+        await _db.clearAll();
+      } catch (e) {
+        failures.add(EraseFailure('db.clearAll', e.runtimeType.toString()));
+      }
+    }
+
     // Wipes every preference, including the global account counter, so a fresh
     // onboard begins at Account 01 with default settings and no carried-over
     // history from the previous identity.
-    await _prefs.clearAll();
+    try {
+      await _prefs.clearAll();
+    } catch (e) {
+      failures.add(EraseFailure('prefs.clearAll', e.runtimeType.toString()));
+    }
+
+    return failures;
   }
 
   // ---------------------------------------------------------------------------
@@ -1106,58 +1650,221 @@ class WalletRepository {
   // ---------------------------------------------------------------------------
 
   /// Sync the full wallet graph to Keychain for recovery.
-  Future<void> _syncWalletGraph() async {
+  ///
+  /// The graph is the database's content **plus** every entry the stored
+  /// graph has that the database does not — carried over unconditionally.
+  /// Why: the graph is rewritten on every mutation, and a database that does
+  /// not know a seed is not proof the seed is gone. After a transient
+  /// keystore misread routed a launch to onboarding, the first new seed used
+  /// to overwrite the graph with just itself, orphaning every other seed in
+  /// the vault for good. A presence check at sync time would not fix that —
+  /// the misread *is* a nil read — so carry-over is unconditional.
+  ///
+  /// Carry-over is only as safe as the read it carries from, so that read is
+  /// guarded ([SecureWalletStorage.loadAccountGraph]): an unreadable keystore
+  /// throws instead of answering "absent". The throw lands in the catch below,
+  /// which is the safe outcome both ways — a plain sync writes nothing and the
+  /// stored graph survives untouched, a pruning sync aborts the removal. A nil
+  /// read is the dangerous one: it carries nothing over, so the write that
+  /// follows replaces the graph with the database's content alone.
+  ///
+  /// The only way an entry leaves the graph is by being named in the
+  /// `removed*` sets by the code path that deletes its secret. The database
+  /// snapshot is filtered by the same ids, so removal paths call this
+  /// **before** they delete anything (graph-first): the graph write is the
+  /// commit point, and a failure there throws [GraphSyncException] with
+  /// nothing removed. Plain syncs keep the old swallow-and-log behaviour —
+  /// a failed refresh just means the next mutation writes the same content.
+  ///
+  /// The written `selectedWalletId` is always one of the wallets in the same
+  /// write, or null. A removal prunes the active wallet and the graph would
+  /// otherwise keep naming it: nothing repairs a selection that points at a
+  /// row no restore creates, so [getActiveWallet] would answer null forever
+  /// after that graph is restored. [replacementSelectedWalletId] lets the
+  /// removal path name the selection it is about to store, so the pruned
+  /// graph is already correct instead of waiting for a follow-up sync.
+  Future<void> _syncWalletGraph({
+    Set<String> removedSeedPhraseIds = const {},
+    Set<String> removedWalletIds = const {},
+    Set<String> removedAccountIds = const {},
+    String? replacementSelectedWalletId,
+  }) async {
+    final pruning =
+        removedSeedPhraseIds.isNotEmpty ||
+        removedWalletIds.isNotEmpty ||
+        removedAccountIds.isNotEmpty;
     try {
-      final seedPhrases = await getAllSeedPhrases();
-      final accountRows = await _db.getAllAccounts();
-      final wallets = await getAllWallets();
-      final selectedWalletId = await _storage.loadSelectedWalletId();
+      final seedPhrases = (await getAllSeedPhrases())
+          .where((sp) => !removedSeedPhraseIds.contains(sp.id))
+          .toList();
+      final accountRows = (await _db.getAllAccounts())
+          .where((a) => !removedAccountIds.contains(a.id))
+          .toList();
+      final wallets = (await getAllWallets())
+          .where((w) => !removedWalletIds.contains(w.id))
+          .toList();
+      final selectedWalletId =
+          replacementSelectedWalletId ?? await _storage.loadSelectedWalletId();
+
+      final seedEntries = seedPhrases
+          .map(
+            (sp) => <String, dynamic>{
+              'id': sp.id,
+              'name': sp.name,
+              'sortIndex': sp.sortIndex,
+            },
+          )
+          .toList();
+      final accountEntries = accountRows
+          .map(
+            (a) => <String, dynamic>{
+              'id': a.id,
+              'seedPhraseId': a.seedPhraseId,
+              'derivationIndex': a.derivationIndex,
+              'kind': a.kind,
+              'name': a.name,
+              'avatarSeed': a.avatarSeed,
+              'sortIndex': a.sortIndex,
+            },
+          )
+          .toList();
+      final walletEntries = wallets
+          .map(
+            (w) => <String, dynamic>{
+              'id': w.id,
+              'accountId': w.accountId,
+              'address': w.address,
+              'name': w.name,
+              'walletType': w.walletType.toDbString(),
+              'seedPhraseId': w.seedPhraseId,
+              'derivationIndex': w.derivationIndex,
+              'derivationScheme': w.derivationScheme?.name,
+              'socialProvider': w.socialProvider,
+              'chain': w.chain,
+              'sortIndex': w.sortIndex,
+            },
+          )
+          .toList();
+
+      _carryOverDormantEntries(
+        stored: await _loadStoredGraph(),
+        seedEntries: seedEntries,
+        accountEntries: accountEntries,
+        walletEntries: walletEntries,
+        removedSeedPhraseIds: removedSeedPhraseIds,
+        removedWalletIds: removedWalletIds,
+        removedAccountIds: removedAccountIds,
+      );
+
+      // Never name a wallet this write does not contain: a graph is only ever
+      // read back to rebuild the database from, and a selection pointing at a
+      // row that rebuild does not create leaves the session with no active
+      // wallet and nothing to repair it.
+      final graphWalletIds = walletEntries
+          .map((e) => e['id'] as String?)
+          .toSet();
 
       final graph = {
         'version': 3,
-        'seedPhrases': seedPhrases
-            .map(
-              (sp) => {'id': sp.id, 'name': sp.name, 'sortIndex': sp.sortIndex},
-            )
-            .toList(),
-        'accounts': accountRows
-            .map(
-              (a) => {
-                'id': a.id,
-                'seedPhraseId': a.seedPhraseId,
-                'derivationIndex': a.derivationIndex,
-                'kind': a.kind,
-                'name': a.name,
-                'avatarSeed': a.avatarSeed,
-                'sortIndex': a.sortIndex,
-              },
-            )
-            .toList(),
-        'wallets': wallets
-            .map(
-              (w) => {
-                'id': w.id,
-                'accountId': w.accountId,
-                'address': w.address,
-                'name': w.name,
-                'walletType': w.walletType.toDbString(),
-                'seedPhraseId': w.seedPhraseId,
-                'derivationIndex': w.derivationIndex,
-                'derivationScheme': w.derivationScheme?.name,
-                'socialProvider': w.socialProvider,
-                'chain': w.chain,
-                'sortIndex': w.sortIndex,
-              },
-            )
-            .toList(),
-        'selectedWalletId': selectedWalletId,
+        'seedPhrases': seedEntries,
+        'accounts': accountEntries,
+        'wallets': walletEntries,
+        'selectedWalletId': graphWalletIds.contains(selectedWalletId)
+            ? selectedWalletId
+            : null,
       };
 
       await _storage.storeAccountGraph(jsonEncode(graph));
     } catch (e) {
+      if (pruning) throw GraphSyncException(e);
       debugPrint('[WalletRepository] Failed to sync wallet graph: $e');
     }
   }
+
+  /// The stored graph, or null when absent or unparseable (an unparseable
+  /// graph has nothing to carry; it is overwritten).
+  ///
+  /// A failed read is **not** null. Only the parse is caught here; a keystore
+  /// that cannot be read throws out of this method on purpose, because null is
+  /// acted on — the sync carries nothing over and overwrites, the boot restore
+  /// concludes there is nothing dormant. "Unknown" must reach the caller as a
+  /// throw so it can leave everything as it is.
+  Future<Map<String, dynamic>?> _loadStoredGraph() async {
+    final json = await _storage.loadAccountGraph();
+    if (json == null || json.isEmpty) return null;
+    try {
+      return jsonDecode(json) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[WalletRepository] Stored wallet graph is unreadable: $e');
+      return null;
+    }
+  }
+
+  /// Append to the fresh entry lists every stored entry the database does not
+  /// have and no caller has removed. See [_syncWalletGraph].
+  ///
+  /// A seed phrase the database holds is authoritative for its own accounts
+  /// and wallets; only seeds absent from the database are carried, whole.
+  /// Non-seed wallets are carried individually, each with its account if the
+  /// database lacks that too. Accounts nothing references are dropped.
+  static void _carryOverDormantEntries({
+    required Map<String, dynamic>? stored,
+    required List<Map<String, dynamic>> seedEntries,
+    required List<Map<String, dynamic>> accountEntries,
+    required List<Map<String, dynamic>> walletEntries,
+    required Set<String> removedSeedPhraseIds,
+    required Set<String> removedWalletIds,
+    required Set<String> removedAccountIds,
+  }) {
+    if (stored == null) return;
+    final dbSeedIds = seedEntries.map((e) => e['id'] as String).toSet();
+    final dbAccountIds = accountEntries.map((e) => e['id'] as String).toSet();
+    final dbWalletIds = walletEntries.map((e) => e['id'] as String).toSet();
+
+    final storedSeeds = _entries(stored['seedPhrases']);
+    final storedAccounts = _entries(stored['accounts']);
+    final storedWallets = _entries(stored['wallets']);
+
+    final carriedSeedIds = <String>{};
+    for (final sp in storedSeeds) {
+      final id = sp['id'] as String?;
+      if (id == null || dbSeedIds.contains(id)) continue;
+      if (removedSeedPhraseIds.contains(id)) continue;
+      seedEntries.add(sp);
+      carriedSeedIds.add(id);
+    }
+
+    final carriedAccountIds = <String>{};
+    for (final w in storedWallets) {
+      final id = w['id'] as String?;
+      if (id == null || dbWalletIds.contains(id)) continue;
+      if (removedWalletIds.contains(id)) continue;
+      final seedPhraseId = w['seedPhraseId'] as String?;
+      // A seed the DB holds owns its wallets; only carried seeds bring theirs.
+      if (seedPhraseId != null && !carriedSeedIds.contains(seedPhraseId)) {
+        continue;
+      }
+      walletEntries.add(w);
+      final accountId = w['accountId'] as String?;
+      if (accountId != null) carriedAccountIds.add(accountId);
+    }
+
+    for (final a in storedAccounts) {
+      final id = a['id'] as String?;
+      if (id == null || dbAccountIds.contains(id)) continue;
+      if (removedAccountIds.contains(id)) continue;
+      final seedPhraseId = a['seedPhraseId'] as String?;
+      final referenced =
+          carriedAccountIds.contains(id) ||
+          (seedPhraseId != null && carriedSeedIds.contains(seedPhraseId));
+      if (referenced) accountEntries.add(a);
+    }
+  }
+
+  static List<Map<String, dynamic>> _entries(Object? raw) => switch (raw) {
+    final List<dynamic> list => list.whereType<Map<String, dynamic>>().toList(),
+    _ => const [],
+  };
 
   // ---------------------------------------------------------------------------
   // Account creation
@@ -1185,6 +1892,20 @@ class WalletRepository {
     return existing?.id ??
         await _createAccount(
           kind: AccountKind.hardware,
+          derivationIndex: index,
+        );
+  }
+
+  /// Find-or-create the `seedVault` account for a Seed Vault derivation index.
+  /// Same shape as [_ensureHardwareAccount], and separate from it for the
+  /// reason [AccountKind.seedVault] records: hardware accounts are keyed by
+  /// index alone, so one kind for both devices would merge a Ledger and a
+  /// Seed Vault imported at the same index into a single account.
+  Future<String> _ensureSeedVaultAccount(int index) async {
+    final existing = await _db.getSeedVaultAccountByIndex(index);
+    return existing?.id ??
+        await _createAccount(
+          kind: AccountKind.seedVault,
           derivationIndex: index,
         );
   }
@@ -1266,36 +1987,265 @@ class WalletRepository {
   }
 
   /// Public wrapper for eager backfill from AuthStateNotifier.
-  Future<void> syncWalletGraph() => _syncWalletGraph();
+  Future<void> syncWalletGraph() => _locked(() => _syncWalletGraph());
 
   /// Restore seed phrases and wallets from a Keychain graph JSON blob.
   ///
-  /// Expects a v3 graph (seed phrases + accounts + wallets). Returns true if
-  /// restoration succeeded.
-  Future<bool> restoreFromGraph(String graphJson) async {
+  /// Expects a v3 graph (seed phrases + accounts + wallets). All-or-nothing:
+  ///
+  /// - Before anything is written, every seed phrase and every imported-key
+  ///   wallet in the graph must have its secret readable from the vault. One
+  ///   miss — a nil read *or* a read error — aborts the whole restore with
+  ///   [RestoreAborted] and nothing is written. Restoring rows whose keys are
+  ///   gone would put wallets on screen that cannot sign, and a partial
+  ///   restore used to leave a subset that the next graph sync then wrote
+  ///   back over the full graph. Social keys are exempt (a re-login recovers
+  ///   them); Ledger ids and view-only rows hold no secret.
+  /// - The row writes run in one transaction, so a mid-way failure leaves the
+  ///   database exactly as it was.
+  ///
+  /// [readableOnly] is the opt-in way past that abort, offered on the Restore
+  /// screen once an abort has happened and only when something *is* readable.
+  /// It writes every entry whose secret reads and skips the rest — and it
+  /// writes nothing to the graph, so the skipped entries stay listed there:
+  /// the boot-time dormant restore retries them at every launch, and a later
+  /// restore can still take them. Without it one unreadable entry aborts every
+  /// restore forever and the only other action erases the readable seeds too.
+  Future<RestoreResult> restoreFromGraph(
+    String graphJson, {
+    bool readableOnly = false,
+  }) => _locked(
+    () => _restoreFromGraphLocked(graphJson, readableOnly: readableOnly),
+  );
+
+  Future<RestoreResult> _restoreFromGraphLocked(
+    String graphJson, {
+    required bool readableOnly,
+  }) async {
+    final Map<String, dynamic> graph;
     try {
-      final graph = jsonDecode(graphJson) as Map<String, dynamic>;
-      await _restoreFromGraphV3(graph);
-
-      // Restore active selection
-      final selectedWalletId = graph['selectedWalletId'] as String?;
-      if (selectedWalletId != null) {
-        await _storage.storeSelectedWalletId(selectedWalletId);
-      }
-
-      return true;
+      graph = jsonDecode(graphJson) as Map<String, dynamic>;
     } catch (e) {
       debugPrint('[WalletRepository] Failed to restore from graph: $e');
-      return false;
+      return RestoreFailed(e);
+    }
+
+    try {
+      final missing = await _findMissingSecrets(graph);
+      if (missing.aborted.hasMissing) {
+        if (!readableOnly || !missing.aborted.hasReadable) {
+          return missing.aborted;
+        }
+        return await _restoreReadableFromGraph(graph, missing);
+      }
+
+      await _db.transaction(() => _restoreFromGraphV3(graph));
+      await _restoreSelection(graph, _entryIds(_entries(graph['wallets'])));
+
+      return RestoreRestored(
+        seedPhrases:
+            (graph['seedPhrases'] as List<dynamic>? ?? const []).length,
+        wallets: (graph['wallets'] as List<dynamic>? ?? const []).length,
+      );
+    } catch (e) {
+      debugPrint('[WalletRepository] Failed to restore from graph: $e');
+      return RestoreFailed(e);
     }
   }
 
+  /// Write everything in [graph] whose secret read, skipping the entries
+  /// [missing] names and the rows that depend on them: a missing seed takes
+  /// its accounts and wallets with it, a missing imported key takes its own
+  /// row, and an account belonging to neither a restored wallet nor a
+  /// restored seed is left out.
+  ///
+  /// The graph itself is not touched — the skipped entries stay in it.
+  Future<RestoreResult> _restoreReadableFromGraph(
+    Map<String, dynamic> graph,
+    _MissingSecrets missing,
+  ) async {
+    final seedPhrases = _entries(
+      graph['seedPhrases'],
+    ).where((sp) => !missing.seedPhraseIds.contains(sp['id'])).toList();
+    final wallets = _entries(graph['wallets']).where((w) {
+      if (missing.importedKeyIds.contains(w['id'])) return false;
+      final seedPhraseId = w['seedPhraseId'];
+      return !missing.seedPhraseIds.contains(seedPhraseId);
+    }).toList();
+    final walletAccountIds = wallets.map((w) => w['accountId']).toSet();
+    final restoredSeedIds = _entryIds(seedPhrases);
+    // An account of a restored seed is kept even when no wallet references it:
+    // an import whose every selection was already taken leaves such an account
+    // behind, and the full restore writes it. Dropping it here would make a
+    // partial restore quietly lose an account row the graph still lists.
+    final accounts = _entries(graph['accounts'])
+        .where(
+          (a) =>
+              walletAccountIds.contains(a['id']) ||
+              restoredSeedIds.contains(a['seedPhraseId']),
+        )
+        .toList();
+
+    await _db.transaction(
+      () => _upsertGraphEntries(
+        seedPhrases: seedPhrases,
+        accounts: accounts,
+        wallets: wallets,
+      ),
+    );
+    await _restoreSelection(graph, _entryIds(wallets));
+
+    return RestoreRestored(
+      seedPhrases: seedPhrases.length,
+      wallets: wallets.length,
+      skippedSeedPhrases: missing.seedPhraseIds.length,
+      skippedImportedKeys: missing.importedKeyIds.length,
+    );
+  }
+
+  /// Decide the active selection after a restore wrote [restoredWalletIds].
+  ///
+  /// The graph's own choice is taken only when the wallet it names is actually
+  /// there. Graphs written before the prune validated its selection can name a
+  /// wallet the same write removed, and a partial restore is the other way it
+  /// happens: the selected wallet may be one of the skipped rows.
+  ///
+  /// Leaving the selection alone in that case is not enough. The stored id
+  /// ([SecureWalletStorage.loadSelectedWalletId]) lives in the plugin store,
+  /// which survives an iOS reinstall — so after a restore it can still name a
+  /// wallet that no longer has a row, and [getActiveWallet] answers null
+  /// forever with nothing but a manual wallet switch to repair it. So when
+  /// neither id resolves, the selection is re-pointed at a restored wallet, in
+  /// this order: a Solana row that can sign, then any Solana row, then the
+  /// first restored row. A restore that wrote no wallet at all clears the
+  /// selection instead.
+  ///
+  /// Solana first because its signing resolves the keypair from the
+  /// *selection* rather than an explicit id ([WalletInfo.bindsGlobalSigner]),
+  /// so parking the selection off-chain leaves it with no key to load. But
+  /// that flag says which chain reads the selection, not that the row holds a
+  /// key: a watch-only Solana row passes it and can still sign nothing, so a
+  /// signing row of the same chain is taken ahead of it when the restore
+  /// wrote one.
+  Future<void> _restoreSelection(
+    Map<String, dynamic> graph,
+    Set<String> restoredWalletIds,
+  ) async {
+    final selectedWalletId = graph['selectedWalletId'] as String?;
+    if (selectedWalletId != null &&
+        await _db.getWalletById(selectedWalletId) != null) {
+      await _storage.storeSelectedWalletId(selectedWalletId);
+      return;
+    }
+
+    final stored = await _storage.loadSelectedWalletId();
+    if (stored != null && await _db.getWalletById(stored) != null) return;
+
+    final restored = (await _db.getAllWallets())
+        .where((w) => restoredWalletIds.contains(w.id))
+        .toList();
+    if (restored.isEmpty) {
+      await _storage.deleteSelectedWalletId();
+      return;
+    }
+    final infos = restored.map(_walletRowToInfo).toList();
+    final pick = infos.firstWhere(
+      (w) => w.bindsGlobalSigner && w.canSign,
+      orElse: () => infos.firstWhere(
+        (w) => w.bindsGlobalSigner,
+        orElse: () => infos.first,
+      ),
+    );
+    await _storage.storeSelectedWalletId(pick.id);
+  }
+
+  /// The `id` field of every graph entry that has one.
+  static Set<String> _entryIds(List<Map<String, dynamic>> entries) => {
+    for (final e in entries)
+      if (e['id'] case final String id) id,
+  };
+
+  /// Presence pre-check for [restoreFromGraph]: counts the seed phrases and
+  /// imported-key wallets in [graph] whose secret cannot be read right now,
+  /// and names them so a `readableOnly` restore can filter them out. The ids
+  /// are row ids, not secrets — they are what the graph is indexed by.
+  /// A read error counts as missing — restore must not proceed on a keystore
+  /// it cannot see.
+  Future<_MissingSecrets> _findMissingSecrets(
+    Map<String, dynamic> graph,
+  ) async {
+    var totalSeeds = 0;
+    final missingSeeds = <String>{};
+    for (final spJson in graph['seedPhrases'] as List<dynamic>? ?? const []) {
+      final id = (spJson as Map<String, dynamic>)['id'] as String;
+      totalSeeds++;
+      if ((await _tryRead(() => _storage.loadMnemonicForSeedPhrase(id))) ==
+          null) {
+        missingSeeds.add(id);
+      }
+    }
+
+    var totalKeys = 0;
+    var readableWallets = 0;
+    final missingKeys = <String>{};
+    for (final wJson in graph['wallets'] as List<dynamic>? ?? const []) {
+      final w = wJson as Map<String, dynamic>;
+      final id = w['id'] as String;
+      final underMissingSeed = missingSeeds.contains(w['seedPhraseId']);
+      final type = WalletType.fromDbString(w['walletType'] as String);
+      if (type != WalletType.importedKey) {
+        // Only rows that could sign afterwards count — an HD row of a seed
+        // that read, or a social row whose key a re-login mints again. A
+        // view-only or Ledger row restores without a secret, so counting it
+        // would offer a partial restore that writes nothing signable and
+        // then hides the Restore screen behind a database that has wallets.
+        if (!underMissingSeed &&
+            (type == WalletType.hd || type == WalletType.social)) {
+          readableWallets++;
+        }
+        continue;
+      }
+      totalKeys++;
+      if ((await _tryRead(() => _storage.loadPrivateKey(id))) == null) {
+        missingKeys.add(id);
+      } else if (!underMissingSeed) {
+        readableWallets++;
+      }
+    }
+
+    return _MissingSecrets(
+      aborted: RestoreAborted(
+        missingSeedPhrases: missingSeeds.length,
+        totalSeedPhrases: totalSeeds,
+        missingImportedKeys: missingKeys.length,
+        totalImportedKeys: totalKeys,
+        readableWallets: readableWallets,
+      ),
+      seedPhraseIds: missingSeeds,
+      importedKeyIds: missingKeys,
+    );
+  }
+
   /// Restore a v3 graph (Accounts-model: seed phrases + accounts + wallets).
-  Future<void> _restoreFromGraphV3(Map<String, dynamic> graph) async {
-    final seedPhrases = graph['seedPhrases'] as List<dynamic>;
+  Future<void> _restoreFromGraphV3(Map<String, dynamic> graph) {
+    return _upsertGraphEntries(
+      seedPhrases: (graph['seedPhrases'] as List<dynamic>)
+          .cast<Map<String, dynamic>>(),
+      accounts: (graph['accounts'] as List<dynamic>? ?? const [])
+          .cast<Map<String, dynamic>>(),
+      wallets: (graph['wallets'] as List<dynamic>).cast<Map<String, dynamic>>(),
+    );
+  }
+
+  /// Write graph entries as rows. Shared by the full restore and the dormant
+  /// restore; callers wrap it in a transaction.
+  Future<void> _upsertGraphEntries({
+    required List<Map<String, dynamic>> seedPhrases,
+    required List<Map<String, dynamic>> accounts,
+    required List<Map<String, dynamic>> wallets,
+  }) async {
     var spFallbackSort = 0;
-    for (final spJson in seedPhrases) {
-      final sp = spJson as Map<String, dynamic>;
+    for (final sp in seedPhrases) {
       final sortIndex = (sp['sortIndex'] as int?) ?? spFallbackSort;
       spFallbackSort = sortIndex + 1;
       await _db.upsertSeedPhrase(
@@ -1308,10 +2258,8 @@ class WalletRepository {
       );
     }
 
-    final accounts = graph['accounts'] as List<dynamic>? ?? const [];
     var accFallbackSort = 0;
-    for (final aJson in accounts) {
-      final a = aJson as Map<String, dynamic>;
+    for (final a in accounts) {
       final sortIndex = (a['sortIndex'] as int?) ?? accFallbackSort;
       accFallbackSort = sortIndex + 1;
       await _db.upsertAccount(
@@ -1328,10 +2276,8 @@ class WalletRepository {
       );
     }
 
-    final wallets = graph['wallets'] as List<dynamic>;
     final walletFallbackSort = <String?, int>{};
-    for (final wJson in wallets) {
-      final w = wJson as Map<String, dynamic>;
+    for (final w in wallets) {
       final seedPhraseId = w['seedPhraseId'] as String?;
       final fallback = walletFallbackSort[seedPhraseId] ?? 0;
       final sortIndex = (w['sortIndex'] as int?) ?? fallback;
@@ -1352,6 +2298,422 @@ class WalletRepository {
           sortIndex: Value(sortIndex),
         ),
       );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Dormant entries (graph knows them, database does not)
+  // ---------------------------------------------------------------------------
+
+  /// Bring back wallets the recovery graph lists but the database lacks.
+  ///
+  /// Runs once per cold start, after the database opened and before routing,
+  /// and only when the database already has wallets (an empty database is the
+  /// explicit Restore screen's case). How an entry gets dormant: the graph
+  /// carries over what the database does not know ([_syncWalletGraph]), so
+  /// after a misread-routed onboarding the old seeds stay listed while the
+  /// database holds only the new one.
+  ///
+  /// The dormant diff is computed before any secret is read, so a launch where
+  /// the graph and the database agree — every launch after the first — reads
+  /// and decrypts nothing.
+  ///
+  /// Per dormant seed phrase / imported-key wallet: read its secret. A nil or
+  /// failed read skips it for this launch (it stays in the graph). What
+  /// happens to a readable one:
+  ///
+  /// - **Seed phrase.** Its mnemonic is compared against every live seed's
+  ///   mnemonic, and against every seed restored earlier in this pass.
+  ///   Equal to one of them (both reads non-null) is a duplicate:
+  ///   the dormant entry is pruned from the graph and its vault copy deleted,
+  ///   because the live seed holds the same secret. If any live seed's
+  ///   mnemonic does *not* read, no comparison can be made and **every**
+  ///   dormant seed is skipped this launch — restoring one would write a
+  ///   second seed row for a secret that may already be live, and nothing
+  ///   merges the two afterwards. Otherwise it is restored.
+  /// - **Imported key.** A live row at the same address is not enough to call
+  ///   it a duplicate: a view-only or Ledger row there holds no key, so
+  ///   deleting the dormant one would destroy the only copy of it. It is a
+  ///   duplicate only when some live row at that address holds a signing
+  ///   secret that reads right now — an imported/social row's private key, or
+  ///   a seed-derived row's mnemonic. Anything else skips it.
+  /// - **Social.** Its key is recoverable by re-logging in, so it is not
+  ///   protected the way an imported key is — but it is still the only copy on
+  ///   this device, and a live view-only or Ledger row at the same address
+  ///   cannot sign. So the same live-signing test applies: a duplicate only
+  ///   when some live row at that address holds a readable signing secret.
+  /// - **Ledger and view-only.** No vault secret at all: restored when the
+  ///   address is new, pruned as duplicates when it is not.
+  ///
+  /// A restore writes rows only, one transaction per entry, and what it writes
+  /// counts as live for every decision after it — its mnemonic for the seed
+  /// comparison, its addresses for the wallet ones. Otherwise a second dormant
+  /// entry for the same secret is judged against a snapshot taken before the
+  /// restore, written a second time, and nothing merges the two rows
+  /// afterwards. A restored seed's wallet whose address is already live is the
+  /// one row that is *not* written: the address derives from the key, so the
+  /// row already there holds the same key material, and a second signing row
+  /// at one address is what the import guards forbid. Its graph entry is
+  /// pruned with the duplicates, and nothing goes with it — the seed, and the
+  /// mnemonic every one of its wallets derives from, is restored.
+  ///
+  /// Every duplicate both passes find is pruned by **one** graph write after
+  /// them, and only then are the vault items deleted, one at a time. The graph
+  /// write is still the commit point: a failure there deletes nothing and
+  /// leaves every entry dormant for the next launch.
+  ///
+  /// A malformed entry counts as skipped and never stops the ones after it.
+  /// The active selection is never touched. Silent to the user; the caller
+  /// reports the counts.
+  ///
+  /// [graphJson] is the graph blob the caller has already read — the boot path
+  /// reads it for its backfill check — since each read costs a protected-data
+  /// probe plus a Keychain fetch and doing both twice per cold start buys
+  /// nothing. Only a **successful** read may be passed: a read that threw
+  /// means "unknown", not "no graph", and absence is acted on here.
+  Future<DormantRestoreResult> restoreDormantFromGraph({String? graphJson}) =>
+      _locked(() => _restoreDormantFromGraphLocked(graphJson));
+
+  Future<DormantRestoreResult> _restoreDormantFromGraphLocked(
+    String? graphJson,
+  ) async {
+    final stored = graphJson == null
+        ? await _loadStoredGraph()
+        : _decodeGraph(graphJson);
+    if (stored == null) return const DormantRestoreResult();
+
+    final dbSeeds = await _db.getAllSeedPhrases();
+    final dbSeedIds = dbSeeds.map((s) => s.id).toSet();
+    final dbWallets = await _db.getAllWallets();
+    final dbWalletIds = dbWallets.map((w) => w.id).toSet();
+
+    final storedAccounts = _entries(stored['accounts']);
+    final storedWallets = _entries(stored['wallets']);
+
+    // The diff comes first so the steady state costs zero keystore reads: with
+    // nothing dormant there is nothing to compare, and reading every live
+    // mnemonic to answer that would decrypt N secrets on every cold start.
+    final dormantSeeds = _entries(stored['seedPhrases'])
+        .where((sp) => sp['id'] is String && !dbSeedIds.contains(sp['id']))
+        .toList();
+    final dormantWallets = storedWallets
+        .where(
+          (w) =>
+              w['id'] is String &&
+              !dbWalletIds.contains(w['id']) &&
+              w['seedPhraseId'] == null, // seed wallets come with their seed
+        )
+        .toList();
+    if (dormantSeeds.isEmpty && dormantWallets.isEmpty) {
+      return const DormantRestoreResult();
+    }
+
+    // EVM addresses compare case-insensitively, so address identity is the
+    // `apiOwnerAddress` form everywhere below.
+    final dbAddresses = dbWallets
+        .map((w) => apiOwnerAddress(w.address))
+        .toSet();
+    final dbAccountIds = (await _db.getAllAccounts()).map((a) => a.id).toSet();
+
+    var seedsRestored = 0;
+    var walletsRestored = 0;
+    var duplicates = 0;
+    var skipped = 0;
+
+    // Live mnemonics, for the seed duplicate rule: read at most once, and only
+    // when a dormant seed actually needs the comparison. `null` means at least
+    // one live seed did not read, so the comparison is impossible this launch.
+    Set<String>? liveMnemonics;
+    var liveMnemonicsRead = false;
+    var liveSeedUnreadable = false;
+    Future<Set<String>?> readLiveMnemonics() async {
+      if (liveMnemonicsRead) return liveMnemonics;
+      liveMnemonicsRead = true;
+      final read = <String>{};
+      for (final sp in dbSeeds) {
+        final m = await _tryRead(
+          () => _storage.loadMnemonicForSeedPhrase(sp.id),
+        );
+        if (m == null) {
+          // Correct to wait, but a live seed that never reads again makes the
+          // wait permanent — so say so, once, for the caller to report.
+          liveSeedUnreadable = true;
+          return null;
+        }
+        read.add(m);
+      }
+      return liveMnemonics = read;
+    }
+
+    // Addresses restored during this run whose secret read non-null, so a
+    // second dormant entry for the same key is still recognised as a duplicate.
+    final restoredSigningAddresses = <String>{};
+
+    // Entries both passes decided to drop, pruned by one graph write after
+    // them. `duplicateKeyIds` is the subset that owns a vault item.
+    final duplicateSeedIds = <String>{};
+    final duplicateWalletIds = <String>{};
+    final duplicateKeyIds = <String>{};
+
+    for (final sp in dormantSeeds) {
+      final id = sp['id'] as String;
+      try {
+        final mnemonic = await _tryRead(
+          () => _storage.loadMnemonicForSeedPhrase(id),
+        );
+        if (mnemonic == null) {
+          skipped++;
+          continue;
+        }
+        final live = await readLiveMnemonics();
+        if (live == null) {
+          // A live seed did not read. Guessing "not a duplicate" here writes a
+          // second seed row plus duplicate-address wallet rows for a secret
+          // that may already be live, and no later launch undoes that — both
+          // ids are then in the database. Wait for a launch that can compare.
+          skipped++;
+          continue;
+        }
+        if (live.contains(mnemonic)) {
+          // Same secret lives under another id — a live seed, or one restored
+          // earlier in this pass, whose mnemonic was read to get here: drop
+          // the dormant copy.
+          duplicateSeedIds.add(id);
+          continue;
+        }
+        final accounts = storedAccounts
+            .where(
+              (a) => a['seedPhraseId'] == id && !dbAccountIds.contains(a['id']),
+            )
+            .toList();
+        // A wallet whose address is already live is dropped rather than
+        // written: an address identifies the key it derives from, so the row
+        // already there holds this key material, and a second signing row at
+        // one address is what the import guards forbid. Collected, not pruned
+        // yet — a transaction that throws below must leave the entry alone.
+        final wallets = <Map<String, dynamic>>[];
+        final collided = <String>[];
+        final freshAddresses = <String>[];
+        for (final w in storedWallets) {
+          if (w['seedPhraseId'] != id || dbWalletIds.contains(w['id'])) {
+            continue;
+          }
+          final address = w['address'];
+          final walletId = w['id'];
+          if (address is String &&
+              walletId is String &&
+              dbAddresses.contains(apiOwnerAddress(address))) {
+            collided.add(walletId);
+            continue;
+          }
+          wallets.add(w);
+          if (address is String) freshAddresses.add(apiOwnerAddress(address));
+        }
+        await _db.transaction(
+          () => _upsertGraphEntries(
+            seedPhrases: [sp],
+            accounts: accounts,
+            wallets: wallets,
+          ),
+        );
+        seedsRestored++;
+        walletsRestored += wallets.length;
+        duplicateWalletIds.addAll(collided);
+        // Everything judged after this point — the seeds later in this pass
+        // and every dormant wallet in the next one — must see what was just
+        // written as live. The mnemonic read non-null, so these rows can sign:
+        // another entry at one of their addresses is a duplicate, not the last
+        // copy of a key.
+        live.add(mnemonic);
+        dbAddresses.addAll(freshAddresses);
+        restoredSigningAddresses.addAll(freshAddresses);
+      } catch (e) {
+        // A malformed entry (or a row write that fails) must not cost the
+        // entries after it their restore, nor the caller its counts.
+        skipped++;
+        debugPrint('[WalletRepository] Dormant seed $id skipped: $e');
+      }
+    }
+
+    for (final w in dormantWallets) {
+      final id = w['id'] as String;
+      try {
+        final address = w['address'] as String?;
+        if (address == null) {
+          // Malformed like any other: counted, so the launch's counts still
+          // add up to the number of entries it looked at.
+          skipped++;
+          continue;
+        }
+        final type = WalletType.fromDbString(w['walletType'] as String? ?? '');
+        final addressKey = apiOwnerAddress(address);
+        final addressIsLive = dbAddresses.contains(addressKey);
+
+        if (type == WalletType.importedKey) {
+          final key = await _tryRead(() => _storage.loadPrivateKey(id));
+          if (key == null) {
+            skipped++;
+            continue;
+          }
+        }
+
+        // Rows that own a vault key — imported *and* social — are only
+        // duplicates when a live row at the address can actually sign. A
+        // social key is recoverable by re-login and an imported one is not,
+        // but on this device both are the only copy, and deleting one because
+        // a view-only or Ledger row happens to hold the address destroys it
+        // either way.
+        if ((type == WalletType.importedKey || type == WalletType.social) &&
+            addressIsLive &&
+            !restoredSigningAddresses.contains(addressKey) &&
+            !await _hasLiveSigningSecret(dbWallets, addressKey)) {
+          // Every live row at this address is view-only, a Ledger, or a row
+          // whose own secret did not read: none of them can sign, so this
+          // dormant key is the only copy. Keep it and the graph entry.
+          skipped++;
+          continue;
+        }
+
+        if (addressIsLive) {
+          // The address is live under a row that holds the same secret.
+          duplicateWalletIds.add(id);
+          if (type == WalletType.importedKey || type == WalletType.social) {
+            duplicateKeyIds.add(id);
+          }
+          continue;
+        }
+
+        final accountId = w['accountId'] as String?;
+        final accounts = storedAccounts
+            .where(
+              (a) => a['id'] == accountId && !dbAccountIds.contains(accountId),
+            )
+            .toList();
+        await _db.transaction(
+          () => _upsertGraphEntries(
+            seedPhrases: const [],
+            accounts: accounts,
+            wallets: [w],
+          ),
+        );
+        if (accountId != null) dbAccountIds.add(accountId);
+        dbAddresses.add(addressKey);
+        if (type == WalletType.importedKey) {
+          restoredSigningAddresses.add(addressKey);
+        }
+        walletsRestored++;
+      } catch (e) {
+        skipped++;
+        debugPrint('[WalletRepository] Dormant wallet $id skipped: $e');
+      }
+    }
+
+    // One prune for every duplicate both passes found. A `_syncWalletGraph` is
+    // a full rebuild — three table reads, a protected-data probe, a graph read
+    // and a Keychain write — and this runs before the first route is resolved,
+    // so one per entry paid that N times. Order does not matter: no decision
+    // above reads what a prune changes.
+    if (duplicateSeedIds.isNotEmpty || duplicateWalletIds.isNotEmpty) {
+      var pruned = true;
+      try {
+        await _syncWalletGraph(
+          removedSeedPhraseIds: duplicateSeedIds,
+          removedWalletIds: duplicateWalletIds,
+        );
+      } on GraphSyncException {
+        pruned = false;
+      }
+      if (!pruned) {
+        // The graph write is the commit point: nothing left the graph, so
+        // nothing may leave the vault. Every entry is decided again next
+        // launch.
+        skipped += duplicateSeedIds.length + duplicateWalletIds.length;
+      } else {
+        for (final id in duplicateSeedIds) {
+          try {
+            await _storage.deleteMnemonicForSeedPhrase(id);
+            duplicates++;
+          } catch (e) {
+            // Pruned but not erased: the graph no longer indexes it, so the
+            // count is what says this launch left something behind.
+            skipped++;
+            debugPrint('[WalletRepository] Dormant seed $id not erased: $e');
+          }
+        }
+        for (final id in duplicateWalletIds) {
+          try {
+            if (duplicateKeyIds.contains(id)) {
+              await _storage.deletePrivateKey(id);
+            }
+            duplicates++;
+          } catch (e) {
+            skipped++;
+            debugPrint('[WalletRepository] Dormant key $id not erased: $e');
+          }
+        }
+      }
+    }
+
+    return DormantRestoreResult(
+      seedPhrasesRestored: seedsRestored,
+      walletsRestored: walletsRestored,
+      duplicatesDropped: duplicates,
+      skipped: skipped,
+      liveSeedUnreadable: liveSeedUnreadable,
+    );
+  }
+
+  /// Parse a graph blob the caller already read, the way [_loadStoredGraph]
+  /// parses the one it reads itself: unparseable is null. Safe to act on as
+  /// "nothing dormant" — the caller passes a read that succeeded, so null here
+  /// means the blob is unusable, not that the keystore stayed silent.
+  static Map<String, dynamic>? _decodeGraph(String json) {
+    if (json.isEmpty) return null;
+    try {
+      return jsonDecode(json) as Map<String, dynamic>;
+    } catch (e) {
+      debugPrint('[WalletRepository] Stored wallet graph is unreadable: $e');
+      return null;
+    }
+  }
+
+  /// Whether any row in [rows] at [addressKey] holds a signing secret that
+  /// reads right now: an imported/social row's private key, or a seed-derived
+  /// row's mnemonic. View-only and hardware rows (Ledger, Seed Vault) never
+  /// do — the key material is elsewhere — so an address being live says
+  /// nothing on its own about whether a dormant key at that address is still
+  /// the only copy.
+  Future<bool> _hasLiveSigningSecret(
+    List<Wallet> rows,
+    String addressKey,
+  ) async {
+    for (final row in rows) {
+      if (apiOwnerAddress(row.address) != addressKey) continue;
+      final seedPhraseId = row.seedPhraseId;
+      if (seedPhraseId != null) {
+        final mnemonic = await _tryRead(
+          () => _storage.loadMnemonicForSeedPhrase(seedPhraseId),
+        );
+        if (mnemonic != null) return true;
+        continue;
+      }
+      final type = WalletType.fromDbString(row.walletType);
+      if (type == WalletType.importedKey || type == WalletType.social) {
+        if (await _tryRead(() => _storage.loadPrivateKey(row.id)) != null) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /// Read a secret for a presence/equality check; any failure reads as null.
+  Future<String?> _tryRead(Future<String?> Function() read) async {
+    try {
+      final value = await read();
+      return (value == null || value.isEmpty) ? null : value;
+    } catch (_) {
+      return null;
     }
   }
 

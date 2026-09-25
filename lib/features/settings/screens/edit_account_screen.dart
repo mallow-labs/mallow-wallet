@@ -4,6 +4,8 @@ import 'package:go_router/go_router.dart';
 import '../../../core/crypto/derivation.dart';
 import '../../../core/crypto/wallet_manager.dart';
 import '../../../core/models/account.dart';
+import '../../../core/network/auth_service.dart';
+import '../../../core/observability/app_logger.dart';
 import '../../../core/router/auth_state_notifier.dart';
 import '../../../core/services/avatar_pool_service.dart';
 import '../../../core/services/wallet_repository.dart';
@@ -24,12 +26,103 @@ import '../../accounts/services/account_wallet_bloc.dart';
 import '../../home/widgets/drawer_signal.dart';
 import '../../portfolio/data/portfolio_repository.dart';
 import '../../portfolio/data/token_repository.dart';
+import '../../seed_vault/widgets/manage_in_seed_vault_row.dart';
 import '../../receive/sheets/chain_visuals.dart';
 import '../widgets/settings_page_scaffold.dart';
 
 import '../../../shared/utils/chain.dart';
 
 const _maxNameLength = 32;
+
+/// What removing [account] destroys, in the user's words. Key material goes
+/// with the wallet rows and cannot be recovered from the app: an imported
+/// wallet's private key always, and the seed phrase itself once this account
+/// holds its last wallets. Both deletions are irreversible on the device, so
+/// the confirmation has to name the one the user is about to trigger.
+///
+/// An account whose wallets are all of one type — the branches below only
+/// speak for a whole account, since a mixed one loses more than any single
+/// sentence covers.
+bool _allOfType(Account account, WalletType type) =>
+    account.wallets.isNotEmpty &&
+    account.wallets.every((w) => w.walletType == type);
+
+/// The warning that fits any account: it names no key material this device may
+/// not actually hold.
+const _genericAccountRemovalMessage =
+    'This account and all of its wallets will be removed from your '
+    'device. Make sure you have backed up your recovery phrase before '
+    'proceeding.';
+
+/// Shared with the account list, which asks the same question on a swipe.
+///
+/// A read failure falls back to [_genericAccountRemovalMessage] rather than
+/// escaping: one call site is a `Dismissible.confirmDismiss` and the other a
+/// button handler, so an unhandled async error here reaches the zone instead
+/// of the user — and takes the confirmation with it.
+Future<String> accountRemovalMessage(
+  WalletRepository repo,
+  Account account,
+) async {
+  try {
+    if (_allOfType(account, WalletType.importedKey)) {
+      return 'This account and its private key will be removed from this '
+          'device. Make sure you have a copy of the private key — it cannot be '
+          'recovered from the app.';
+    }
+    if (_allOfType(account, WalletType.social)) {
+      // The stored keys go too, but signing in with the same account derives
+      // them again — there is no phrase to back up here.
+      return 'This account and its stored keys will be removed from this '
+          'device. You can add it back by signing in with the same account '
+          'again.';
+    }
+    if (_allOfType(account, WalletType.ledger)) {
+      // Nothing signable is stored here; the rows point at the device.
+      return 'This account and its wallets will be removed from this device. '
+          'The keys stay on your Ledger.';
+    }
+    if (_allOfType(account, WalletType.seedVault)) {
+      // Same shape as the Ledger branch, and it has to be its own arm: without
+      // it a Seed Vault account falls through to the seed-phrase branch below,
+      // which tells the user to back up a recovery phrase this app has never
+      // held. The keys are in the device's Seed Vault and stay there.
+      return 'This account and its wallets will be removed from this device. '
+          'The keys stay in Seed Vault.';
+    }
+    if (_allOfType(account, WalletType.viewOnly)) {
+      return 'This watch-only account will be removed from this device. No '
+          'keys are stored for it.';
+    }
+    final walletIds = account.wallets.map((w) => w.id).toSet();
+    final seedPhraseIds = {
+      for (final w in account.wallets)
+        if (w.seedPhraseId != null) w.seedPhraseId!,
+    };
+    for (final seedPhraseId in seedPhraseIds) {
+      final siblings = await repo.getWalletsForSeedPhrase(seedPhraseId);
+      if (siblings.every((w) => walletIds.contains(w.id))) {
+        var seedName = 'its recovery phrase';
+        for (final seed in await repo.getAllSeedPhrases()) {
+          if (seed.id == seedPhraseId) {
+            seedName = '"${seed.name}"';
+            break;
+          }
+        }
+        return 'This account holds the last wallets of $seedName. Removing it '
+            'deletes that recovery phrase from this device. Make sure you have '
+            'it written down — it cannot be recovered from the app.';
+      }
+    }
+  } catch (e) {
+    AppLogger.error(
+      'EditAccountScreen',
+      'could not read what this removal destroys',
+      e,
+    );
+  }
+  return _genericAccountRemovalMessage;
+}
 
 /// Edit a single account: rename it, pick a generated (DiceBear) avatar from a
 /// candidate grid, or remove the account entirely.
@@ -49,6 +142,12 @@ class _EditAccountScreenState extends State<EditAccountScreen> {
   String _selectedSeed = '';
   List<String> _candidateSeeds = const [];
   bool _loading = true;
+
+  /// A removal is in flight. `removeAccount` returns null for "nothing
+  /// matched", which this screen reads as "no wallets remain" and turns into a
+  /// logout — so a second tap landing while the first removal is still awaiting
+  /// would sign the user out of a device that still holds wallets.
+  bool _removing = false;
 
   /// The fully-loaded account, kept so the toggle section can read its wallets,
   /// seed phrase, and derivation index.
@@ -260,7 +359,24 @@ class _EditAccountScreenState extends State<EditAccountScreen> {
     if (_selectedSeed != _originalSeed && _selectedSeed.isNotEmpty) {
       await repo.updateAccountAvatarSeed(widget.accountId, _selectedSeed);
     }
-    await _applyAddressToggles(repo);
+    var applied = false;
+    try {
+      applied = await _applyAddressToggles(repo);
+    } catch (e) {
+      // The toggles are the only step that runs after the name and avatar have
+      // already been written, so an error escaping here would leave the button
+      // callback with an unhandled exception: no message, no pop, and a screen
+      // still showing a diff that did not land. Treat it as "not applied" so
+      // the account is re-read below and the toggles show what is really on it.
+      AppLogger.error('EditAccountScreen', 'address toggles failed', e);
+      if (!mounted) return;
+      AppSnackBar.show(
+        context,
+        'Could not update your addresses.',
+        type: AppSnackBarType.error,
+      );
+      applied = false;
+    }
     // If this is the active session account, refresh its cached copy so the
     // session-backed headers (home header, drawer header) pick up the new
     // name/avatar — they read identity from SessionManager, not the DB.
@@ -268,100 +384,200 @@ class _EditAccountScreenState extends State<EditAccountScreen> {
     if (!mounted) return;
     sl<AccountWalletBloc>().add(const AccountWalletEvent.load());
     DrawerSignal.reloadDrawerOnReturn = true;
+    if (!applied) {
+      // A toggle was refused (the snack bar said so), so this is not a
+      // completed save and must not pop like one. The name, avatar and any
+      // chain added before the refusal did land, so drop the staged diff and
+      // re-read the account: the toggles then show what is really on it.
+      setState(_desiredEnabled.clear);
+      await _load();
+      return;
+    }
     context.pop();
   }
 
   /// Persist the staged per-chain toggles: derive + add newly-enabled chains
-  /// (reusing the import path) and remove newly-disabled ones. If a removed
-  /// wallet was the active one, switch the session to its replacement — this is
-  /// the only point a re-auth can fire, mirroring the "Remove account" flow.
-  Future<void> _applyAddressToggles(WalletRepository repo) async {
+  /// (reusing the import path), then remove every newly-disabled one in a
+  /// single all-or-nothing repository call. If a removed wallet was the active
+  /// one, switch the session to its replacement — this is the only point a
+  /// re-auth can fire, mirroring the "Remove account" flow.
+  ///
+  /// Returns false when a change was refused, so the caller can keep the user
+  /// here instead of popping as a successful save. Additions run first and are
+  /// not part of the removals' all-or-nothing set: they only ever add a wallet
+  /// the user asked for, so keeping one costs nothing. An addition can still
+  /// be refused on its own — importing an address a view-only wallet already
+  /// holds supersedes that wallet, and pruning it from the recovery graph is
+  /// the commit point of its removal — so a [GraphSyncException] there leaves
+  /// that chain unadded and stops the rest of the diff.
+  Future<bool> _applyAddressToggles(WalletRepository repo) async {
     final account = _account;
-    if (account == null || _desiredEnabled.isEmpty) return;
+    if (account == null || _desiredEnabled.isEmpty) return true;
     final seedPhraseId = account.seedPhraseId;
     final index = account.derivationIndex;
-    if (seedPhraseId == null || index == null) return;
+    if (seedPhraseId == null || index == null) return true;
 
     final activeBefore = await repo.getActiveWallet();
-    var activeRemoved = false;
 
+    final removing = <WalletInfo>[];
     for (final entry in _desiredEnabled.entries) {
       final chain = entry.key;
       final existing = account.walletForChain(chain);
       if (entry.value && existing == null) {
         final address = _addressForChain(chain);
         if (address == null || address.isEmpty) continue;
-        await repo.importAccountsFromPhrase(seedPhraseId, [
-          WalletImportSelection(index: index, chain: chain, address: address),
-        ]);
+        try {
+          await repo.importAccountsFromPhrase(seedPhraseId, [
+            WalletImportSelection(index: index, chain: chain, address: address),
+          ]);
+        } on GraphSyncException {
+          // The import superseded a view-only wallet on this address and could
+          // not prune it from the recovery graph — the commit point of that
+          // removal — so this chain was not added. Stop before the removals
+          // rather than deleting wallets on top of a half-applied diff; the
+          // caller re-reads the account, so the toggles show what really is on
+          // it instead of the edit the user did not get.
+          if (mounted) {
+            AppSnackBar.show(
+              context,
+              'Could not update recovery data. The address was not added.',
+              type: AppSnackBarType.error,
+            );
+          }
+          return false;
+        }
       } else if (!entry.value && existing != null) {
-        if (activeBefore?.id == existing.id) activeRemoved = true;
-        await repo.removeWallet(existing.id);
+        removing.add(existing);
       }
+    }
+    if (removing.isEmpty) return true;
+
+    final String? replacementId;
+    try {
+      replacementId = await repo.removeWallets(removing.map((w) => w.id));
+    } on GraphSyncException {
+      // One graph write is the commit point for the whole set, so none of
+      // these wallets was removed.
+      if (mounted) {
+        AppSnackBar.show(
+          context,
+          'Could not update recovery data. Nothing was removed.',
+          type: AppSnackBarType.error,
+        );
+      }
+      return false;
     }
 
-    if (activeRemoved) {
-      final active = await repo.getActiveWallet();
-      if (active != null) {
-        await sl<WalletManager>().switchWalletById(active.id);
-      }
+    // The in-memory ownership proofs go with the rows; disk is the repo's.
+    for (final removed in removing) {
+      sl<AuthService>().forgetWalletSig(removed.address);
     }
+
+    final activeRemoved = removing.any((w) => w.id == activeBefore?.id);
+    if (activeRemoved && replacementId != null) {
+      await sl<WalletManager>().switchWalletById(replacementId);
+    }
+    return true;
   }
 
   Future<void> _onRemove() async {
-    // The device must always retain at least one account; refuse to remove the
-    // last one. (Resetting the app is the only way to clear everything.)
-    final accounts = await sl<WalletRepository>().getAccountViews();
-    if (!mounted) return;
-    if (accounts.length <= 1) {
-      AppSnackBar.show(context, 'Your device needs at least one account.');
-      return;
-    }
+    if (_removing) return;
+    setState(() => _removing = true);
+    try {
+      // The device must always retain at least one account; refuse to remove
+      // the last one. (Resetting the app is the only way to clear everything.)
+      final accounts = await sl<WalletRepository>().getAccountViews();
+      if (!mounted) return;
+      if (accounts.length <= 1) {
+        AppSnackBar.show(context, 'Your device needs at least one account.');
+        return;
+      }
 
-    final confirmed = await showConfirmSheet(
-      context,
-      title: 'Remove account?',
-      message:
-          'This account and all of its wallets will be removed from your '
-          'device. Make sure you have backed up your recovery phrase before '
-          'proceeding.',
-      confirmLabel: 'Remove',
-      destructive: true,
-    );
-    if (confirmed != true || !mounted) return;
+      final removedMatch = accounts.where((a) => a.id == widget.accountId);
+      if (removedMatch.isEmpty) {
+        // The account is already gone — removed from the list screen, or by a
+        // toggle that emptied it. There is nothing left to remove and nothing
+        // left to edit, so leave rather than sit on a dead button. [_load]
+        // pops for the same reason when it can't find the account at all.
+        context.pop();
+        return;
+      }
+      final message = await accountRemovalMessage(
+        sl<WalletRepository>(),
+        removedMatch.first,
+      );
+      if (!mounted) return;
 
-    // Did this account hold the active signing wallet? Determines whether the
-    // session must be reconciled vs. just refreshing the drawer.
-    final activeBefore = await sl<WalletRepository>().getActiveWallet();
-    final removedMatch = accounts.where((a) => a.id == widget.accountId);
-    final removedActive =
-        activeBefore != null &&
-        removedMatch.isNotEmpty &&
-        removedMatch.first.wallets.any((w) => w.id == activeBefore.id);
+      final confirmed = await showConfirmSheet(
+        context,
+        title: 'Remove account?',
+        message: message,
+        confirmLabel: 'Remove',
+        destructive: true,
+      );
+      if (confirmed != true || !mounted) return;
 
-    final replacementId = await sl<WalletRepository>().removeAccount(
-      widget.accountId,
-    );
-    if (!mounted) return;
+      // Open decision, deliberately not implemented: removing the last wallet
+      // of a Seed Vault seed could also drop this app's authorization for that
+      // seed, so it stops lingering in the user's Seed Vault settings. It is
+      // not obviously right — the user may be removing one account and keeping
+      // another from the same seed on a later import — so nothing here
+      // deauthorizes anything.
 
-    if (replacementId == null) {
-      // No wallets remain — clear selection and let the router redirect.
-      await sl<WalletManager>().clearWalletSelection();
-      await sl<AuthStateNotifier>().onLogout();
-    } else {
-      if (removedActive) {
-        // Re-resolve the session: a Profile that lost its last held wallet
-        // drops to Account mode (clearing its now-orphaned identity), else a
-        // survivor is activated. Fires onWalletChanged → drawer reload.
-        await sl<SessionManager>().reconcileAfterRemoval(replacementId);
-      } else {
-        // Session untouched — broadcast so the drawer drops the deleted account.
-        await sl<WalletManager>().notifyWalletDataChanged();
+      // Did this account hold the active signing wallet? Determines whether
+      // the session must be reconciled vs. just refreshing the drawer.
+      final activeBefore = await sl<WalletRepository>().getActiveWallet();
+      final removedActive =
+          activeBefore != null &&
+          removedMatch.first.wallets.any((w) => w.id == activeBefore.id);
+
+      final String? replacementId;
+      try {
+        replacementId = await sl<WalletRepository>().removeAccount(
+          widget.accountId,
+        );
+      } on GraphSyncException {
+        // The recovery-graph write is the commit point of a removal; when it
+        // fails nothing has been deleted.
+        if (mounted) {
+          AppSnackBar.show(
+            context,
+            'Could not update recovery data. Nothing was removed.',
+            type: AppSnackBarType.error,
+          );
+        }
+        return;
+      }
+      // The in-memory ownership proofs go with the rows; disk is the repo's.
+      for (final w in removedMatch.expand((a) => a.wallets)) {
+        sl<AuthService>().forgetWalletSig(w.address);
       }
       if (!mounted) return;
-      sl<AccountWalletBloc>().add(const AccountWalletEvent.load());
-      DrawerSignal.reloadDrawerOnReturn = true;
-      context.pop();
+
+      if (replacementId == null) {
+        // No wallets remain — clear selection and let the router redirect.
+        await sl<WalletManager>().clearWalletSelection();
+        await sl<AuthStateNotifier>().onLogout();
+      } else {
+        if (removedActive) {
+          // Re-resolve the session: a Profile that lost its last held wallet
+          // drops to Account mode (clearing its now-orphaned identity), else a
+          // survivor is activated. Fires onWalletChanged → drawer reload.
+          await sl<SessionManager>().reconcileAfterRemoval(replacementId);
+        } else {
+          // Session untouched — broadcast so the drawer drops the deleted
+          // account.
+          await sl<WalletManager>().notifyWalletDataChanged();
+        }
+        if (!mounted) return;
+        sl<AccountWalletBloc>().add(const AccountWalletEvent.load());
+        DrawerSignal.reloadDrawerOnReturn = true;
+        context.pop();
+      }
+    } finally {
+      // Re-arm only while the screen is still here — a refused removal or a
+      // cancelled sheet. The paths that succeed take the screen away.
+      if (mounted) setState(() => _removing = false);
     }
   }
 
@@ -422,6 +638,14 @@ class _EditAccountScreenState extends State<EditAccountScreen> {
                               onToggle: _onToggleChain,
                             ),
                           ],
+                          if (_account?.kind == AccountKind.seedVault) ...[
+                            const SizedBox(height: 24),
+                            ManageInSeedVaultRow(
+                              addresses: [
+                                for (final w in _account!.wallets) w.address,
+                              ],
+                            ),
+                          ],
                         ],
                       ),
                     ),
@@ -431,6 +655,7 @@ class _EditAccountScreenState extends State<EditAccountScreen> {
                     label: 'Remove account',
                     variant: MallowButtonVariant.danger,
                     isFullWidth: true,
+                    enabled: !_removing,
                     onPressed: _onRemove,
                   ),
                   const SizedBox(height: 12),

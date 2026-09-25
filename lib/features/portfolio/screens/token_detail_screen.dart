@@ -15,6 +15,7 @@ import '../../swap/widgets/swap_sheet.dart';
 import '../../../shared/utils/address_utils.dart';
 import '../../../shared/utils/token_image_utils.dart';
 import '../../../core/config/remote_config.dart';
+import '../../../core/config/store_build.dart';
 import '../../../shared/widgets/animated_tab_content.dart';
 import '../../../shared/widgets/chain_support_guard.dart';
 import '../../../shared/widgets/app_snack_bar.dart';
@@ -630,35 +631,38 @@ class _ActionBar extends StatelessWidget {
                   // Swap is Jupiter-backed and Solana-only; Ethereum/Tezos have
                   // no swap route yet (cross-chain swap is planned), so the
                   // button is disabled for them rather than opening a sheet that
-                  // can't quote or execute.
-                  Expanded(
-                    child: MallowButton(
-                      label: 'Swap',
-                      // Keyed off the same capability matrix as the session
-                      // gate, but on the *token's* chain: this button is about
-                      // whether this asset can be swapped, not whether the
-                      // session could swap something else.
-                      enabled: AppFlow.tokenSwap.isImplemented(token.chain),
-                      onDisabledTap: () => AppSnackBar.show(
-                        context,
-                        'Swap is only available on '
-                        '${flowChainsLabel(AppFlow.tokenSwap)} — '
-                        '${token.chain.label} tokens cannot be swapped yet.',
+                  // can't quote or execute. A store build that drops swap
+                  // ([showSwap]) removes it outright and leaves Send alone.
+                  if (showSwap) ...[
+                    Expanded(
+                      child: MallowButton(
+                        label: 'Swap',
+                        // Keyed off the same capability matrix as the session
+                        // gate, but on the *token's* chain: this button is about
+                        // whether this asset can be swapped, not whether the
+                        // session could swap something else.
+                        enabled: AppFlow.tokenSwap.isImplemented(token.chain),
+                        onDisabledTap: () => AppSnackBar.show(
+                          context,
+                          'Swap is only available on '
+                          '${flowChainsLabel(AppFlow.tokenSwap)} — '
+                          '${token.chain.label} tokens cannot be swapped yet.',
+                        ),
+                        onPressed: () async {
+                          if (await guardViewOnly(context)) return;
+                          if (!context.mounted) return;
+                          unawaited(
+                            showSwapSheet(
+                              context,
+                              initialSellToken: token,
+                              initialBuyToken: _swapBuyToken(token),
+                            ),
+                          );
+                        },
                       ),
-                      onPressed: () async {
-                        if (await guardViewOnly(context)) return;
-                        if (!context.mounted) return;
-                        unawaited(
-                          showSwapSheet(
-                            context,
-                            initialSellToken: token,
-                            initialBuyToken: _swapBuyToken(token),
-                          ),
-                        );
-                      },
                     ),
-                  ),
-                  const SizedBox(width: MallowTheme.spacingMd),
+                    const SizedBox(width: MallowTheme.spacingMd),
+                  ],
                   Expanded(
                     child: MallowButton(
                       label: 'Send',
@@ -675,7 +679,11 @@ class _ActionBar extends StatelessWidget {
                         if (!context.mounted) return;
                         unawaited(showSendSheet(context, initialToken: token));
                       },
-                      variant: MallowButtonVariant.secondary,
+                      // Secondary only next to Swap. Alone it is this sheet's
+                      // one action, so it takes the primary treatment.
+                      variant: showSwap
+                          ? MallowButtonVariant.secondary
+                          : MallowButtonVariant.primary,
                     ),
                   ),
                 ],

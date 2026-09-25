@@ -13,12 +13,14 @@ class ArtworkSubjectHeader extends StatelessWidget {
     super.key,
     this.imageUrl,
     this.username,
+    this.imageHeight = 144,
     this.nsfw = false,
   });
 
   final String title;
   final String? imageUrl;
   final String? username;
+  final double imageHeight;
 
   /// Moderation flag: blurs the preview (with an eye-icon reveal) unless the
   /// viewer's show-NSFW setting is on.
@@ -35,6 +37,7 @@ class ArtworkSubjectHeader extends StatelessWidget {
         if (image != null && image.isNotEmpty) ...[
           ArtworkSheetImage(
             imageUrl: image,
+            height: imageHeight,
             nsfw: nsfw,
             borderRadius: BorderRadius.circular(MallowTheme.radiusPrimary),
           ),

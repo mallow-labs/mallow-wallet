@@ -25,29 +25,47 @@ class SearchRepository {
   // Text search
   // ---------------------------------------------------------------------------
 
-  /// Search for [query] across all sections in parallel.
-  ///
-  /// Returns a [SearchResults] with whatever sections succeeded.
-  /// Individual section failures are swallowed so a single broken endpoint
-  /// doesn't clear the entire result.
-  Future<SearchResults> search(String query) async {
-    final results = await Future.wait([
-      _searchMallow(query),
-      _searchCurations(query),
-      _searchTokens(query),
-    ]);
+  /// Searches all endpoints in parallel, publishing accumulated results as
+  /// each finishes. A failed endpoint does not discard other sections.
+  Future<SearchResults> search(
+    String query, {
+    void Function(SearchResults)? onUpdate,
+  }) async {
+    _MallowResults? mallow;
+    var curations = <SearchCurationResult>[];
+    var tokens = <SearchTokenResult>[];
+    final pending = SearchSource.values.toSet();
 
-    final mallowResults = results[0] as _MallowResults?;
-    final curations = results[1] as List<SearchCurationResult>;
-    final tokens = results[2] as List<SearchTokenResult>;
-
-    return SearchResults(
-      users: mallowResults?.users ?? [],
-      artworks: mallowResults?.artworks ?? [],
-      collections: mallowResults?.collections ?? [],
+    SearchResults snapshot() => SearchResults(
+      users: mallow?.users ?? const [],
+      artworks: mallow?.artworks ?? const [],
+      collections: mallow?.collections ?? const [],
       curations: curations,
       tokens: tokens,
+      pendingSources: Set.unmodifiable(pending),
     );
+
+    void completed(SearchSource source) {
+      pending.remove(source);
+      // The final snapshot is returned to the caller below.
+      if (pending.isNotEmpty) onUpdate?.call(snapshot());
+    }
+
+    await Future.wait([
+      _searchMallow(query).then((value) {
+        mallow = value;
+        completed(SearchSource.mallow);
+      }),
+      _searchCurations(query).then((value) {
+        curations = value;
+        completed(SearchSource.curations);
+      }),
+      _searchTokens(query).then((value) {
+        tokens = value;
+        completed(SearchSource.tokens);
+      }),
+    ]);
+    return snapshot();
   }
 
   // ---------------------------------------------------------------------------

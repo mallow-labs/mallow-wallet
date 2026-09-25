@@ -23,6 +23,7 @@ import 'package:mallow_api/mallow_api.dart'
 import '../../../core/network/auth_service.dart';
 import '../../../core/realtime/account_realtime_service.dart';
 import '../../../core/result/result.dart';
+import '../../../shared/utils/synthetic_master.dart';
 import '../../../di.dart';
 import 'artwork_edited_signal.dart';
 import 'artwork_hidden_signal.dart';
@@ -893,7 +894,9 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
     // so a bid / list / cancel that lands during the fetch isn't dropped in the
     // gap (neither socket replays). The post-fetch prime + existence-reconcile
     // remain the backstop that catches up whatever changed before we loaded.
-    unawaited(_subscribeDerivedPdasEarly(event.mintAccount));
+    if (!isSyntheticSolanaMaster(event.mintAccount)) {
+      unawaited(_subscribeDerivedPdasEarly(event.mintAccount));
+    }
 
     final result = await Result.guard(
       () => _repository.getArtworkDetail(event.mintAccount),
@@ -1159,6 +1162,10 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
   /// [prime] false on refreshes — the byMint payload and the live WS push
   /// already cover the bid state, so a fresh snapshot would only duplicate it.
   void _syncLiveOverlay(ArtworkDetails value, {bool prime = true}) {
+    if (isSyntheticSolanaMaster(value.mintAccount)) {
+      _resubscribe(const {});
+      return;
+    }
     _syncAccountSubscriptions(value);
     if (!prime) return;
     final mint = value.auctionMetadata != null ? value.mintAccount : null;
@@ -1170,6 +1177,10 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
   /// Open/close `/v2/ws/accounts` subscriptions so we're watching exactly the
   /// auction-config + listing PDAs the current artwork exposes.
   void _syncAccountSubscriptions(ArtworkDetails value) {
+    if (isSyntheticSolanaMaster(value.mintAccount)) {
+      _resubscribe(const {});
+      return;
+    }
     final keys = <String>{};
     final auctionAccount = value.auctionMetadata?.auctionAccount;
     if (auctionAccount != null && auctionAccount.isNotEmpty) {
@@ -1218,6 +1229,7 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
   /// Best-effort — derivation failure just leaves the post-fetch sync + prime
   /// to open them.
   Future<void> _subscribeDerivedPdasEarly(String mint) async {
+    if (isSyntheticSolanaMaster(mint)) return;
     if (mint.isEmpty) return;
     try {
       final listingPda = await _marketAccounts.deriveListingPda(mint);
@@ -1582,6 +1594,7 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
   /// reconcile (synthesize missed + drift + clear). Excludes editions, raffles,
   /// grouped sales, and external-marketplace listing types.
   bool _eligibleForExistenceRecon(ArtworkDetails a) {
+    if (isSyntheticSolanaMaster(a.mintAccount)) return false;
     if (a.supplyType != SupplyType.oneOfOne) return false;
     if (a.isMasterEdition == true) return false;
     if (a.raffleMetadata != null) return false;

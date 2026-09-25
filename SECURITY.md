@@ -38,7 +38,8 @@ that is our job, and we would rather assess ten non-issues than miss one.
 Test against other people's wallets or funds, or against our production
 infrastructure in a way that degrades it for real users. Use your own wallets
 and your own test funds. Everything you need to run the app against your own
-backend is in the README.
+backend is in [docs/backend.md](docs/backend.md) and
+[docs/configuration.md](docs/configuration.md).
 
 ## Scope
 

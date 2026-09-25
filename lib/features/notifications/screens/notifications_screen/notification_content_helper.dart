@@ -656,6 +656,104 @@ class NotificationContentHelper {
           linkPath: '/stake',
           linkLabel: 'Claim SMORES',
         );
+      // ---- Subscriptions ----
+      case api.NotificationType.subscribedCreatorListedArtwork:
+        final nft = data['nft'] as Map<String, dynamic>?;
+        final creator = _actor(
+          data['creatorUser'] as Map<String, dynamic>?,
+          data['creator'] as String?,
+        );
+        final price = _price(data, 'price');
+        // An auction's price is its reserve and a raffle's is a ticket, so a
+        // flat "for X" would misstate both — mirrors the webapp's priceLabel.
+        final listingType = data['listingType'] as String?;
+        final priceLabel = switch (listingType) {
+          'auction' => 'Starting at $price',
+          'raffle' => 'Tickets $price',
+          _ => 'for $price',
+        };
+        // A grouped sale stands in for a whole drop, so it names the group and
+        // quotes the cheapest tier — "from", never "for".
+        final groupName = data['groupName'] as String?;
+        final itemCount = (data['itemCount'] as num?)?.toInt();
+        final groupPriceLabel =
+            listingType == 'auction' || listingType == 'raffle'
+            ? priceLabel
+            : 'from $price';
+        return NotificationContents(
+          title: '$creator listed new work',
+          message: groupName != null
+              ? '"$groupName" — $itemCount work${itemCount == 1 ? '' : 's'}, '
+                    '$groupPriceLabel'
+              : nft != null
+              ? '"${_nftName(nft)}" $priceLabel'
+              : null,
+          linkPath: _artworkLink(nft),
+          linkLabel: nft != null ? 'View artwork' : null,
+        );
+      case api.NotificationType.subscribedCreatorGumballLive:
+        final gumball = data['gumball'] as Map<String, dynamic>?;
+        final creator = _actor(
+          data['creatorUser'] as Map<String, dynamic>?,
+          data['creator'] as String?,
+        );
+        return NotificationContents(
+          title: '$creator launched a Gumball',
+          message: _launchMessage(
+            _getGumballName(gumball),
+            data['startsAt'] as String?,
+          ),
+          linkPath: _gumballLink(gumball),
+          linkLabel: gumball?['publicKey'] != null ? 'View Gumball' : null,
+        );
+      case api.NotificationType.subscribedCreatorJellybeanLive:
+        final jellybean = data['jellybean'] as Map<String, dynamic>?;
+        final creator = _actor(
+          data['creatorUser'] as Map<String, dynamic>?,
+          data['creator'] as String?,
+        );
+        final publicKey = jellybean?['publicKey'] as String?;
+        return NotificationContents(
+          title: '$creator launched a jellybean',
+          message: _launchMessage(
+            _getGumballName(jellybean),
+            data['startsAt'] as String?,
+          ),
+          linkPath: publicKey != null ? '/jellybean/$publicKey' : null,
+          linkLabel: publicKey != null ? 'View Jellybean' : null,
+        );
+      case api.NotificationType.subscribedCreatorPosted:
+        final creator = _actor(
+          data['creatorUser'] as Map<String, dynamic>?,
+          data['creator'] as String?,
+        );
+        final postId = data['postId'] as String?;
+        return NotificationContents(
+          title: '$creator posted',
+          message: data['title'] as String?,
+          linkPath: postId != null ? '/p/$postId' : null,
+          linkLabel: postId != null ? 'View post' : null,
+        );
+      case api.NotificationType.newSubscriber:
+        final actorUser = data['actorUser'] as Map<String, dynamic>?;
+        final link = _userLink(actorUser);
+        return NotificationContents(
+          title: '${_actor(actorUser, null)} subscribed to you',
+          linkPath: link,
+          linkLabel: link != null ? 'View profile' : null,
+        );
+      case api.NotificationType.newSubscribers:
+        final actorUser = data['actorUser'] as Map<String, dynamic>?;
+        final actorCount = (data['actorCount'] as num?)?.toInt() ?? 2;
+        final others = actorCount - 1;
+        final link = _userLink(actorUser);
+        return NotificationContents(
+          title:
+              '${_actor(actorUser, null)} and $others other'
+              '${others > 1 ? 's' : ''} subscribed to you',
+          linkPath: link,
+          linkLabel: link != null ? 'View profile' : null,
+        );
       case api.NotificationType.test:
         return NotificationContents(
           title: 'Test notification',
@@ -805,6 +903,28 @@ class NotificationContentHelper {
     if (address == null || address.isEmpty) return null;
     return truncateAddress(address);
   }
+
+  /// `"Name" — Starts Jan 2 at 3:04 PM UTC`, dropping whichever half is absent.
+  ///
+  /// A gumball or jellybean can go live with no start date at all, so the date
+  /// is never assumed — mirrors the webapp's `formatNotificationStartsAt`,
+  /// which renders the instant in UTC rather than device-local time so the copy
+  /// matches what the creator scheduled.
+  static String? _launchMessage(String? name, String? startsAt) {
+    final parts = <String>[
+      if (name != null) '"$name"',
+      if (startsAt != null)
+        ...() {
+          final parsed = DateTime.tryParse(startsAt);
+          return parsed == null
+              ? const <String>[]
+              : ['Starts ${_startsAtFormat.format(parsed.toUtc())} UTC'];
+        }(),
+    ];
+    return parts.isEmpty ? null : parts.join(' — ');
+  }
+
+  static final DateFormat _startsAtFormat = DateFormat("MMM d 'at' h:mm a");
 
   static String? _getGumballName(Map<String, dynamic>? gumball) {
     if (gumball == null) return null;

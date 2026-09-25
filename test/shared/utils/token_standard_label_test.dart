@@ -45,5 +45,12 @@ void main() {
       expect(tokenStandardLabelFromWire('future-standard'), 'future-standard');
       expect(tokenStandardLabelFromWire(''), '');
     });
+
+    test(
+      'neutral synthetic-master standard never renders as raw wire text',
+      () {
+        expect(tokenStandardLabelFromWire('unknown'), 'Unknown');
+      },
+    );
   });
 }

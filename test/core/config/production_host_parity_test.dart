@@ -96,21 +96,29 @@ void main() {
       expect(toDirectUrl('ipfs://$cid'), 'https://ipfs.example.com/ipfs/$cid');
     });
 
-    test('but the CDN source form always resolves to the public gateway', () {
+    test('but the CDN source form carries no gateway host at all', () {
       // 🛑 This is the string embedded in the resize path, so it IS the
-      // resizer's cache key. The web client resolves `ipfs://` through
-      // `ipfs.io` unconditionally (`getAltStorageUrl`'s first branch); sending
-      // our own host here forked every ipfs:// asset across two cache entries,
-      // and the backend warmer only ever warmed the web client's. Setting
-      // IPFS_GATEWAY_URL must NOT be able to change this.
-      expect(
-        AssetUrl.primaryGatewayUrl('ipfs://$cid'),
-        'https://ipfs.io/ipfs/$cid',
-      );
+      // resizer's cache key. It is the canonical form, which names bytes rather
+      // than a host: that is what collapses every arrival shape of one asset
+      // onto a single edge entry, and it is why IPFS_GATEWAY_URL must not be
+      // able to change this string. A build that embedded its own gateway
+      // forked each asset across two cache entries — one the backend warmed and
+      // one the app requested and never hit.
       expect(
         MallowImage.cdnUrl('ipfs://$cid', logicalPx: 175),
         'https://images.example.com/350x350/cover/'
-        '${Uri.encodeComponent('https://ipfs.io/ipfs/$cid')}?quality=50',
+        '${Uri.encodeComponent('ipfs://$cid')}?quality=50',
+      );
+    });
+
+    test('the direct ladder leads with the CONFIGURED gateway', () {
+      // Parity with the web client, which maps every IPFS shape onto the
+      // first-party gateway. That gateway is tiered — the pinned copies first,
+      // then a full IPFS node behind the same host — so it also answers CIDs
+      // this deployment never pinned, which a single mirror 404s.
+      expect(
+        AssetUrl.primaryGatewayUrl('ipfs://$cid'),
+        'https://ipfs.example.com/ipfs/$cid',
       );
     });
 

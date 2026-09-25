@@ -1,6 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_wallet/core/config/environment.dart';
-import 'package:mallow_wallet/core/utils/asset_url.dart';
 import 'package:mallow_wallet/core/utils/mallow_image.dart';
 
 /// [MallowImage] builds the CDN URLs that every artwork/token thumbnail
@@ -145,16 +144,28 @@ void main() {
   });
 
   group('MallowImage.cdnUrl — IPFS resolution', () {
-    test('rewrites ipfs:// to mallow\'s IPFS gateway before encoding', () {
+    test('embeds the canonical ipfs:// form, not a gateway URL', () {
+      const cid = 'bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim';
+      final url = MallowImage.cdnUrl('ipfs://$cid/file.png', logicalPx: 100);
+      // The embedded string is the resizer's cache key, so it must name the
+      // bytes rather than a gateway: any host in there fragments one asset
+      // across an edge entry per gateway the app happens to prefer.
+      expect(
+        Uri.decodeComponent(url.split('/').last.split('?').first),
+        'ipfs://$cid/file.png',
+      );
+    });
+
+    test('leaves an unrecognised ipfs:// payload verbatim', () {
+      // `QmHashHashHash` is not a CID, so there is nothing to collapse onto —
+      // the canonicaliser hands the string back untouched rather than guessing.
       final url = MallowImage.cdnUrl(
         'ipfs://QmHashHashHash/file.png',
         logicalPx: 100,
       );
-      // Must match what AssetUrl hands direct fetches, so the CDN and the
-      // app agree on one gateway instead of splitting across two.
       expect(
         Uri.decodeComponent(url.split('/').last.split('?').first),
-        '${AssetUrl.mallowIpfsBase}/ipfs/QmHashHashHash/file.png',
+        'ipfs://QmHashHashHash/file.png',
       );
     });
 
@@ -199,12 +210,9 @@ void main() {
 
   /// Originals are served from R2 by images.example.com, which is dramatically
   /// faster than walking a public IPFS/Arweave gateway — so every original
-  /// fetch goes through `/original/`, on both sides of the resize-path gate
-  /// below. Sending one to a gateway instead trades the cache for a cold
-  /// third-party fetch that also 403s/404s far more often.
+  /// fetch goes through `/original/`. Sending one to a gateway instead trades
+  /// the cache for a cold third-party fetch that also 403s/404s far more often.
   group('MallowImage.originalUrl', () {
-    tearDown(() => Config.canonicalAssetUrls = false);
-
     test('routes ipfs:// through /original/, not the gateway', () {
       expect(
         MallowImage.originalUrl('ipfs://QmHash/file.png'),
@@ -220,41 +228,19 @@ void main() {
       );
     });
 
-    test('is not gated on the resize-path canonical flag', () {
-      const txid = 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx';
-      final whileOff = MallowImage.originalUrl('https://arweave.net/$txid');
-      Config.canonicalAssetUrls = true;
-      expect(MallowImage.originalUrl('https://arweave.net/$txid'), whileOff);
-    });
-
     test('returns empty input unchanged', () {
       expect(MallowImage.originalUrl(''), '');
     });
   });
 
   /// The canonical form is the Cloudflare/R2 cache key for every asset the app
-  /// renders: emitting the gateway form instead
-  /// splits one asset across an edge entry per gateway, which is precisely the
-  /// fragmentation this rollout exists to remove. The gate now reads
-  /// `--dart-define` then `.env`, so both sides of it have to keep working, and
-  /// the default with neither set must stay off.
-  group('MallowImage — canonical resize-path gate', () {
-    tearDown(() => Config.canonicalAssetUrls = false);
-
-    test('defaults to off so a build never ramps itself', () {
-      expect(Config.canonicalAssetUrls, isFalse);
-    });
-
-    test('off: resize URLs keep embedding the resolved gateway URL', () {
-      final url = MallowImage.cdnUrl('ipfs://QmHash/file.png', logicalPx: 100);
-      expect(
-        Uri.decodeComponent(url.split('/').last.split('?').first),
-        '${AssetUrl.mallowIpfsBase}/ipfs/QmHash/file.png',
-      );
-    });
-
-    test('on: resize URLs embed the canonical scheme-native form', () {
-      Config.canonicalAssetUrls = true;
+  /// renders: emitting the gateway form instead splits one asset across an edge
+  /// entry per gateway, which is precisely the fragmentation this rollout
+  /// existed to remove. Unconditional since 2026-09 — the build flag that used
+  /// to gate it is gone, so a build can no longer produce the fragmented shape
+  /// at all.
+  group('MallowImage — canonical resize path', () {
+    test('resize URLs embed the canonical scheme-native form', () {
       const cid = 'bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim';
       // Both arrival shapes of the same bytes must produce the same CDN URL —
       // that collapse IS the point of the change.
@@ -270,19 +256,17 @@ void main() {
       expect(fromScheme, contains('ipfs%3A%2F%2F$cid%2F0.png'));
     });
 
-    test('on: an empty URL is still never turned into a request', () {
-      Config.canonicalAssetUrls = true;
+    test('an empty URL is still never turned into a request', () {
       expect(MallowImage.originalUrl(''), '');
       expect(MallowImage.cdnUrl('', logicalPx: 100), '');
     });
   });
 
-  /// `CANONICAL_ASSET_URLS` and `IMAGE_CDN_BASE_URL` are configured
-  /// independently and nothing cross-gates them, so "flag on, no resizer" is a
-  /// build anyone can produce. It collapses the resize path onto its no-CDN
-  /// early return, and what that returns goes straight to an image loader.
-  /// The canonical form is a cache key, not a fetchable URL: handing one back
-  /// renders the error fallback for every IPFS and Arweave asset in the app.
+  /// A build with no `IMAGE_CDN_BASE_URL` — a fork, or a local run — collapses
+  /// the resize path onto its no-CDN early return, and what that returns goes
+  /// straight to an image loader. The canonical form is a cache key, not a
+  /// fetchable URL: handing one back renders the error fallback for every IPFS
+  /// and Arweave asset in the app.
   group('MallowImage — canonical form with no CDN configured', () {
     const cid = 'bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim';
     const txid = 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx';
@@ -293,10 +277,7 @@ void main() {
         'IPFS_GATEWAY_URL': 'https://ipfs.example.com',
         'ARWEAVE_GATEWAY_URL': 'https://arweave.example.com',
       });
-      Config.canonicalAssetUrls = true;
     });
-
-    tearDown(() => Config.canonicalAssetUrls = false);
 
     test('resolves ipfs:// back to a fetchable gateway URL', () {
       expect(

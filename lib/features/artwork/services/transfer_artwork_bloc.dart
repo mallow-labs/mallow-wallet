@@ -25,6 +25,7 @@ import '../../../core/services/token_price_service.dart';
 import '../../../core/services/transaction_executor.dart';
 import '../../../shared/utils/chain.dart';
 import '../../../shared/utils/explorer_utils.dart';
+import '../../../shared/utils/synthetic_master.dart';
 import '../../send/models/eth_gas.dart';
 import '../models/on_chain_asset.dart';
 import 'evm_artwork_transfer_service.dart';
@@ -338,6 +339,18 @@ class TransferArtworkBloc
     _mint = event.mintAccount;
     _chain = event.chain;
     emit(const TransferInput());
+
+    if (isSyntheticSolanaMaster(event.mintAccount)) {
+      _unsupportedReason =
+          "This artwork type can't be transferred from the app yet.";
+      emit(
+        TransferInput(
+          isCheckingStandard: false,
+          unsupportedReason: _unsupportedReason,
+        ),
+      );
+      return;
+    }
 
     // EVM asset (`<contract>-<tokenId>`, or chain hint from the artwork model)
     // takes the ERC-721/1155 path — no Solana DAS lookup.

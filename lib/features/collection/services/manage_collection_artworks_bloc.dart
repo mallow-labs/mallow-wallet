@@ -12,6 +12,7 @@ import '../../../core/crypto/wallet_manager.dart';
 import '../../../core/models/account.dart';
 import '../../../core/result/app_failure.dart';
 import '../../../core/result/result.dart';
+import '../../../core/services/stale_tx_tracker.dart';
 import '../../../core/services/transaction_executor.dart';
 import '../../../core/services/signing_copy.dart';
 import '../../../core/session/session_manager.dart';
@@ -175,6 +176,23 @@ class ManageCollectionArtworksBloc
   /// this drives the submit-time split. Resolved in [_onStarted]; defaults to
   /// `false` (assets-only, fail-closed) when the collection can't be resolved.
   bool _parentIsCore = false;
+
+  /// Staleness recovery for the chunked membership batch.
+  ///
+  /// The backend compiles every chunk of one edit against a **single**
+  /// blockhash, and when the batch is subsidized it co-signs each chunk with
+  /// the subsidy keypair (`edit_collection_artworks`). A co-signed tx
+  /// cannot have its blockhash rewritten client-side, so once the user has
+  /// approved and *confirmed* chunk 0 — each chunk is its own approval prompt
+  /// and its own on-chain confirmation — chunk 1 can easily be past the ~60s
+  /// blockhash lifetime. Without a rebuild that fails with "Blockhash not
+  /// found" and leaves the collection edit **half applied**, with no path back:
+  /// nothing on screen says which artworks moved.
+  ///
+  /// This tracker's closure re-asks the builder, which resolves each asset's
+  /// current collection on chain and skips the moves that already landed, so
+  /// the replacement batch is the work still outstanding.
+  final _txTracker = StaleTxTracker<List<String>>();
 
   Future<void> _onStarted(
     ManageCollectionArtworksStarted event,
@@ -341,18 +359,26 @@ class ManageCollectionArtworksBloc
           ? null
           : await Ed25519HDKeyPair.random();
 
-      final response = await _apiV2.editCollectionArtworksTx(
-        EditCollectionArtworksRequest(
-          authority: authority,
-          parentCollection: collectionMint,
-          groupSigner: groupKeypair?.publicKey.toBase58(),
-          addAssets: addAssets,
-          removeAssets: removeAssets,
-          addMasterEditions: addMasterEditions,
-          removeMasterEditions: removeMasterEditions,
-        ),
-      );
-      final txs = response.result.txs.map((t) => t.tx).toList(growable: false);
+      // Tracked so the executor can re-ask for the batch when it goes stale
+      // mid-flight — see [_txTracker]. Only the builder call belongs in here:
+      // the closure is replayed, and re-running the signer switch above or
+      // re-generating `groupKeypair` would hand the executor a keypair the
+      // rebuilt `CreateGroupV1` no longer names, stranding the chunk without
+      // its required signature.
+      final txs = await _txTracker.buildAndTrack(() async {
+        final response = await _apiV2.editCollectionArtworksTx(
+          EditCollectionArtworksRequest(
+            authority: authority,
+            parentCollection: collectionMint,
+            groupSigner: groupKeypair?.publicKey.toBase58(),
+            addAssets: addAssets,
+            removeAssets: removeAssets,
+            addMasterEditions: addMasterEditions,
+            removeMasterEditions: removeMasterEditions,
+          ),
+        );
+        return response.result.txs.map((t) => t.tx).toList(growable: false);
+      });
       if (txs.isEmpty) {
         // The backend returns 200 with an empty batch when every requested move
         // is already a no-op (the builder skips already-in-target adds). That
@@ -373,6 +399,17 @@ class ManageCollectionArtworksBloc
         usdValue: null,
         flow: const FlowKey.solana(AppFlow.collectionArtworksEdit),
         additionalSigners: [?groupKeypair],
+        tracker: _txTracker,
+        // Mid-batch rebuilds are sound here only for a pure-add edit. The
+        // builder skips an asset already in the target collection and a master
+        // edition already in the destination group, so re-asking
+        // after chunk k landed returns just the moves still outstanding. It
+        // does **not** filter the remove side: `remove_assets` is re-emitted
+        // unconditionally, and `remove_master_editions` is hard-400'd with
+        // "is not a member of group" once the detach has landed. Opting in
+        // there would swap one unrecoverable error for a differently-worded
+        // one, so a batch carrying removes keeps the pre-loop-only behaviour.
+        rebuildsRemainingWork: removed.isEmpty,
         onStage: (e) {
           switch (e.stage) {
             case ExecutorStage.awaitingApproval:
@@ -412,6 +449,9 @@ class ManageCollectionArtworksBloc
       };
     });
 
+    // Terminal for this attempt either way: drop the tracked batch so a later
+    // retry rebuilds from scratch rather than replaying this one's closure.
+    _txTracker.clear();
     switch (result) {
       case ResultSuccess(:final value):
         emit(

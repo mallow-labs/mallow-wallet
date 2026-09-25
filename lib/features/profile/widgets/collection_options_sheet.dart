@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../../shared/theme/mallow_theme.dart';
+import '../../../shared/widgets/loading_indicator.dart';
 import '../../../shared/widgets/mallow_network_image.dart';
 import '../../../shared/widgets/mallow_sheet.dart';
 import '../../../shared/widgets/sheet_drag_handle.dart';
@@ -27,10 +28,13 @@ enum CollectionMenuAction {
 /// reflects [isUserHidden]; pass `null` to render no Hide row at all
 /// (e.g. while initial state is still loading).
 ///
-/// [permissionsFuture] gates the Edit/Burn rows on the on-chain DAS
+/// [permissionsFuture] gates the Add/Edit/Burn rows on the on-chain DAS
 /// roundtrip (update authority / mutability / empty-collection rules).
-/// They render disabled while it resolves — same async-slot pattern as
-/// the artwork dots menu — and only appear at all for the creator.
+/// It only applies to creators.
+///
+/// [ownedArtworksAvailableFuture] is for callers whose initial owned-artwork
+/// page is still loading. While either supplied future is pending, every action
+/// row shimmers so the menu never mixes resolved actions with placeholders.
 Future<CollectionMenuAction?> showCollectionOptionsSheet(
   BuildContext context, {
   required String title,
@@ -41,6 +45,7 @@ Future<CollectionMenuAction?> showCollectionOptionsSheet(
   String? imageUrl,
   bool? isUserHidden,
   Future<ArtworkPermissions>? permissionsFuture,
+  Future<bool>? ownedArtworksAvailableFuture,
   bool showViewCollection = false,
 }) {
   return showMallowSheet<CollectionMenuAction>(
@@ -55,6 +60,7 @@ Future<CollectionMenuAction?> showCollectionOptionsSheet(
       canDownload: canDownload,
       isUserHidden: isUserHidden,
       permissionsFuture: permissionsFuture,
+      ownedArtworksAvailableFuture: ownedArtworksAvailableFuture,
       showViewCollection: showViewCollection,
     ),
   );
@@ -70,6 +76,7 @@ class _CollectionOptionsSheet extends StatelessWidget {
     this.imageUrl,
     this.isUserHidden,
     this.permissionsFuture,
+    this.ownedArtworksAvailableFuture,
     this.showViewCollection = false,
   });
 
@@ -81,6 +88,7 @@ class _CollectionOptionsSheet extends StatelessWidget {
   final bool canDownload;
   final bool? isUserHidden;
   final Future<ArtworkPermissions>? permissionsFuture;
+  final Future<bool>? ownedArtworksAvailableFuture;
 
   /// Opt-in row shown only when the sheet is opened from a surface that is
   /// *not* the collection screen (i.e. the portfolio group drilldown), where
@@ -116,116 +124,7 @@ class _CollectionOptionsSheet extends StatelessWidget {
               child: Column(
                 children: [
                   const SizedBox(height: 12),
-                  if (showViewCollection)
-                    _MenuItem(
-                      assetPath: 'assets/icons/view_collection.svg',
-                      label: 'View collection',
-                      onTap: () => Navigator.of(
-                        context,
-                      ).pop(CollectionMenuAction.viewCollection),
-                    ),
-                  _MenuItem(
-                    assetPath: 'assets/icons/export.svg',
-                    label: 'Share collection',
-                    onTap: () =>
-                        Navigator.of(context).pop(CollectionMenuAction.share),
-                  ),
-                  if (canCast)
-                    _MenuItem(
-                      assetPath: 'assets/icons/cast.svg',
-                      label: 'Cast collection',
-                      onTap: () =>
-                          Navigator.of(context).pop(CollectionMenuAction.cast),
-                    ),
-                  // "Add to cast" only makes sense when there's already
-                  // a queue to append to.
-                  if (canCast && isCastActive)
-                    _MenuItem(
-                      assetPath: 'assets/icons/add_to_cast.svg',
-                      label: 'Add to cast',
-                      onTap: () => Navigator.of(
-                        context,
-                      ).pop(CollectionMenuAction.addToCast),
-                    ),
-                  if (canDownload)
-                    _MenuItem(
-                      assetPath: 'assets/icons/download.svg',
-                      label: 'Download artworks',
-                      onTap: () => Navigator.of(
-                        context,
-                      ).pop(CollectionMenuAction.downloadArtworks),
-                    ),
-                  if (isCreator) ...[
-                    _MenuItem(
-                      assetPath: 'assets/icons/sync.svg',
-                      label: 'Sync token',
-                      onTap: () => Navigator.of(
-                        context,
-                      ).pop(CollectionMenuAction.syncToken),
-                    ),
-                    if (isUserHidden != null)
-                      _MenuItem(
-                        assetPath: isUserHidden!
-                            ? 'assets/icons/eye.svg'
-                            : 'assets/icons/invisible.svg',
-                        label: isUserHidden! ? 'Unhide' : 'Hide',
-                        onTap: () => Navigator.of(
-                          context,
-                        ).pop(CollectionMenuAction.hideToggle),
-                      ),
-                    _MenuItem(
-                      assetPath: 'assets/icons/view_doc.svg',
-                      label: 'Export holders',
-                      onTap: () => Navigator.of(
-                        context,
-                      ).pop(CollectionMenuAction.exportHolders),
-                    ),
-                    // Edit/Burn slot in async once the DAS permission
-                    // check resolves: disabled placeholders during the
-                    // roundtrip (the viewer is already known to be the
-                    // creator), enabled only if the chain agrees —
-                    // mirrors the artwork dots menu.
-                    if (permissionsFuture != null)
-                      FutureBuilder<ArtworkPermissions>(
-                        future: permissionsFuture,
-                        builder: (context, snapshot) {
-                          final perms =
-                              snapshot.data ?? ArtworkPermissions.none;
-                          return Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              // Adding members shares the edit permission
-                              // (update authority + mutability).
-                              _MenuItem(
-                                assetPath: 'assets/icons/add_to_collection.svg',
-                                label: 'Add artworks',
-                                isDisabled: !perms.canEdit,
-                                onTap: () => Navigator.of(
-                                  context,
-                                ).pop(CollectionMenuAction.addArtworks),
-                              ),
-                              _MenuItem(
-                                assetPath: 'assets/icons/edit.svg',
-                                label: 'Edit collection',
-                                isDisabled: !perms.canEdit,
-                                onTap: () => Navigator.of(
-                                  context,
-                                ).pop(CollectionMenuAction.edit),
-                              ),
-                              _MenuItem(
-                                assetPath: 'assets/icons/burn.svg',
-                                label: 'Burn collection',
-                                isDestructive: true,
-                                isDisabled: !perms.canBurn,
-                                onTap: () => Navigator.of(
-                                  context,
-                                ).pop(CollectionMenuAction.burn),
-                              ),
-                            ],
-                          );
-                        },
-                      ),
-                  ],
+                  _buildActions(context),
                   SizedBox(height: sheetBottomInset(context)),
                 ],
               ),
@@ -235,6 +134,210 @@ class _CollectionOptionsSheet extends StatelessWidget {
       ),
     );
   }
+
+  Widget _buildActions(BuildContext context) {
+    final future = ownedArtworksAvailableFuture;
+    if (future == null) {
+      return _buildActionsWithPermissions(
+        context,
+        canCast: canCast,
+        canDownload: canDownload,
+        ownedAvailabilityPending: false,
+      );
+    }
+    return FutureBuilder<bool>(
+      future: future,
+      builder: (context, snapshot) {
+        final isPending = !snapshot.hasData && !snapshot.hasError;
+        final available = snapshot.data ?? false;
+        return _buildActionsWithPermissions(
+          context,
+          canCast: available,
+          canDownload: available,
+          ownedAvailabilityPending: isPending,
+        );
+      },
+    );
+  }
+
+  Widget _buildActionsWithPermissions(
+    BuildContext context, {
+    required bool canCast,
+    required bool canDownload,
+    required bool ownedAvailabilityPending,
+  }) {
+    final future = isCreator ? permissionsFuture : null;
+    if (future == null) {
+      return _buildActionList(
+        context,
+        canCast: canCast,
+        canDownload: canDownload,
+        ownedAvailabilityPending: ownedAvailabilityPending,
+        permissionsPending: false,
+        permissions: null,
+      );
+    }
+    return FutureBuilder<ArtworkPermissions>(
+      future: future,
+      builder: (context, snapshot) => _buildActionList(
+        context,
+        canCast: canCast,
+        canDownload: canDownload,
+        ownedAvailabilityPending: ownedAvailabilityPending,
+        permissionsPending: !snapshot.hasData && !snapshot.hasError,
+        permissions: snapshot.data ?? ArtworkPermissions.none,
+      ),
+    );
+  }
+
+  Widget _buildActionList(
+    BuildContext context, {
+    required bool canCast,
+    required bool canDownload,
+    required bool ownedAvailabilityPending,
+    required bool permissionsPending,
+    required ArtworkPermissions? permissions,
+  }) {
+    if (ownedAvailabilityPending || permissionsPending) {
+      return _CollectionActionsShimmer(
+        rowCount: _actionRowCount(
+          canCast: canCast,
+          canDownload: canDownload,
+          ownedAvailabilityPending: ownedAvailabilityPending,
+        ),
+      );
+    }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (showViewCollection)
+          _MenuItem(
+            assetPath: 'assets/icons/view_collection.svg',
+            label: 'View collection',
+            onTap: () =>
+                Navigator.of(context).pop(CollectionMenuAction.viewCollection),
+          ),
+        _MenuItem(
+          assetPath: 'assets/icons/export.svg',
+          label: 'Share collection',
+          onTap: () => Navigator.of(context).pop(CollectionMenuAction.share),
+        ),
+        if (canCast)
+          _MenuItem(
+            assetPath: 'assets/icons/cast.svg',
+            label: 'Cast collection',
+            onTap: () => Navigator.of(context).pop(CollectionMenuAction.cast),
+          ),
+        // "Add to cast" only makes sense when there's already a queue to
+        // append to.
+        if (canCast && isCastActive)
+          _MenuItem(
+            assetPath: 'assets/icons/add_to_cast.svg',
+            label: 'Add to cast',
+            onTap: () =>
+                Navigator.of(context).pop(CollectionMenuAction.addToCast),
+          ),
+        if (canDownload)
+          _MenuItem(
+            assetPath: 'assets/icons/download.svg',
+            label: 'Download artworks',
+            onTap: () => Navigator.of(
+              context,
+            ).pop(CollectionMenuAction.downloadArtworks),
+          ),
+        if (isCreator) ...[
+          _MenuItem(
+            assetPath: 'assets/icons/sync.svg',
+            label: 'Sync token',
+            onTap: () =>
+                Navigator.of(context).pop(CollectionMenuAction.syncToken),
+          ),
+          if (isUserHidden != null)
+            _MenuItem(
+              assetPath: isUserHidden!
+                  ? 'assets/icons/eye.svg'
+                  : 'assets/icons/invisible.svg',
+              label: isUserHidden! ? 'Unhide' : 'Hide',
+              onTap: () =>
+                  Navigator.of(context).pop(CollectionMenuAction.hideToggle),
+            ),
+          _MenuItem(
+            assetPath: 'assets/icons/view_doc.svg',
+            label: 'Export holders',
+            onTap: () =>
+                Navigator.of(context).pop(CollectionMenuAction.exportHolders),
+          ),
+          if (permissionsFuture != null) ...[
+            _MenuItem(
+              assetPath: 'assets/icons/add_to_collection.svg',
+              label: 'Add artworks',
+              isDisabled: !(permissions?.canEdit ?? false),
+              onTap: () =>
+                  Navigator.of(context).pop(CollectionMenuAction.addArtworks),
+            ),
+            _MenuItem(
+              assetPath: 'assets/icons/edit.svg',
+              label: 'Edit collection',
+              isDisabled: !(permissions?.canEdit ?? false),
+              onTap: () => Navigator.of(context).pop(CollectionMenuAction.edit),
+            ),
+            _MenuItem(
+              assetPath: 'assets/icons/burn.svg',
+              label: 'Burn collection',
+              isDestructive: true,
+              isDisabled: !(permissions?.canBurn ?? false),
+              onTap: () => Navigator.of(context).pop(CollectionMenuAction.burn),
+            ),
+          ],
+        ],
+      ],
+    );
+  }
+
+  int _actionRowCount({
+    required bool canCast,
+    required bool canDownload,
+    required bool ownedAvailabilityPending,
+  }) {
+    var count = (showViewCollection ? 1 : 0) + 1;
+    if (ownedAvailabilityPending) {
+      count += 2 + (isCastActive ? 1 : 0);
+    } else {
+      if (canCast) count += 1 + (isCastActive ? 1 : 0);
+      if (canDownload) count++;
+    }
+    if (isCreator) {
+      count += 2 + (isUserHidden != null ? 1 : 0);
+      if (permissionsFuture != null) count += 3;
+    }
+    return count;
+  }
+}
+
+class _CollectionActionsShimmer extends StatelessWidget {
+  const _CollectionActionsShimmer({required this.rowCount});
+
+  final int rowCount;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    key: const ValueKey('collection-actions-loading'),
+    mainAxisSize: MainAxisSize.min,
+    children: List.generate(
+      rowCount,
+      (_) => const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+        child: Row(
+          children: [
+            ShimmerBox(width: 24, height: 24),
+            SizedBox(width: 16),
+            Expanded(child: ShimmerBox(height: 16)),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 class _CollectionHeader extends StatelessWidget {
@@ -325,6 +428,7 @@ class _MenuItem extends StatelessWidget {
     final textColor = isDisabled ? baseColor.withValues(alpha: 0.4) : baseColor;
 
     return GestureDetector(
+      key: ValueKey('collection-action-$label'),
       behavior: HitTestBehavior.opaque,
       onTap: isDisabled ? null : onTap,
       child: Padding(

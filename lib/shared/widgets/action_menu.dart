@@ -1,10 +1,12 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/config/remote_config.dart';
+import '../../core/config/store_build.dart';
 import '../../core/router/app_router.dart';
 import '../../core/router/nav_bar_state.dart';
 import '../../features/cast/widgets/now_casting_bar.dart';
@@ -20,7 +22,9 @@ import 'view_only_prompt.dart';
 ///
 /// Shows quick actions grouped into "Art" (Mint, Transfer, Sell) and
 /// "Tokens" (Send, Receive, Swap) sections with an iOS-like scale + fade
-/// animation originating from the bottom-right FAB position.
+/// animation originating from the bottom-right FAB position. The paid Art rows
+/// follow [showNftCommerce] and Swap follows [showSwap], so a store build can
+/// render either section short.
 class ActionMenu {
   ActionMenu._();
 
@@ -119,7 +123,7 @@ class _ActionMenuRoute extends PopupRoute<void>
                 child: ScaleTransition(
                   scale: scaleAnim,
                   alignment: Alignment.bottomRight,
-                  child: _ActionMenuCard(
+                  child: ActionMenuCard(
                     onReceive: () {
                       final outerContext = Navigator.of(context).context;
                       Navigator.of(context).pop();
@@ -173,8 +177,11 @@ class _ActionMenuRoute extends PopupRoute<void>
   }
 }
 
-class _ActionMenuCard extends StatelessWidget {
-  const _ActionMenuCard({
+/// The popover's contents. Public only so the row set can be asserted in a
+/// widget test without standing up the root navigator the route needs.
+@visibleForTesting
+class ActionMenuCard extends StatelessWidget {
+  const ActionMenuCard({
     required this.onReceive,
     required this.onSigningNavigate,
     required this.onSwap,
@@ -208,18 +215,23 @@ class _ActionMenuCard extends StatelessWidget {
           children: [
             _ActionMenuSection(
               label: 'Art',
+              // Mint and Sell are the paid side of the marketplace and go
+              // with `kShowNftCommerce` (hidden in the iOS store build, App
+              // Store 3.1.1). Transfer is a wallet function and stays; the
+              // group keeps its heading with one row rather than re-flowing.
               items: [
-                _ActionMenuItem(
-                  icon: 'assets/icons/mint.svg',
-                  label: 'Mint',
-                  // The chooser fronts nftMint/editionMint/collectionMint,
-                  // all Solana-only — any one of them answers the gate.
-                  onTap: () => onSigningNavigate(
-                    AppRoutes.mintChooser,
-                    AppFlow.nftMint,
-                    'Minting',
+                if (showNftCommerce)
+                  _ActionMenuItem(
+                    icon: 'assets/icons/mint.svg',
+                    label: 'Mint',
+                    // The chooser fronts nftMint/editionMint/collectionMint,
+                    // all Solana-only — any one of them answers the gate.
+                    onTap: () => onSigningNavigate(
+                      AppRoutes.mintChooser,
+                      AppFlow.nftMint,
+                      'Minting',
+                    ),
                   ),
-                ),
                 _ActionMenuItem(
                   icon: 'assets/icons/send.svg',
                   label: 'Transfer',
@@ -229,16 +241,17 @@ class _ActionMenuCard extends StatelessWidget {
                     'Transferring artwork',
                   ),
                 ),
-                _ActionMenuItem(
-                  icon: 'assets/icons/shop.svg',
-                  label: 'Sell',
-                  // fixedPriceCreate and auctionCreate share a chain set.
-                  onTap: () => onSigningNavigate(
-                    AppRoutes.sellChooser,
-                    AppFlow.fixedPriceCreate,
-                    'Selling artwork',
+                if (showNftCommerce)
+                  _ActionMenuItem(
+                    icon: 'assets/icons/shop.svg',
+                    label: 'Sell',
+                    // fixedPriceCreate and auctionCreate share a chain set.
+                    onTap: () => onSigningNavigate(
+                      AppRoutes.sellChooser,
+                      AppFlow.fixedPriceCreate,
+                      'Selling artwork',
+                    ),
                   ),
-                ),
               ],
             ),
             const SizedBox(height: MallowTheme.spacing20),
@@ -255,11 +268,12 @@ class _ActionMenuCard extends StatelessWidget {
                   label: 'Receive',
                   onTap: onReceive,
                 ),
-                _ActionMenuItem(
-                  icon: 'assets/icons/data_transfer.svg',
-                  label: 'Swap',
-                  onTap: onSwap,
-                ),
+                if (showSwap)
+                  _ActionMenuItem(
+                    icon: 'assets/icons/data_transfer.svg',
+                    label: 'Swap',
+                    onTap: onSwap,
+                  ),
               ],
             ),
           ],

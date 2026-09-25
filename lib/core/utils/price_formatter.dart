@@ -302,15 +302,21 @@ class PriceFormatter {
     int maxSubDecimals = 6,
   }) {
     if (amount >= 1000000) {
-      return '${(amount / 1000000).toStringAsFixed(decimals.clamp(0, 2))}M';
+      final value = (amount / 1000000).toStringAsFixed(decimals.clamp(0, 2));
+      return '${stripTrailingZeros(value)}M';
     }
     if (amount >= 1000) {
-      return '${(amount / 1000).toStringAsFixed(decimals.clamp(0, 2))}K';
+      final value = (amount / 1000).toStringAsFixed(decimals.clamp(0, 2));
+      return '${stripTrailingZeros(value)}K';
     }
     if (amount >= 1) {
-      return amount.toStringAsFixed(decimals.clamp(0, maxBaseDecimals));
+      return stripTrailingZeros(
+        amount.toStringAsFixed(decimals.clamp(0, maxBaseDecimals)),
+      );
     }
-    return amount.toStringAsFixed(decimals.clamp(0, maxSubDecimals));
+    return stripTrailingZeros(
+      amount.toStringAsFixed(decimals.clamp(0, maxSubDecimals)),
+    );
   }
 
   /// Compact activity-price formatting: K above 1000, otherwise 4 decimals
@@ -318,7 +324,8 @@ class PriceFormatter {
   /// display units (e.g. SOL).
   static String formatCompactPrice(double price) {
     if (price >= 1000) {
-      return '${(price / 1000).toStringAsFixed(1)}K';
+      final value = stripTrailingZeros((price / 1000).toStringAsFixed(1));
+      return '${value}K';
     }
     return stripTrailingZeros(price.toStringAsFixed(4));
   }

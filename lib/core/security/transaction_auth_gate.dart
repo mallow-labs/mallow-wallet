@@ -6,6 +6,7 @@ import 'package:injectable/injectable.dart';
 import '../../shared/widgets/pin_prompt_sheet.dart';
 import '../config/remote_config.dart';
 import '../config/remote_config_service.dart';
+import '../config/store_build.dart';
 import '../router/app_router.dart';
 import '../services/sentry_service.dart';
 import 'biometric_auth.dart';
@@ -27,6 +28,14 @@ const double kTransactionAuthThresholdUsd = 100.0;
 /// to the user rather than swallowed.
 const String kUnsupportedFlowMessage =
     'This action is not supported on this network in this version of the app.';
+
+/// Copy for a `(chain, flow)` cell this store build deliberately does not
+/// offer — any cell [storeHidesFlow] answers true for. Neutral on purpose: it
+/// names no platform and no policy, which is what lets one string serve both
+/// the commerce flag and the swap flag. Shared by the route gate
+/// (`FlowGatedScreen`) and the signing backstop so a deep link and a missed
+/// entry point read the same.
+const String kStoreGatedFlowMessage = "This action isn't available in the app.";
 
 /// Bland fallback for a killed cell whose operator message is empty.
 ///
@@ -87,13 +96,24 @@ class TransactionAuthOutcome {
 /// static and no-ops without a DSN.
 typedef UnsupportedFlowReporter = void Function(FlowKey flow);
 
-void _reportUnsupportedFlowToSentry(FlowKey flow) {
+/// The one fail-loud report for a cell no gate should have let a user reach.
+///
+/// Shared with the tap-level entry gate (`guardFlowDisabled`) so a missed CTA
+/// and a missed backstop land as the same Sentry issue shape. [caughtBy] names
+/// the gate that stopped it, which is what says how far the bug got: the entry
+/// gate means one CTA was rendered that should have been hidden, the signing
+/// backstop means every gate above it missed as well.
+void reportUnsupportedFlow(
+  FlowKey flow, {
+  String caughtBy = 'the signing backstop',
+}) {
   unawaited(
     SentryService.captureException(
-      StateError('Unsupported flow cell reached the signing backstop: $flow'),
+      StateError('Unsupported flow cell reached $caughtBy: $flow'),
       message:
-          'A UI surface offered $flow, which this build does not implement. '
-          'The entry gate that should have hidden it is missing or wrong.',
+          'A UI surface offered $flow, which this build does not implement or '
+          'does not offer. The entry gate that should have hidden it is '
+          'missing or wrong.',
       extras: {'chain': flow.chain.toDbString(), 'flow': flow.flow.wire},
     ),
   );
@@ -126,7 +146,7 @@ class TransactionAuthGate {
         biometric,
         storage,
         remoteConfig,
-        _reportUnsupportedFlowToSentry,
+        reportUnsupportedFlow,
       );
 
   /// Test seam for the fail-loud report.
@@ -160,21 +180,23 @@ class TransactionAuthGate {
   /// auth is disabled, the value is below the configured threshold, OR
   /// step-up auth succeeded.
   ///
-  /// [flow] is the `(chain, flow)` cell this transaction belongs to. Both flow
-  /// gates run on it **before anything else** — the local `isImplemented` arm,
-  /// then the remote kill switch. See the comment in the body; moving either
-  /// below the early returns would silently disarm the backstop.
+  /// [flow] is the `(chain, flow)` cell this transaction belongs to. All three
+  /// flow gates run on it **before anything else** — the local `isImplemented`
+  /// arm, then the remote kill switch, then the store gate. See the comment in
+  /// the body; moving any of them below the early returns would silently
+  /// disarm the backstop.
   Future<TransactionAuthOutcome> authorize({
     required double? usdValue,
     required FlowKey flow,
   }) async {
-    // ── THE TWO FLOW GATES — NOTHING MAY RUN BEFORE THEM ──
-    // The local `isImplemented` arm first, the remote kill switch second.
-    // Both early returns below (the master opt-in, which is OFF BY DEFAULT,
-    // and the sub-threshold short-circuit) return `allowed`. A kill check
-    // placed after either is inert for every user who hasn't turned step-up
-    // auth on — i.e. most of them — and still passes casual testing, because
-    // testers have it on. Do not move either of them below this point.
+    // ── THE THREE FLOW GATES — NOTHING MAY RUN BEFORE THEM ──
+    // The local `isImplemented` arm first, the remote kill switch second, the
+    // compile-time store gate third. Both early returns below (the master
+    // opt-in, which is OFF BY DEFAULT, and the sub-threshold short-circuit)
+    // return `allowed`. A check placed after either is inert for every user
+    // who hasn't turned step-up auth on — i.e. most of them — and still passes
+    // casual testing, because testers have it on. Do not move any of them
+    // below this point.
     if (!flow.flow.isImplemented(flow.chain)) {
       // The UI should never have offered this cell. That is a bug, not
       // a routine rejection — report it and surface a visible error rather
@@ -192,6 +214,14 @@ class TransactionAuthGate {
       return TransactionAuthOutcome.flowDisabled(
         killed.isEmpty ? kFlowDisabledFallbackMessage : killed,
       );
+    }
+    // Store gate: the flags behind `storeHidesFlow` are compile-time, so a
+    // hidden cell reaching signing means an entry point was missed. Same
+    // treatment as the unimplemented arm — report it, refuse visibly, never
+    // sign.
+    if (storeHidesFlow(flow.flow)) {
+      _reportUnsupportedFlow(flow);
+      return const TransactionAuthOutcome.flowDisabled(kStoreGatedFlowMessage);
     }
 
     // Master opt-in. Off by default — when disabled the gate never prompts,

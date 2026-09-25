@@ -12,8 +12,9 @@
 ///
 /// Recognising a shape as content-addressed is what makes the server store and
 /// long-cache it, so the set is deliberately broad: path gateways, subdomain
-/// gateways, and every host in [_arweaveHosts]. Anything unrecognised falls
-/// through to the verbatim branch, which is the safe direction.
+/// gateways, the bare-CID legacy gateways in [_bareCidHosts], and every host in
+/// [_arweaveHosts]. Anything unrecognised falls through to the verbatim branch,
+/// which is the safe direction.
 library;
 
 import '../config/environment.dart';
@@ -39,6 +40,49 @@ final RegExp _txidRegex = RegExp(r'^[A-Za-z0-9_-]{43}$');
 /// here: one language quietly growing a host is how the three implementations'
 /// cache keys diverge.
 const Set<String> _publicArweaveHosts = {'permagate.io', 'arweave.net'};
+
+/// Legacy gateways that serve a CID at the path root, with no `/ipfs/` segment:
+/// `https://<host>/<CID>[/path]`. Pinned by the contract's `bareCidHosts`.
+///
+/// Host-gated on purpose, and this is the one IPFS rule that is. A bare first
+/// segment is not self-describing the way `/ipfs/<CID>` is — on an arbitrary
+/// host a path that happens to look like a CID is far more likely to be a
+/// filename, and canonicalising it would move real bytes to a key nothing
+/// serves. On these six it is always a CID, because that is the only route they
+/// ever had.
+///
+/// Recognising them is what makes those assets storable and long-cacheable
+/// under one key with the same bytes fetched through any other gateway; several
+/// of the hosts are dead or dying (`cloudflare-ipfs.com` shut down in 2024), so
+/// the canonical form is also what lets a live gateway serve them at all. Never
+/// add one of these as a fetch target. The web client's alt-storage rewriter
+/// has recognised the same six for longer; this closes the gap.
+///
+/// A `*.` entry matches any host with at least one label in front of the
+/// suffix. The apex does not match: `mypinata.cloud` is Pinata's own site, not
+/// a customer's dedicated gateway.
+const List<String> _bareCidHosts = [
+  'gateway.pinata.cloud',
+  '*.mypinata.cloud',
+  'nftstorage.link',
+  'cloudflare-ipfs.com',
+  'gateway.pinit.io',
+  'gateway.lighthouse.storage',
+];
+
+/// Whether [host] — already lower-cased and `www.`-stripped — is in
+/// [_bareCidHosts].
+bool _isBareCidHost(String host) {
+  for (final entry in _bareCidHosts) {
+    if (entry.startsWith('*.')) {
+      final suffix = entry.substring(1);
+      if (host.length > suffix.length && host.endsWith(suffix)) return true;
+    } else if (host == entry) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /// Hosts whose bare-txid paths canonicalise to `ar://`: the public families
 /// plus this deployment's mirror, when it runs one.
@@ -132,6 +176,17 @@ String canonicalizeAssetUrl(String raw) {
   if (marker != -1) {
     final label = host.substring(0, marker);
     if (_cidRegex.hasMatch(label)) return 'ipfs://$label$path';
+  }
+
+  // Bare-CID legacy gateways: the CID is the first path segment, with no
+  // `/ipfs/` marker to key on, so the host list above is the whole gate. It
+  // runs after both rules above because those hosts also serve the standard
+  // shapes, and `/ipfs/<CID>` must win: on `gateway.pinata.cloud/ipfs/<CID>`
+  // this branch would otherwise read `ipfs` as the first segment, fail the CID
+  // regex, and drop a recognised URL to verbatim.
+  if (_isBareCidHost(host) && path.startsWith('/')) {
+    final rest = path.substring(1);
+    if (_cidRegex.hasMatch(_firstSegment(rest))) return 'ipfs://$rest';
   }
 
   // Arweave: known family hosts only, and the first segment must be a bare tx

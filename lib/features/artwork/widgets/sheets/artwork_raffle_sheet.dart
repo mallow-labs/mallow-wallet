@@ -97,8 +97,9 @@ class RaffleGate {
 
 /// Bottom sheet for raffle listings.
 ///
-/// Ticket purchase itself is **not** an in-app transaction: the primary CTA
-/// links out to mallow.art (see [kShowRaffleEntry]). Everything else — the
+/// The buy side is doubly flagged: in-app ticket purchase needs
+/// [kShowRaffleEntry], and the outlink that stands in for it needs
+/// [kShowNftCommerce] (it lands on a purchase page). Everything else — the
 /// lifecycle copy, the numbers, the cancel / claim / reclaim CTAs — is
 /// resolved here from `raffleMetadata` + [gate].
 ///
@@ -135,8 +136,9 @@ class ArtworkRaffleSheet extends StatelessWidget {
   /// Opens the ticket-count input flow on the screen side, then dispatches
   /// `RaffleEvent.buyTickets`.
   ///
-  /// Only invoked when [kShowRaffleEntry] is on — store builds render a
-  /// "View on mallow.art" outlink in place of the buy CTA.
+  /// Only invoked when [kShowRaffleEntry] **and** [showNftCommerce] are on —
+  /// entry-flagged-off builds render a "View on mallow.art" outlink in place of
+  /// the buy CTA, and a build that hides commerce renders no CTA at all.
   final VoidCallback onBuyTickets;
   final VoidCallback onCancelRaffle;
   final VoidCallback onClaimNft;
@@ -154,6 +156,11 @@ class ArtworkRaffleSheet extends StatelessWidget {
             subState == RaffleSubState.drawnClaimed) &&
         role != RaffleRole.winner &&
         raffle?.winner != null;
+    // Resolved before the gap below: several role/lifecycle combinations
+    // render no button at all (an observer on a drawn raffle, and every
+    // selling state once commerce is hidden), and an unconditional spacer left
+    // a dangling gap under the summary on every live raffle in such a build.
+    final buttons = _buildButtons(context);
 
     return ArtworkSheetFrame(
       child: Column(
@@ -182,8 +189,10 @@ class ArtworkRaffleSheet extends StatelessWidget {
               ),
             ),
           ],
-          const SizedBox(height: MallowTheme.spacingMd),
-          ..._buildButtons(context),
+          if (buttons.isNotEmpty) ...[
+            const SizedBox(height: MallowTheme.spacingMd),
+            ...buttons,
+          ],
         ],
       ),
     );
@@ -226,10 +235,11 @@ class ArtworkRaffleSheet extends StatelessWidget {
       case RaffleSubState.selling:
         if (role == RaffleRole.owner) return 'Your raffle is live';
         if (gate.isSoldOut) return 'Sold out';
-        // Without in-app entry the old copy ("Buy tickets for a chance to
-        // win") is a call to action into a paid prize draw, which a store
-        // build must not carry.
-        return kShowRaffleEntry
+        // "Buy tickets for a chance to win" is a call to action into a paid
+        // prize draw. It must track the CTA below exactly: with entry off it
+        // is copy a store build must not carry, and with commerce hidden it
+        // invites a purchase the sheet then offers no way to make.
+        return kShowRaffleEntry && showNftCommerce
             ? 'Buy tickets for a chance to win'
             : 'Raffle in progress';
       case RaffleSubState.awaitingDraw:
@@ -289,14 +299,26 @@ class ArtworkRaffleSheet extends StatelessWidget {
               onPressed: null,
               isFullWidth: true,
             ),
-            const SizedBox(height: MallowTheme.spacingSm),
-            _viewOnWebButton(),
+            if (showNftCommerce) ...[
+              const SizedBox(height: MallowTheme.spacingSm),
+              _viewOnWebButton(),
+            ],
           ];
         }
+        if (!showNftCommerce) {
+          // Commerce hidden: no buy CTA, no funding-source switch (it exists
+          // only to pay for tickets) and no outlink either — the outlink lands
+          // on the ticket purchase page. Checked ahead of [kShowRaffleEntry]
+          // because that flag is `kDebugMode`-derived, so every debug and
+          // `SHOW_UNRELEASED=true` run — including the gated QA run — reached
+          // the buy CTA below. Tapping it walked the whole ticket-count flow
+          // only to be refused by the signing backstop, which reports the
+          // miss to Sentry as a bug in this gate.
+          return const [];
+        }
         if (!kShowRaffleEntry) {
-          // Store builds ship no in-app raffle entry: the buy CTA — and
-          // the funding-source switch that only exists to pay for tickets —
-          // are replaced by an outlink to the artwork on the web.
+          // No in-app raffle entry in this build: the buy CTA and its funding
+          // switch are replaced by an outlink to the artwork on the web.
           return [_viewOnWebButton()];
         }
         return [

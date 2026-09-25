@@ -6,6 +6,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../../core/config/remote_config.dart';
 import '../../../core/config/remote_config_service.dart';
+import '../../../core/config/store_build.dart';
 import '../../../core/services/token_price_service.dart';
 import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
@@ -174,8 +175,14 @@ class _StakingFormTabState extends State<StakingFormTab> {
                     ],
                     const SizedBox(height: MallowTheme.spacing12),
                     _halfMax(context),
-                    const SizedBox(height: MallowTheme.spacingLg),
-                    _stakeTypeSection(context, state),
+                    // A build with swap hidden has one path, so there is
+                    // nothing to choose between: the selector goes and
+                    // [defaultStakeType] has already pinned the state to
+                    // Native, which collapses every `stakeType` branch below.
+                    if (showSwap) ...[
+                      const SizedBox(height: MallowTheme.spacingLg),
+                      _stakeTypeSection(context, state),
+                    ],
                     const SizedBox(height: MallowTheme.spacingLg),
                     if (isStake) _yieldEstimate(context, state),
                     if (state.stakeType == StakeType.liquid) ...[
@@ -370,6 +377,9 @@ class _StakingFormTabState extends State<StakingFormTab> {
     );
   }
 
+  /// The Liquid / Native radio pair. Rendered only when [showSwap] is on —
+  /// the liquid path is an aggregator swap in either direction, so a store
+  /// build that drops swap drops this whole section with it.
   Widget _stakeTypeSection(BuildContext context, StakingState state) {
     final colors = context.mallowColors;
     final data = state.data;

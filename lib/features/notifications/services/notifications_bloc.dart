@@ -67,7 +67,11 @@ class NotificationsBloc extends Bloc<NotificationsEvent, NotificationsState> {
       case ResultSuccess(:final value):
         // showPushBanner defaults to false — the screen flips it on after
         // checking notification permissions.
-        emit(NotificationsState.loaded(notifications: value));
+        emit(NotificationsState.loaded(notifications: _displayable(value)));
+        // Acknowledge from the RAW list, not the filtered one. An unread row
+        // this build cannot render still counts toward the server's unread
+        // flag, so acknowledging only what is on screen would strand the
+        // drawer's bell dot above a list that looks empty.
         _acknowledgeOnOpen(value);
       case ResultFailure(:final error):
         debugPrint('[NotificationsBloc] Load failed: ${error.message}');
@@ -78,6 +82,24 @@ class NotificationsBloc extends Bloc<NotificationsEvent, NotificationsState> {
         );
     }
   }
+
+  /// Drop rows this build has no renderer for.
+  ///
+  /// `NotificationItem.type` decodes an unrecognised wire value to
+  /// [api.NotificationType.unknown], which is how a client survives the backend
+  /// shipping a new type. Showing those rows means an older build renders a
+  /// placeholder that says nothing and links nowhere; hiding them means the
+  /// feed only ever contains rows it can actually render.
+  ///
+  /// The trade-off, deliberately taken: a build that predates a new
+  /// notification type shows no trace of it at all, so a new feature is
+  /// invisible until the user updates. Acknowledgement is kept on the raw list
+  /// so the unread badge still clears (see [_acknowledgeOnOpen]).
+  static List<api.NotificationItem> _displayable(
+    List<api.NotificationItem> notifications,
+  ) => notifications
+      .where((n) => n.type != api.NotificationType.unknown)
+      .toList();
 
   /// Mark the feed read as soon as it is opened, matching the webapp: fetching
   /// `/v1/notifications` fires `POST /acknowledge` and invalidates the unread
@@ -113,7 +135,7 @@ class NotificationsBloc extends Bloc<NotificationsEvent, NotificationsState> {
             : false;
         emit(
           NotificationsState.loaded(
-            notifications: value,
+            notifications: _displayable(value),
             showPushBanner: showBanner,
           ),
         );

@@ -6,7 +6,6 @@ import 'package:go_router/go_router.dart';
 import '../../../core/router/app_router.dart';
 import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
-import '../../../shared/widgets/loading_indicator.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
 import '../../../shared/widgets/tappable.dart';
 import '../../cast/widgets/now_casting_bar.dart';
@@ -14,6 +13,7 @@ import '../../portfolio/services/portfolio_bloc.dart';
 import '../../portfolio/widgets/all_art_detail.dart';
 import '../../portfolio/widgets/all_art_grid.dart';
 import '../../portfolio/widgets/all_art_masonry.dart';
+import '../../portfolio/widgets/all_art_skeleton.dart';
 import '../../portfolio/widgets/sort_bottom_sheet.dart';
 import '../../profile/widgets/profile_filters_sheet.dart';
 import '../models/search_models.dart';
@@ -89,7 +89,9 @@ class _DrilldownView extends StatelessWidget {
                   // The bloc is created for this one drilldown and the fetch is
                   // dispatched with it, so every other state is the first page
                   // still loading.
-                  _ => const Center(child: MallowLoadingIndicator()),
+                  _ => const CustomScrollView(
+                    slivers: [AllArtSkeletonMasonry()],
+                  ),
                 },
               ),
             ),
@@ -199,21 +201,26 @@ class _ArtworkDrilldown extends StatelessWidget {
     );
   }
 
+  Widget get _loadingSkeleton => switch (state.artworkViewMode) {
+    ArtworkViewMode.masonry => const AllArtSkeletonMasonry(),
+    ArtworkViewMode.detail => const AllArtSkeletonDetail(),
+    ArtworkViewMode.grid => const AllArtSkeletonGrid(),
+  };
+
   List<Widget> _contentSlivers(BuildContext context) {
+    if (state.isRefetching) return [_loadingSkeleton];
     if (state.artworks.isEmpty) {
       return [
         SliverFillRemaining(
           hasScrollBody: false,
           child: Center(
-            child: state.isRefetching
-                ? const MallowLoadingIndicator()
-                : Text(
-                    'No results found',
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: context.mallowColors.textSecondary,
-                    ),
-                  ),
+            child: Text(
+              'No results found',
+              style: TextStyle(
+                fontSize: 14,
+                color: context.mallowColors.textSecondary,
+              ),
+            ),
           ),
         ),
       ];
@@ -237,17 +244,7 @@ class _ArtworkDrilldown extends StatelessWidget {
       ),
     };
 
-    return [
-      content,
-      SliverToBoxAdapter(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: MallowTheme.spacingMd),
-          child: state.isLoadingMore
-              ? const Center(child: MallowLoadingIndicator())
-              : const SizedBox.shrink(),
-        ),
-      ),
-    ];
+    return [content, if (state.isLoadingMore) _loadingSkeleton];
   }
 
   /// Push the detail on top of this screen — back returns to the drilldown,

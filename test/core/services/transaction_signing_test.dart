@@ -73,6 +73,63 @@ String get _placeholderBlockhash => base58encode(Uint8List(32));
 /// Pick a different valid base58 32-byte blockhash so we can detect rewrites.
 String get _freshBlockhash => base58encode(Uint8List(32)..fillRange(0, 32, 9));
 
+/// The ALT program's `CreateLookupTable` instruction, byte-identical in shape
+/// to what `solana_sdk::address_lookup_table::instruction::create_lookup_table`
+/// emits and what the backend's `alt::create_and_extend_ixs` puts on the
+/// wire: a bincode u32 little-endian variant index (0), the `recent_slot` the
+/// runtime checks against `SlotHashes`, and the derivation bump.
+Instruction _createLookupTableIx({
+  required Ed25519HDPublicKey payer,
+  required Ed25519HDPublicKey table,
+  int recentSlot = 400000000,
+}) => Instruction(
+  programId: Ed25519HDPublicKey.fromBase58(addressLookupTableProgramId),
+  accounts: [
+    AccountMeta.writeable(pubKey: table, isSigner: false),
+    AccountMeta.writeable(pubKey: payer, isSigner: true),
+  ],
+  data: ByteArray.merge([
+    ByteArray.u32(0),
+    ByteArray.u64(recentSlot),
+    ByteArray.u8(255),
+  ]),
+);
+
+/// `ExtendLookupTable` — bincode variant 2. The top-up path emits only these,
+/// and they bake no slot, so they must NOT be mistaken for a create.
+Instruction _extendLookupTableIx({
+  required Ed25519HDPublicKey payer,
+  required Ed25519HDPublicKey table,
+}) => Instruction(
+  programId: Ed25519HDPublicKey.fromBase58(addressLookupTableProgramId),
+  accounts: [
+    AccountMeta.writeable(pubKey: table, isSigner: false),
+    AccountMeta.writeable(pubKey: payer, isSigner: true),
+  ],
+  data: ByteArray.merge([
+    ByteArray.u32(2),
+    ByteArray.u64(1),
+    ByteArray(payer.bytes),
+  ]),
+);
+
+/// Wrap [instructions] into an unsigned single-signer [SignedTx].
+SignedTx _unsignedTxWith(
+  List<Instruction> instructions, {
+  required Ed25519HDPublicKey feePayer,
+}) {
+  final compiled = Message(
+    instructions: instructions,
+  ).compile(recentBlockhash: _placeholderBlockhash, feePayer: feePayer);
+  return SignedTx(
+    signatures: List<Signature>.generate(
+      compiled.requiredSignatureCount,
+      (_) => Signature(List<int>.filled(64, 0), publicKey: feePayer),
+    ),
+    compiledMessage: compiled,
+  );
+}
+
 void main() {
   setUpAll(() {
     registerFallbackValue(_FakeSignedTx());
@@ -97,6 +154,57 @@ void main() {
     );
     signer = signerKp.publicKey;
     recipient = recipientKp.publicKey;
+  });
+
+  // Why this matters: a LUT `setupTx` is the FIRST transaction of a cNFT buy,
+  // list, cancel or settle. `_refreshBlockhashIfSafe` happily rewrites its
+  // blockhash — nothing has pre-signed it — so the tx keeps looking fresh
+  // while the `recent_slot` baked into `create_lookup_table` ages past the
+  // ~512-slot (~3.4 min) `SlotHashes` window. The user then sends a
+  // transaction that fails on-chain for a reason nothing on screen explains.
+  // Detecting the create ix is what lets the executor send it back to the
+  // builder instead of merely refreshing it.
+  group('createsLookupTable', () {
+    late Ed25519HDPublicKey payer;
+    late Ed25519HDPublicKey table;
+
+    setUp(() async {
+      payer = (await Ed25519HDKeyPair.fromPrivateKeyBytes(
+        privateKey: Uint8List(32)..fillRange(0, 32, 0x31),
+      )).publicKey;
+      table = (await Ed25519HDKeyPair.fromPrivateKeyBytes(
+        privateKey: Uint8List(32)..fillRange(0, 32, 0x32),
+      )).publicKey;
+    });
+
+    test('true for a setup tx that creates a lookup table', () {
+      final tx = _unsignedTxWith([
+        _createLookupTableIx(payer: payer, table: table),
+        _extendLookupTableIx(payer: payer, table: table),
+      ], feePayer: payer);
+
+      expect(createsLookupTable(tx), isTrue);
+    });
+
+    test('false for an extend-only top-up — it bakes no slot, so a blockhash '
+        'refresh is sufficient and a rebuild would be a wasted round-trip', () {
+      final tx = _unsignedTxWith([
+        _extendLookupTableIx(payer: payer, table: table),
+      ], feePayer: payer);
+
+      expect(createsLookupTable(tx), isFalse);
+    });
+
+    test('false for an ordinary transfer', () {
+      final tx = _buildSignedTx(
+        blockhash: _placeholderBlockhash,
+        signer: payer,
+        recipient: table,
+        preSigned: false,
+      );
+
+      expect(createsLookupTable(tx), isFalse);
+    });
   });
 
   group('hasPreAttachedSignature', () {

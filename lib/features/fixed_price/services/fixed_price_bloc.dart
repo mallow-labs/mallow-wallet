@@ -651,8 +651,8 @@ class FixedPriceBloc extends Bloc<FixedPriceEvent, FixedPriceState> {
         return;
     }
 
-    // 2. Prepare: build the listing tx (plus an optional LUT setup tx for
-    // non-Core master editions) and track it for stale-blockhash replay. Seller
+    // 2. Prepare: build the listing tx (plus an optional LUT setup tx) and
+    // track it for stale-blockhash replay. Seller
     // pubkey is already on `state.userPubkey`, so `requireWallet` is false. The
     // batch order is `[setupTx, listingTx]` — the executor chains them in order
     // and stops on the first failure.

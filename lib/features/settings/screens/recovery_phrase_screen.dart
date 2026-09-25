@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/models/account.dart';
+import '../../../core/observability/app_logger.dart';
 import '../../../core/router/app_router.dart';
 import '../../../core/security/biometric_auth.dart';
 import '../../../core/security/secure_storage.dart';
@@ -165,8 +166,21 @@ class _RecoveryPhraseScreenState extends State<RecoveryPhraseScreen>
 
   Future<void> _advanceToPinGate() async {
     final storage = sl<SecureWalletStorage>();
-    final biometricsEnabled = await storage.loadBiometricEnabled();
-    final hasPin = await storage.hasPin();
+    ({bool hasPin, bool biometricEnabled}) factors;
+    try {
+      // A PIN that reads absent once is re-read before it is believed — see
+      // [SecureWalletStorage.loadAuthFactors]. Believing a transient miss
+      // here reveals the phrase with no challenge at all.
+      factors = await storage.loadAuthFactors();
+    } catch (e) {
+      // Unknown is not "no lock". Revealing the phrase is the one outcome
+      // that cannot be taken back, so demand the PIN instead: the sheet can
+      // still refuse, and a user with no PIN simply leaves.
+      AppLogger.error('RecoveryPhrase', 'could not read the lock factors', e);
+      factors = (hasPin: true, biometricEnabled: false);
+    }
+    final biometricsEnabled = factors.biometricEnabled;
+    final hasPin = factors.hasPin;
     if (!mounted) return;
 
     // Neither biometrics nor a PIN configured — nothing to gate on.
@@ -227,7 +241,22 @@ class _RecoveryPhraseScreenState extends State<RecoveryPhraseScreen>
 
   Future<void> _validatePin() async {
     final storage = sl<SecureWalletStorage>();
-    if (!await storage.hasPin() || await storage.verifyPin(_pin)) {
+    // Verify, and only verify. Whether this device has a PIN was settled in
+    // [_advanceToPinGate], which fails closed to "it has one" — re-reading it
+    // here could only undo that decision: one transient keystore miss on a
+    // PIN-only device would reveal the phrase against no challenge at all,
+    // and on a biometric-only device the gate is reached precisely when that
+    // read already failed once.
+    bool verified;
+    try {
+      verified = await storage.verifyPin(_pin);
+    } catch (e) {
+      // Unknown is not verified. The stored hash lives in the vault, which
+      // reports an item it cannot read as an error rather than as absent.
+      AppLogger.error('RecoveryPhrase', 'could not verify the PIN', e);
+      verified = false;
+    }
+    if (verified) {
       await _loadMnemonicAndNavigate();
     } else {
       setState(() {

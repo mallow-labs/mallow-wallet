@@ -16,7 +16,7 @@
 /// an init failure to react to rather than a live element `onError` event.
 ///
 /// The list used to be produced by a shared resolver service; that service is
-/// retired (original-serving spec, decision 4), so the local
+/// removed (2026-09) (original-serving spec, decision 4), so the local
 /// transform list — its old degraded-mode fallback — is the only path left.
 ///
 /// [AssetUrl.videoSourceCandidates] is what players actually call: it puts the
@@ -44,7 +44,8 @@ class AssetUrl {
   static String get mallowArweaveBase =>
       _baseOr(Config.arweaveGatewayUrl, 'https://$_arweaveHost');
 
-  /// This deployment's IPFS gateway, preferred for Solana assets. From
+  /// This deployment's IPFS gateway: where an `ipfs://` source resolves on
+  /// every chain, and what an `ipfs.io` source is rewritten to on Solana. From
   /// `IPFS_GATEWAY_URL`; defaults to the public `ipfs.io`. A full base URL,
   /// like [mallowArweaveBase].
   static String get mallowIpfsBase =>
@@ -89,9 +90,11 @@ class AssetUrl {
   /// duplicates removed. Returns an empty list for an empty or blacklisted
   /// (`shdw-drive`) source so the caller can skip playback and keep the poster.
   ///
-  /// [chain] selects the IPFS gateway: Solana — and any unknown/unspecified
-  /// chain — prefer the configured [mallowIpfsBase]; other chains stay on
-  /// `ipfs.io`, matching the web client's own gateway rule.
+  /// [chain] selects the gateway for an http(s) source already on `ipfs.io`:
+  /// Solana — and any unknown/unspecified chain — moves to the configured
+  /// [mallowIpfsBase]; other chains stay put, matching the web client's own
+  /// gateway rule. An `ipfs://` source resolves to [mallowIpfsBase] whatever
+  /// the chain: it carries no host to respect.
   static List<String> assetSourceCandidates(String url, {String? chain}) {
     if (!_isPlayable(url)) return const [];
 
@@ -191,27 +194,31 @@ class AssetUrl {
       chain == null || chain.toLowerCase() == 'solana';
 
   /// Natural first-choice gateway for [url]: resolves the `ipfs://` scheme
-  /// (absorbing the redundant `ipfs://ipfs/<cid>` form) onto the **public**
-  /// gateway, then rewrites `ipfs.io` to this deployment's gateway for Solana.
-  /// http(s) origins — including Arweave — pass through unchanged, matching the
-  /// web client, which only swaps to the Arweave mirror on an actual load
-  /// failure.
+  /// (absorbing the redundant `ipfs://ipfs/<cid>` form) onto this deployment's
+  /// gateway, then rewrites `ipfs.io` to that same gateway for Solana. http(s)
+  /// origins — including Arweave — pass through unchanged, matching the web
+  /// client, which only swaps to the Arweave mirror on an actual load failure.
   ///
-  /// 🛑 **`ipfs://` resolves to `ipfs.io`, not to the deployment's gateway, and
-  /// the two branches below are deliberately asymmetric.** This string is the
-  /// source embedded in the image CDN's resize path, which means it IS the
-  /// resizer's cache key and the R2 object key. The web client resolves the
-  /// same scheme through the public gateway, so sending our own host here
-  /// forked every `ipfs://` asset across two cache entries — one warmed by the
-  /// backend (which follows the web client) and one the app requested and never
-  /// hit. Nothing failed; images were simply always cold. Keep this in step
-  /// with the web client's `getAltStorageUrl`, whose first branch is
-  /// unconditional in exactly the same way.
+  /// 🛑 **`ipfs://` resolves to the configured gateway, not to `ipfs.io`.**
+  /// This string is the source embedded in the image CDN's resize path, which
+  /// means it IS the resizer's cache key and the R2 object key, so it must name
+  /// whatever host the backend warms: a client that picks a different one forks
+  /// every `ipfs://` asset across two cache entries, and nothing fails — the
+  /// images are simply always cold. That is why the branch answered `ipfs.io`
+  /// for a long time, back when the web client's `getAltStorageUrl` resolved
+  /// the scheme through the public gateway and the backend followed it. It now
+  /// maps every IPFS shape onto the configured first-party gateway, and this
+  /// branch keeps step with it, unconditional in exactly the same way.
+  ///
+  /// The configured gateway is also the better first rung on its own merits,
+  /// because it is tiered now rather than a single mirror: it tries the pinned
+  /// copies first and falls back to a full IPFS node behind the same host, so
+  /// it serves imported CIDs the pinning tier alone would 404. `ipfs.io` stays
+  /// the alternate ([_altIpfsGateway]) and `dweb.link` the last resort.
   static String _primaryGateway(String url, String? chain) {
     final ipfsScheme = RegExp(r'^ipfs://(?:ipfs/)?');
     if (ipfsScheme.hasMatch(url)) {
-      return 'https://$publicIpfsHost/ipfs/'
-          '${url.replaceFirst(ipfsScheme, '')}';
+      return '$mallowIpfsBase/ipfs/${url.replaceFirst(ipfsScheme, '')}';
     }
     if (_isSolana(chain)) {
       return _rebase(url, _publicIpfsBase, mallowIpfsBase) ?? url;

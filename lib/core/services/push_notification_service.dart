@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
@@ -9,9 +11,9 @@ import '../../shared/utils/notification_link.dart';
 import '../../shared/widgets/in_app_push_banner.dart';
 import '../../shared/widgets/permission_settings_sheet.dart';
 import '../config/environment.dart';
-import '../network/auth_service.dart';
 import '../router/app_router.dart';
 import 'preferences_service.dart';
+import 'wallet_repository.dart';
 
 /// Service for managing push notifications via Firebase Cloud Messaging.
 ///
@@ -24,10 +26,14 @@ import 'preferences_service.dart';
 /// This avoids a circular DI dependency between the service and GoRouter.
 @lazySingleton
 class PushNotificationService {
-  PushNotificationService(this._dio, this._authService, this._prefs);
+  PushNotificationService(this._dio, this._wallets, this._prefs) {
+    // Every wallet mutation bumps this, so an import, a removal, an account
+    // delete and a full reset all re-sync without their own wiring.
+    _wallets.walletsRevision.addListener(_scheduleSync);
+  }
 
   final Dio _dio;
-  final AuthService _authService;
+  final WalletRepository _wallets;
   final PreferencesService _prefs;
 
   /// Resolved per call, never in a field initializer.
@@ -44,6 +50,13 @@ class PushNotificationService {
 
   String? _currentToken;
   bool _initialized = false;
+
+  /// Fingerprint of the last `token + addresses` set successfully synced, so a
+  /// revision bump that did not change the wallet set (a rename, a reorder, a
+  /// wallet switch) costs nothing.
+  String? _syncedFingerprint;
+
+  Timer? _syncDebounce;
 
   /// Notifier for deep-link navigation triggered by notification taps.
   ///
@@ -64,8 +77,9 @@ class PushNotificationService {
   /// permission in a prior session — fetches the FCM token and registers
   /// it with the backend.
   ///
-  /// Does NOT request OS permission. The permission dialog is triggered
-  /// from the Notifications screen on first visit (see [requestPermission]).
+  /// Does NOT request OS permission. The dialog is triggered from the
+  /// onboarding push step, the Settings toggle, or the Notifications screen on
+  /// first visit (see [requestPermission]).
   ///
   /// Note: [FirebaseMessaging.onBackgroundMessage] is registered in main()
   /// before runApp() to guarantee the handler is in place before any
@@ -86,13 +100,16 @@ class PushNotificationService {
     // Only fetch + register the token when we already have permission.
     // Calling getToken() before the user grants on iOS can return null and
     // emit warnings.
+    //
+    // Isolated from the rest of initialize(): a getToken() that throws (no
+    // network, no APNs token yet) must not skip the listener registration
+    // below, because `_initialized` is already latched and nothing would
+    // re-run it. Nothing is lost — the next wallet mutation re-syncs.
     if (authorized) {
-      final token = await _messaging.getToken();
-      if (token != null) {
-        _currentToken = token;
-        if (_prefs.pushNotificationsEnabled) {
-          await _registerTokenWithBackend(token);
-        }
+      try {
+        await syncAddresses();
+      } catch (e) {
+        debugPrint('[PushNotification] Initial address sync failed: $e');
       }
     }
 
@@ -197,36 +214,76 @@ class PushNotificationService {
     await _prefs.setHasPromptedForPushPermission(true);
     final granted = _isGranted(settings.authorizationStatus);
     if (granted) {
-      final token = await _messaging.getToken();
-      if (token != null) {
-        _currentToken = token;
-        if (_prefs.pushNotificationsEnabled) {
-          await _registerTokenWithBackend(token);
-        }
-      }
+      await syncAddresses();
     }
     return settings.authorizationStatus;
   }
 
-  /// Re-register device token with backend.
+  /// Push the device's current wallet set to the backend.
   ///
-  /// Call this when the user re-enables push notifications.
-  Future<void> register() async {
-    final token = await _messaging.getToken();
-    if (token != null) {
-      _currentToken = token;
-      await _registerTokenWithBackend(token);
-    }
+  /// The stored mapping is `token -> addresses on this device`. It has no
+  /// account, profile, session or signature in it: a device holding wallets
+  /// with nobody signed in still needs push for them, and a wallet the user
+  /// removed must stop receiving push whether or not anyone is logged in.
+  ///
+  /// Sends the whole set every time and lets the server replace what it had.
+  /// A delta protocol drifts permanently the moment one call is lost, and the
+  /// device is the only party that knows the truth.
+  ///
+  /// View-only wallets are excluded: those are addresses the user is watching,
+  /// not holding, and their notifications belong to whoever owns the key.
+  Future<void> syncAddresses() async {
+    if (!_prefs.pushNotificationsEnabled) return;
+
+    final token = _currentToken ?? await _messaging.getToken();
+    if (token == null) return;
+    _currentToken = token;
+
+    final addresses =
+        (await _wallets.getAllWallets())
+            .where((w) => w.canSign && w.address.isNotEmpty)
+            .map((w) => w.address)
+            .toSet()
+            .toList()
+          ..sort();
+
+    await _syncToBackend(token, addresses);
   }
 
-  /// Unregister device token from backend.
+  /// Stop this device receiving push, without touching the wallets on it.
   ///
-  /// Call this on logout to stop receiving notifications for this device.
+  /// Used by the Settings toggle. Syncing an empty set clears every row for
+  /// this token server-side, so it needs no session — unlike the older
+  /// `/unregister`, which deletes only the row for the address you happen to be
+  /// logged in as and therefore cannot clear a multi-wallet device.
   Future<void> unregister() async {
-    if (_currentToken != null) {
-      await _unregisterTokenFromBackend(_currentToken!);
-      _currentToken = null;
-    }
+    final token = _currentToken;
+    if (token == null) return;
+    await _syncToBackend(token, const []);
+    _currentToken = null;
+  }
+
+  /// Seed the FCM token so a test can drive [syncAddresses] without Firebase.
+  ///
+  /// `FirebaseMessaging.instance` throws `[core/no-app]` in a hermetic run, and
+  /// the token is the only thing [syncAddresses] needs it for.
+  @visibleForTesting
+  Future<void> debugSyncWithToken(String token) {
+    _currentToken = token;
+    return syncAddresses();
+  }
+
+  /// Coalesce a burst of wallet mutations into one sync.
+  ///
+  /// Importing a seed phrase runs many mutations back to back; without this
+  /// each one would POST.
+  void _scheduleSync() {
+    _syncDebounce?.cancel();
+    _syncDebounce = Timer(const Duration(milliseconds: 1500), () {
+      syncAddresses().catchError((Object e) {
+        debugPrint('[PushNotification] Wallet-change sync failed: $e');
+      });
+    });
   }
 
   /// Resolve a [RemoteMessage] to a notification destination.
@@ -253,54 +310,46 @@ class PushNotificationService {
   Future<void> _onTokenRefresh(String newToken) async {
     debugPrint('[PushNotification] Token refreshed');
 
-    if (!_prefs.pushNotificationsEnabled) {
-      _currentToken = newToken;
-      return;
+    // Clear the superseded token's rows FIRST, and do it whether or not the
+    // preference is on. FCM has already invalidated the old token but the
+    // backend has not heard that, so leaving those rows makes every
+    // notification pay for a send that can only fail. Skipping this while push
+    // is switched off would strand them for good: the toggle-off path clears
+    // `_currentToken`, which by then is the NEW token.
+    final previousToken = _currentToken;
+    if (previousToken != null && previousToken != newToken) {
+      await _syncToBackend(previousToken, const []);
     }
 
-    // Unregister old token if we had one
-    if (_currentToken != null) {
-      await _unregisterTokenFromBackend(_currentToken!);
-    }
-
-    // Register new token
     _currentToken = newToken;
-    await _registerTokenWithBackend(newToken);
+    // The fingerprint is keyed on the token, so a new one always re-syncs.
+    await syncAddresses();
   }
 
-  /// Register device token with the mallow backend.
-  Future<void> _registerTokenWithBackend(String token) async {
-    if (!_authService.hasSession) {
-      debugPrint('[PushNotification] No active session, skipping registration');
-      return;
-    }
+  /// Replace this token's address set on the backend.
+  ///
+  /// Skips the call when nothing changed since the last confirmed sync, and
+  /// records the fingerprint only on success so a failure is retried by the
+  /// next trigger rather than being treated as done.
+  Future<void> _syncToBackend(String token, List<String> addresses) async {
+    final fingerprint = '$token|${addresses.join(',')}';
+    if (fingerprint == _syncedFingerprint) return;
 
     try {
       await _dio.post<Map<String, dynamic>>(
-        '${Config.apiBaseUrl}/v1/deviceToken/register',
+        '${Config.apiBaseUrl}/v1/deviceToken/sync',
         data: {
           'token': token,
           'platform': defaultTargetPlatform == TargetPlatform.iOS
               ? 'ios'
               : 'android',
+          'addresses': addresses,
         },
       );
-      debugPrint('[PushNotification] Token registered with backend');
+      _syncedFingerprint = fingerprint;
+      debugPrint('[PushNotification] Synced ${addresses.length} addresses');
     } on DioException catch (e) {
-      debugPrint('[PushNotification] Failed to register token: ${e.message}');
-    }
-  }
-
-  /// Unregister device token from the mallow backend.
-  Future<void> _unregisterTokenFromBackend(String token) async {
-    try {
-      await _dio.post<Map<String, dynamic>>(
-        '${Config.apiBaseUrl}/v1/deviceToken/unregister',
-        data: {'token': token},
-      );
-      debugPrint('[PushNotification] Token unregistered from backend');
-    } on DioException catch (e) {
-      debugPrint('[PushNotification] Failed to unregister token: ${e.message}');
+      debugPrint('[PushNotification] Address sync failed: ${e.message}');
     }
   }
 }
@@ -332,12 +381,18 @@ enum PushEnableOutcome {
 /// permission leaves a toggle that is on while nothing can ever arrive. On a
 /// denial — including a permanent one, where iOS and Android 13+ return denied
 /// without showing a dialog at all — the user gets the shared recovery sheet
-/// rather than silence.
+/// rather than silence. [offerSettingsOnDenial] turns that sheet off for the
+/// one caller that does not want it: the onboarding step, where the dialog is
+/// shown for the very first time, so a refusal there answers the question the
+/// screen just asked rather than reporting a permission stuck off.
 ///
 /// Lives here rather than in a widget file so the Settings screen and the
 /// Notifications banner share one path (cf. `core/security/reauth_gate.dart`,
 /// which likewise pairs a core-level gate with a shared sheet).
-Future<PushEnableOutcome> enablePushFromUserAction(BuildContext context) async {
+Future<PushEnableOutcome> enablePushFromUserAction(
+  BuildContext context, {
+  bool offerSettingsOnDenial = true,
+}) async {
   final service = sl<PushNotificationService>();
   final prefs = sl<PreferencesService>();
 
@@ -347,12 +402,14 @@ Future<PushEnableOutcome> enablePushFromUserAction(BuildContext context) async {
     // on; flip it on and register only when it wasn't.
     if (!prefs.pushNotificationsEnabled) {
       await prefs.setPushNotificationsEnabled(true);
-      await service.register();
+      await service.syncAddresses();
     }
     return PushEnableOutcome.granted;
   }
 
-  if (!context.mounted) return PushEnableOutcome.denied;
+  if (!offerSettingsOnDenial || !context.mounted) {
+    return PushEnableOutcome.denied;
+  }
   final openedSettings = await showPermissionSettingsSheet(
     context,
     AppPermission.notifications,

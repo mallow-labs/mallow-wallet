@@ -69,6 +69,7 @@ service each one belongs to:
 | `brand_solscan.svg`, `brand_solana_beach.svg`, `brand_orbmarkets.svg`                   | Solscan, Solana Beach, Orb     | the explorer picker        |
 | `brand_apple.svg`, `brand_google.svg`                                                   | Apple, Google                  | the social sign-in buttons |
 | `brand_x.svg`, `brand_ig.svg`, `brand_discord.svg`, `brand_youtube.svg`, `brand_yt.svg` | X, Instagram, Discord, YouTube | profile social links       |
+| `brand_ledger.svg`                                                                      | Ledger SAS                     | the Ledger wallet badge    |
 
 **These are their owners' marks, not mallow's**, they are here for
 identification only, and the MIT grant does not license them onward. The

@@ -14,6 +14,7 @@ import 'package:mallow_wallet/core/result/app_failure.dart';
 import 'package:mallow_wallet/core/result/result.dart';
 import 'package:mallow_wallet/core/session/session_manager.dart';
 import 'package:mallow_wallet/core/services/fee_config.dart';
+import 'package:mallow_wallet/core/services/signing_copy.dart';
 import 'package:mallow_wallet/core/services/token_price_service.dart';
 import 'package:mallow_wallet/core/services/transaction_executor.dart';
 import 'package:mallow_wallet/core/services/transaction_pipeline.dart';
@@ -25,7 +26,9 @@ import 'package:mallow_wallet/features/mint/services/mint_bloc.dart';
 import 'package:mallow_wallet/di.dart';
 import 'package:mockito/annotations.dart';
 import 'package:mockito/mockito.dart';
-import 'package:solana/solana.dart' show Ed25519HDKeyPair;
+import 'package:solana/encoder.dart' show SignedTx;
+import 'package:solana/solana.dart'
+    show Ed25519HDKeyPair, Ed25519HDPublicKey, Message, SystemInstruction;
 
 import 'mint_bloc_test.mocks.dart';
 
@@ -126,6 +129,14 @@ void main() {
     provideDummy<ApiResponse<UnsignedTxResponse>>(
       const ApiResponse<UnsignedTxResponse>(
         result: UnsignedTxResponse(tx: 'dummy'),
+      ),
+    );
+    // `buildEditNftTx` returns the setup-aware envelope (the cNFT edit can
+    // answer with a lookup-table `setupTx`); `buildMintNftTx` still returns
+    // the plain one. Both dummies are needed — neither replaces the other.
+    provideDummy<ApiResponse<UnsignedTxWithSetupResponse>>(
+      const ApiResponse<UnsignedTxWithSetupResponse>(
+        result: UnsignedTxWithSetupResponse(tx: 'dummy'),
       ),
     );
     provideDummy<Result<String, AppFailure>>(const ResultSuccess('dummy'));
@@ -528,8 +539,8 @@ void main() {
           mockRepository.uploadMetadata(any),
         ).thenAnswer((_) async => 'ipfs://metadata');
         when(mockRepository.buildEditNftTx(any)).thenAnswer(
-          (_) async => const ApiResponse<UnsignedTxResponse>(
-            result: UnsignedTxResponse(tx: 'unsigned-tx'),
+          (_) async => const ApiResponse<UnsignedTxWithSetupResponse>(
+            result: UnsignedTxWithSetupResponse(tx: 'unsigned-tx'),
           ),
         );
         when(
@@ -1090,6 +1101,147 @@ void main() {
           verifyNever(mockSession.selectSourceWallet(previousWallet));
         },
       );
+
+      // Editing a compressed NFT whose merkle proof does not fit the packet
+      // answers with a `setupTx`: the transaction that CREATES the address
+      // lookup table the edit tx is compiled against. The executor signs,
+      // sends and *confirms* each tx before starting the next, so leading the
+      // batch with the setup tx is the confirmation barrier. Send them the
+      // other way round — or drop the setup tx — and the edit names a lookup
+      // table that does not exist on chain yet; it fails at the validator
+      // with an error that reads like a wallet bug, and the user has paid a
+      // fee for nothing.
+      group('lookup-table setupTx', () {
+        // Byte-distinct, parseable stand-ins so batch ORDER is assertable and
+        // not merely its length.
+        final editTx = _buildParseableTxBase64(testWalletAddress);
+        final setupTx = _buildParseableTxBase64(testWalletAddress, lamports: 2);
+
+        /// Signing stages the bloc surfaced while awaiting external approval.
+        late List<String> signingStages;
+
+        setUp(() {
+          signingStages = <String>[];
+          // External signer: local-key wallets sign with no user-facing
+          // prompt, so only the external copy carries batch progress.
+          when(
+            mockWalletManager.isLocalSigner(),
+          ).thenAnswer((_) async => false);
+          // Walk awaitingApproval once per tx in whatever batch the bloc
+          // actually hands over, so the signing copy is exercised with the
+          // real index/total the executor would report.
+          when(
+            mockExecutor.execute(
+              txsBase64: anyNamed('txsBase64'),
+              usdValue: anyNamed('usdValue'),
+              flow: anyNamed('flow'),
+              additionalSigners: anyNamed('additionalSigners'),
+              onStage: anyNamed('onStage'),
+              tracker: anyNamed('tracker'),
+              useLedger: anyNamed('useLedger'),
+            ),
+          ).thenAnswer((inv) async {
+            final txs = inv.namedArguments[#txsBase64] as List<String>;
+            final onStage =
+                inv.namedArguments[#onStage]
+                    as void Function(ExecutorStageEvent)?;
+            for (var i = 0; i < txs.length; i++) {
+              onStage?.call(
+                ExecutorStageEvent(
+                  stage: ExecutorStage.awaitingApproval,
+                  index: i,
+                  total: txs.length,
+                ),
+              );
+            }
+            return const ResultSuccess(testSignature);
+          });
+        });
+
+        /// Attach a listener that records every external-approval stage the
+        /// bloc emits, then start the confirm flow.
+        void confirmRecordingStages(MintBloc bloc) {
+          bloc.stream.listen((s) {
+            final stage = s.pipelineStage;
+            if (stage != null && stage.startsWith(kExternalSigningLabel)) {
+              signingStages.add(stage);
+            }
+          });
+          bloc.add(const MintEvent.confirmMint());
+        }
+
+        blocTest<MintBloc, MintState>(
+          'signs the setupTx FIRST and the edit second — the confirmed setup '
+          'is what makes the edit tx\'s lookup table exist',
+          setUp: () {
+            when(mockRepository.buildEditNftTx(any)).thenAnswer(
+              (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+                result: UnsignedTxWithSetupResponse(
+                  tx: editTx,
+                  setupTx: setupTx,
+                ),
+              ),
+            );
+          },
+          build: buildBloc,
+          seed: editSeed,
+          act: confirmRecordingStages,
+          wait: const Duration(milliseconds: 100),
+          verify: (_) {
+            final batch =
+                verify(
+                      mockExecutor.execute(
+                        txsBase64: captureAnyNamed('txsBase64'),
+                        usdValue: anyNamed('usdValue'),
+                        flow: anyNamed('flow'),
+                        additionalSigners: anyNamed('additionalSigners'),
+                        onStage: anyNamed('onStage'),
+                        tracker: anyNamed('tracker'),
+                        useLedger: anyNamed('useLedger'),
+                      ),
+                    ).captured.single
+                    as List<String>;
+            expect(batch, [setupTx, editTx]);
+            // Two wallet prompts: without the count on the copy the second
+            // one reads as the first having failed and re-asked.
+            expect(signingStages.first, '$kExternalSigningLabel (1 of 2)');
+            expect(signingStages.last, '$kExternalSigningLabel (2 of 2)');
+          },
+        );
+
+        blocTest<MintBloc, MintState>(
+          'sends the edit alone when the backend planned no table — an '
+          'ordinary edit gains neither a second signature nor batch copy',
+          setUp: () {
+            when(mockRepository.buildEditNftTx(any)).thenAnswer(
+              (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+                result: UnsignedTxWithSetupResponse(tx: editTx),
+              ),
+            );
+          },
+          build: buildBloc,
+          seed: editSeed,
+          act: confirmRecordingStages,
+          wait: const Duration(milliseconds: 100),
+          verify: (_) {
+            final batch =
+                verify(
+                      mockExecutor.execute(
+                        txsBase64: captureAnyNamed('txsBase64'),
+                        usdValue: anyNamed('usdValue'),
+                        flow: anyNamed('flow'),
+                        additionalSigners: anyNamed('additionalSigners'),
+                        onStage: anyNamed('onStage'),
+                        tracker: anyNamed('tracker'),
+                        useLedger: anyNamed('useLedger'),
+                      ),
+                    ).captured.single
+                    as List<String>;
+            expect(batch, [editTx]);
+            expect(signingStages, everyElement(kExternalSigningLabel));
+          },
+        );
+      });
     });
   });
 
@@ -1366,8 +1518,8 @@ void main() {
         ),
       );
       when(mockRepository.buildEditNftTx(any)).thenAnswer(
-        (_) async => const ApiResponse<UnsignedTxResponse>(
-          result: UnsignedTxResponse(tx: 'simTxBase64'),
+        (_) async => const ApiResponse<UnsignedTxWithSetupResponse>(
+          result: UnsignedTxWithSetupResponse(tx: 'simTxBase64'),
         ),
       );
       when(
@@ -1400,8 +1552,8 @@ void main() {
         ),
       );
       when(mockRepository.buildEditNftTx(any)).thenAnswer(
-        (_) async => const ApiResponse<UnsignedTxResponse>(
-          result: UnsignedTxResponse(tx: 'dummyTxBase64'),
+        (_) async => const ApiResponse<UnsignedTxWithSetupResponse>(
+          result: UnsignedTxWithSetupResponse(tx: 'dummyTxBase64'),
         ),
       );
       when(
@@ -1496,6 +1648,46 @@ void main() {
         expect(req.dryRun, isFalse);
       },
     );
+
+    // The backend plans the caller's lookup table on the dry run too, so a
+    // deep-tree compressed NFT prices its edit with a `setupTx` in hand. The
+    // returned `tx` is compiled against a table that does not exist yet:
+    // simulating it can only fail, and the handler's blanket catch would
+    // report that failure as "no cost" — silently retiring the cost preview
+    // for exactly the assets this path exists for. Skipping on sight keeps
+    // the fall-back to the static breakdown a decision instead of an accident.
+    blocTest<MintBloc, MintState>(
+      'a cost preview answered with a setupTx is not simulated at all, and '
+      'lands on the static estimate rather than a swallowed RPC failure',
+      setUp: () {
+        stubSimulation();
+        when(mockRepository.buildEditNftTx(any)).thenAnswer(
+          (_) async => const ApiResponse<UnsignedTxWithSetupResponse>(
+            result: UnsignedTxWithSetupResponse(
+              tx: 'simTxBase64',
+              setupTx: 'setupTxBase64',
+            ),
+          ),
+        );
+      },
+      build: buildBloc,
+      seed: () => editSeed,
+      act: (bloc) => bloc.add(const MintEvent.simulateTxCost()),
+      wait: const Duration(milliseconds: 50),
+      verify: (bloc) {
+        verifyNever(
+          mockRpcService.simulateWithDelta(
+            address: anyNamed('address'),
+            simulate: anyNamed('simulate'),
+            requirePreBalance: anyNamed('requirePreBalance'),
+          ),
+        );
+        // Shimmer cleared, no simulated figure: the preview shows the static
+        // breakdown, which is what an un-simulated edit already shows.
+        expect(bloc.state.isSimulatingTxCost, isFalse);
+        expect(bloc.state.simulatedTxCostLamports, isNull);
+      },
+    );
   });
 
   // A Master Edition's link to its parent Core Collection is an mpl-core
@@ -1517,8 +1709,8 @@ void main() {
         mockRepository.generateMintKeypair(),
       ).thenAnswer((_) async => Ed25519HDKeyPair.random());
       when(mockRepository.buildEditNftTx(any)).thenAnswer(
-        (_) async => const ApiResponse<UnsignedTxResponse>(
-          result: UnsignedTxResponse(tx: 'dummyTxBase64'),
+        (_) async => const ApiResponse<UnsignedTxWithSetupResponse>(
+          result: UnsignedTxWithSetupResponse(tx: 'dummyTxBase64'),
         ),
       );
       when(
@@ -1873,4 +2065,25 @@ void main() {
       );
     });
   });
+}
+
+/// Builds a base64-encoded SignedTx with a single self-transfer instruction so
+/// it round-trips through `SignedTx.fromBytes` cleanly. Vary [lamports] for a
+/// byte-distinct second transaction, so a batch's ORDER is assertable and not
+/// just its length.
+String _buildParseableTxBase64(String walletAddress, {int lamports = 1}) {
+  final pubkey = Ed25519HDPublicKey.fromBase58(walletAddress);
+  final message = Message.only(
+    SystemInstruction.transfer(
+      fundingAccount: pubkey,
+      recipientAccount: pubkey,
+      lamports: lamports,
+    ),
+  );
+  return SignedTx(
+    compiledMessage: message.compile(
+      recentBlockhash: '11111111111111111111111111111111',
+      feePayer: pubkey,
+    ),
+  ).encode();
 }

@@ -12,14 +12,26 @@
 		"gateway whose host is '<valid CID>.ipfs.<rest>' (origin-isolated gateways put",
 		"the CID in the leftmost label; CIDv1 only, since a DNS label can't be",
 		"case-sensitive base58). ar://TXID[/path] from",
-		"the arweaveHosts list only, first path segment matching txidRegex. gateway.irys.xyz",
+		"the arweaveHosts list only, first path segment matching txidRegex. arweaveHosts is the",
+		"RECOGNITION set; fetch order is each implementation's own list and may be a subset",
+		"(permagate.io is recognized, never fetched from). gateway.irys.xyz",
 		"is deliberately NOT an arweave host: Irys data items live on its own data chain,",
 		"so an id that looks like a txid does not resolve on any arweave gateway. Do not",
 		"re-add it, and never route an irys URL through an arweave mirror. Query strings",
 		"are dropped for both content-addressed families (the id names the bytes);",
 		"embedded percent-encoding in kept path segments is preserved verbatim.",
 		"originalPath = '/original/' + encodeURIComponent(canonical) \u2014 byte-exact,",
-		"same embedding convention as the existing resize path."
+		"same embedding convention as the existing resize path.",
+		"bareCidHosts: legacy gateways that served a bare CID with no /ipfs/ segment. On those",
+		"hosts only (exact match after lowercasing and www-stripping; a '*.' entry matches any",
+		"host with at least one label before the suffix, not the apex), a first path segment",
+		"matching cidRegex canonicalizes to ipfs://CID[/path]. The generic /ipfs/<CID> rule",
+		"runs first and still applies on every host.",
+		"directGateways are the preferred public mirrors a canonical form is expanded onto:",
+		"the /original/ miss redirect target and the client fallback. They are NOT fetch order.",
+		"Contract bump 2026-09: directGateways.ipfs moved from the pinning mirror to the",
+		"deployment's own tiered gateway (locally cached blocks first, then the pinning",
+		"mirror, then network retrieval)."
 	],
 	"cidRegex": "^(Qm[1-9A-HJ-NP-Za-km-z]{44}|b[a-z2-7]{50,})$",
 	"txidRegex": "^[A-Za-z0-9_-]{43}$",
@@ -27,6 +39,14 @@
 		"arweave.example.com",
 		"permagate.io",
 		"arweave.net"
+	],
+	"bareCidHosts": [
+		"gateway.pinata.cloud",
+		"*.mypinata.cloud",
+		"nftstorage.link",
+		"cloudflare-ipfs.com",
+		"gateway.pinit.io",
+		"gateway.lighthouse.storage"
 	],
 	"directGateways": {
 		"ipfs": "https://ipfs.example.com/ipfs/",
@@ -131,6 +151,13 @@
 			"canonical": "ar://xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/0",
 			"direct": "https://arweave.example.com/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/0",
 			"originalPath": "/original/ar%3A%2F%2Fxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx%2F0"
+		},
+		{
+			"name": "ar-query-dropped",
+			"input": "https://arweave.net/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx?ext=mp4",
+			"canonical": "ar://xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"direct": "https://arweave.example.com/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+			"originalPath": "/original/ar%3A%2F%2Fxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 		},
 		{
 			"name": "ar-permagate-query-dropped",
@@ -264,6 +291,69 @@
 			"canonical": "https://arweave.net",
 			"direct": "https://arweave.net",
 			"originalPath": "/original/https%3A%2F%2Farweave.net"
+		},
+		{
+			"name": "ipfs-bare-cid-pinata",
+			"input": "https://gateway.pinata.cloud/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/0.png",
+			"canonical": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/0.png",
+			"direct": "https://ipfs.example.com/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/0.png",
+			"originalPath": "/original/ipfs%3A%2F%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim%2F0.png"
+		},
+		{
+			"name": "ipfs-bare-cid-mypinata-subdomain",
+			"input": "https://testlaunchmynft.mypinata.cloud/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+			"canonical": "ipfs://QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+			"direct": "https://ipfs.example.com/ipfs/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+			"originalPath": "/original/ipfs%3A%2F%2FQmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG"
+		},
+		{
+			"name": "ipfs-bare-cid-nftstorage-query-dropped",
+			"input": "https://nftstorage.link/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim?ext=gif",
+			"canonical": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"direct": "https://ipfs.example.com/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"originalPath": "/original/ipfs%3A%2F%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim"
+		},
+		{
+			"name": "ipfs-bare-cid-cloudflare",
+			"input": "https://cloudflare-ipfs.com/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/art.gif",
+			"canonical": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/art.gif",
+			"direct": "https://ipfs.example.com/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/art.gif",
+			"originalPath": "/original/ipfs%3A%2F%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim%2Fart.gif"
+		},
+		{
+			"name": "ipfs-bare-cid-pinit",
+			"input": "https://gateway.pinit.io/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"canonical": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"direct": "https://ipfs.example.com/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"originalPath": "/original/ipfs%3A%2F%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim"
+		},
+		{
+			"name": "ipfs-bare-cid-lighthouse-host-case-insensitive",
+			"input": "https://Gateway.Lighthouse.Storage/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/meta.json",
+			"canonical": "ipfs://bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/meta.json",
+			"direct": "https://ipfs.example.com/ipfs/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim/meta.json",
+			"originalPath": "/original/ipfs%3A%2F%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim%2Fmeta.json"
+		},
+		{
+			"name": "ipfs-bare-cid-unlisted-host-verbatim",
+			"input": "https://example.com/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"canonical": "https://example.com/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"direct": "https://example.com/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"originalPath": "/original/https%3A%2F%2Fexample.com%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim"
+		},
+		{
+			"name": "ipfs-bare-cid-invalid-cid-verbatim",
+			"input": "https://gateway.pinata.cloud/not-a-cid.png",
+			"canonical": "https://gateway.pinata.cloud/not-a-cid.png",
+			"direct": "https://gateway.pinata.cloud/not-a-cid.png",
+			"originalPath": "/original/https%3A%2F%2Fgateway.pinata.cloud%2Fnot-a-cid.png"
+		},
+		{
+			"name": "ipfs-bare-cid-mypinata-apex-verbatim",
+			"input": "https://mypinata.cloud/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"canonical": "https://mypinata.cloud/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"direct": "https://mypinata.cloud/bafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim",
+			"originalPath": "/original/https%3A%2F%2Fmypinata.cloud%2Fbafybeib7vqkbjwlsffypzczrr6t6lcjcvjyy7iuhjj4mxgz3plj7uoouim"
 		}
 	]
 }

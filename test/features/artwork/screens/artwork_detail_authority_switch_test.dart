@@ -21,6 +21,7 @@ import 'package:mallow_wallet/core/services/wallet_repository.dart';
 import 'package:mallow_wallet/core/session/session_manager.dart';
 import 'package:mallow_wallet/core/config/remote_config.dart';
 import 'package:mallow_wallet/core/config/remote_config_service.dart';
+import 'package:mallow_wallet/core/config/store_build.dart';
 import 'package:mallow_wallet/di.dart';
 import 'package:mallow_wallet/features/artwork/data/artwork_events_repository.dart';
 import 'package:mallow_wallet/features/artwork/data/market_listing_repository.dart';
@@ -466,6 +467,21 @@ void main() {
     ownerAddresses: ['someone-else'],
   );
 
+  // Fixed-price listing held by the non-active session wallet.
+  ArtworkDetails ownerListed() => const ArtworkDetails(
+    mintAccount: mint,
+    title: 'Test Artwork',
+    imageUrl: '',
+    description: 'desc',
+    artistName: 'Artist',
+    artistAddress: 'artist-addr',
+    ownerAddress: holderAddress,
+    ownerAddresses: [holderAddress],
+    listingType: ListingType.buyNow,
+    price: 1000000000,
+    currency: 'So11111111111111111111111111111111111111112',
+  );
+
   // Settle-auction is the strictest case: the sheet's proceeds breakdown and
   // the optimistic ownership bookkeeping are BOTH derived from
   // `currentAddress`, so the signer has to be re-pointed before any of it is
@@ -686,6 +702,64 @@ void main() {
 
       expect(switches, [holderAddress, activeAddress]);
       expect(active, activeAddress);
+    },
+  );
+
+  // The store build's direct "Cancel listing" (commerce hidden, so no
+  // "Update listing" sheet to host the cancel) re-points the signer like every
+  // other owner action here, and dispatches as the holder.
+  testWidgets(
+    'cancel-listing re-points to the owning session wallet and dispatches '
+    'as that wallet',
+    (tester) async {
+      debugShowNftCommerceOverride = false;
+      addTearDown(() => debugShowNftCommerceOverride = null);
+      arrange(ownerListed());
+      await pumpScreen(tester);
+      expect(find.text('Cancel listing'), findsOneWidget);
+
+      await tester.tap(find.text('Cancel listing'));
+      await pumpAction(tester);
+
+      expect(switches, [holderAddress]);
+      final cancel = dispatched.singleWhere((d) => d.$1 is MarketCancelListing);
+      expect(cancel.$2, holderAddress);
+    },
+  );
+
+  // The `fixed-price-cancel` kill switch must be read BEFORE the signer
+  // re-point, as every other gated handler does: the re-point is a `/v0/login`
+  // round trip whose restore is best-effort, so a killed flow has to refuse
+  // while the app-wide wallet is still where the user left it — not flip it,
+  // refuse, and hope the flip back lands.
+  testWidgets(
+    'cancel-listing refuses a killed fixed-price-cancel before re-pointing '
+    'the signer',
+    (tester) async {
+      debugShowNftCommerceOverride = false;
+      addTearDown(() => debugShowNftCommerceOverride = null);
+      final remoteConfig =
+          sl<RemoteConfigService>() as _PermissiveRemoteConfigService;
+      const cell = FlowKey.solana(AppFlow.fixedPriceCancel);
+      remoteConfig.config.value = RemoteConfig(
+        disabledMessages: {
+          '${cell.chain.toDbString()}:${cell.flow.wire}':
+              'Delisting is paused.',
+        },
+      );
+      addTearDown(() => remoteConfig.config.value = RemoteConfig.permissive);
+      arrange(ownerListed());
+      await pumpScreen(tester);
+
+      await tester.tap(find.text('Cancel listing'));
+      await pumpAction(tester);
+
+      expect(find.text('Delisting is paused.'), findsOneWidget);
+      expect(switches, isEmpty);
+      expect(
+        dispatched.map((d) => d.$1).whereType<MarketCancelListing>(),
+        isEmpty,
+      );
     },
   );
 }

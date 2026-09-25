@@ -80,6 +80,42 @@ void main() {
     });
   });
 
+  // A factory reset deletes the database file and the DB encryption key. A
+  // quarantined copy left beside them still holds real wallet rows — the key
+  // is gone, so they are unreadable, but "unreadable with today's key" is not
+  // what a user asking to erase the app means. resetStorage runs this for the
+  // same reason quarantineCorruptDatabase prunes with it.
+  group('deleteQuarantinedCopies', () {
+    test('deletes main and sidecar copies, leaves everything else', () {
+      final file = dbFile()..writeAsStringSync('live-db');
+      File('${file.path}-wal').writeAsStringSync('live-wal');
+      File(
+        p.join(tmp.path, 'mallow.sqlite.invalid-1111'),
+      ).writeAsStringSync('old-main');
+      File(
+        p.join(tmp.path, 'mallow.sqlite-wal.invalid-1111'),
+      ).writeAsStringSync('old-wal');
+      File(
+        p.join(tmp.path, 'mallow.sqlite-shm.invalid-2222'),
+      ).writeAsStringSync('older-shm');
+      File(p.join(tmp.path, 'other.sqlite')).writeAsStringSync('not-ours');
+
+      deleteQuarantinedCopies(file);
+
+      expect(quarantinedNames(), isEmpty);
+      expect(file.existsSync(), isTrue);
+      expect(File('${file.path}-wal').existsSync(), isTrue);
+      expect(File(p.join(tmp.path, 'other.sqlite')).existsSync(), isTrue);
+    });
+
+    test('is a no-op when the directory is gone', () {
+      final file = dbFile();
+      tmp.deleteSync(recursive: true);
+
+      expect(() => deleteQuarantinedCopies(file), returnsNormally);
+    });
+  });
+
   group('probeEncryptedDatabase', () {
     // Mirrors the probe query from _makeSetupEncryption without the cipher
     // pragmas (the test host's sqlite3 build has no cipher support; unknown

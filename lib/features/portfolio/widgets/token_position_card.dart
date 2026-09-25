@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../shared/theme/mallow_theme.dart';
+import '../../../shared/utils/price_format.dart' show stripTrailingZeros;
 import '../models/token_balance.dart';
 
 /// "Your Position" card showing the user's token holding with P&L.
@@ -96,10 +97,20 @@ class TokenPositionCard extends StatelessWidget {
   }
 
   String _formatBalance(double balance) {
-    if (balance >= 1000000) return '${(balance / 1000000).toStringAsFixed(2)}M';
-    if (balance >= 1000) return '${(balance / 1000).toStringAsFixed(2)}K';
-    if (balance >= 1) return balance.toStringAsFixed(4);
-    if (balance > 0) return balance.toStringAsFixed(8);
+    if (balance >= 1000000) {
+      final value = stripTrailingZeros((balance / 1000000).toStringAsFixed(2));
+      return '${value}M';
+    }
+    if (balance >= 1000) {
+      final value = stripTrailingZeros((balance / 1000).toStringAsFixed(2));
+      return '${value}K';
+    }
+    if (balance >= 1) {
+      return stripTrailingZeros(balance.toStringAsFixed(4));
+    }
+    if (balance > 0) {
+      return stripTrailingZeros(balance.toStringAsFixed(8));
+    }
     return '0';
   }
 }

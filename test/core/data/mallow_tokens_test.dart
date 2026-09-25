@@ -80,6 +80,25 @@ void main() {
       expect(tokenByMint(ethMint)?.disableSwap, isTrue);
     });
 
+    test('registers TOADS with listing metadata and swaps disabled', () {
+      final toads = tokenByMint(toadsMint);
+      expect(toads?.symbol, 'TOADS');
+      expect(toads?.decimals, 6);
+      expect(toads?.inputDecimals, 0);
+      expect(toads?.minListingPrice, 10000000000);
+      expect(toads?.disableSwap, isTrue);
+    });
+
+    test('registers TEST22 as a devnet-only listing token', () {
+      final test22 = tokenByMint(test22Mint);
+      expect(test22?.symbol, 'TEST22');
+      expect(test22?.decimals, 6);
+      expect(test22?.inputDecimals, 3);
+      expect(test22?.minListingPrice, 1000000);
+      expect(test22?.disableSwap, isTrue);
+      expect(test22?.isDevnet, isTrue);
+    });
+
     test('devnet entries are reachable through tokenByMint', () {
       // Lookup must work for devnet mints regardless of picker filtering so
       // existing balances can render.
@@ -95,6 +114,8 @@ void main() {
       expect(mallowTokenMints, contains(usdcMint));
       expect(mallowTokenMints, contains(usdcDevMint));
       expect(mallowTokenMints, contains(ethMint));
+      expect(mallowTokenMints, contains(toadsMint));
+      expect(mallowTokenMints, contains(test22Mint));
     });
 
     test('is unmodifiable', () {
@@ -106,6 +127,25 @@ void main() {
     test('is SOL', () {
       expect(defaultBidToken.symbol, 'SOL');
       expect(defaultBidToken.mint, solMint);
+    });
+  });
+
+  group('defaultListingTokenSymbols', () {
+    tearDown(Config.debugOverrides.clear);
+
+    test('includes TOADS in production', () {
+      Config.debugOverrides['ENV'] = 'production';
+      expect(defaultListingTokenSymbols, contains('TOADS'));
+      expect(defaultListingTokenSymbols, isNot(contains('TEST22')));
+    });
+
+    test('includes TOADS and TEST22 on devnet while substituting USDC_DEV', () {
+      Config.debugOverrides['ENV'] = 'development';
+      expect(
+        defaultListingTokenSymbols,
+        containsAll(['TOADS', 'TEST22', 'USDC_DEV']),
+      );
+      expect(defaultListingTokenSymbols, isNot(contains('USDC')));
     });
   });
 
@@ -131,6 +171,8 @@ void main() {
       final mints = pickableBidTokens().map((t) => t.mint).toList();
       expect(mints, contains(usdcDevMint));
       expect(mints, isNot(contains(usdcMint)));
+      expect(mints, contains(toadsMint));
+      expect(mints, contains(test22Mint));
     });
 
     test('keeps user-enabled devnet tokens on devnet', () {

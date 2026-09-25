@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:bloc_test/bloc_test.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mallow_api/mallow_api.dart';
 import 'package:mallow_wallet/core/services/tx_landed_slots.dart';
 import 'package:mallow_wallet/core/crypto/wallet_manager.dart';
 import 'package:mallow_wallet/core/network/auth_service.dart';
@@ -11,8 +12,11 @@ import 'package:mallow_wallet/core/result/app_failure.dart';
 import 'package:mallow_wallet/core/result/result.dart';
 import 'package:mallow_wallet/core/realtime/market_realtime_service.dart';
 import 'package:mallow_wallet/core/services/marketplace_action_flow.dart';
+import 'package:mallow_wallet/core/services/stale_tx_tracker.dart';
 import 'package:mallow_wallet/core/services/transaction_executor.dart';
 import 'package:mallow_wallet/core/services/transaction_pipeline.dart';
+import 'package:mallow_wallet/core/services/transaction_signing.dart'
+    show addressLookupTableProgramId;
 import 'package:mallow_wallet/features/artwork/data/artwork_repository.dart';
 import 'package:mallow_wallet/features/artwork/services/artwork_bloc.dart'
     show ArtworkDetails, ArtworkRoyaltySplit;
@@ -24,6 +28,8 @@ import 'package:mallow_wallet/features/sale/services/marketplace_config_service.
 import 'package:mallow_wallet/features/sale/services/proceeds_calculator.dart';
 import 'package:mockito/annotations.dart';
 import 'package:mockito/mockito.dart';
+import 'package:solana/encoder.dart';
+import 'package:solana/solana.dart';
 
 import 'auction_bloc_test.mocks.dart';
 
@@ -64,7 +70,36 @@ void main() {
   const testWalletAddress = 'HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH';
   const testSignature =
       '5wHu1qwD7TjGq5mXg1hXNxoZMmcMvisPLfkxGqzxJxbVnC4ZDvDpKsWvBsYxSxSvGmEzMfZZVFKLiCjMrpLnBqTJ';
-  const testTxBase64 = 'unsigned-tx-base64';
+  // Real wire-format transactions rather than opaque strings, so the two
+  // members of a setup+auction batch are byte-distinct and the assertions
+  // below can pin ORDER, not just length. The executor is mocked, so the
+  // bytes never have to be on-chain-valid — only different from each other.
+  final testTxBase64 = _buildParseableTxBase64(testWalletAddress);
+
+  // Stands in for the address-lookup-table `setupTx` the backend attaches to a
+  // cNFT auction whose settle would not fit the packet raw.
+  final setupTxBase64 = _buildParseableTxBase64(testWalletAddress, lamports: 2);
+
+  // The real thing: a `setupTx` that CREATES the lookup table, before and
+  // after the backend recompiles it against a live slot. Only `recent_slot`
+  // differs — which is the whole point of the bug below. A client-side
+  // blockhash refresh cannot tell the dead one from the live one.
+  final staleLutSetupTx = _lutSetupTxBase64(
+    testWalletAddress,
+    recentSlot: 400000000,
+  );
+  final freshLutSetupTx = _lutSetupTxBase64(
+    testWalletAddress,
+    recentSlot: 400000512,
+  );
+
+  /// The `{ result: { tx, setupTx? } }` envelope `POST /v2/tx/auctions/create`
+  /// answers with. [setupTx] is null for every non-compressed listing.
+  ApiResponse<UnsignedTxWithSetupResponse> createAuctionResponse({
+    String? setupTx,
+  }) => ApiResponse<UnsignedTxWithSetupResponse>(
+    result: UnsignedTxWithSetupResponse(tx: testTxBase64, setupTx: setupTx),
+  );
 
   final testArtwork = PortfolioArtwork(
     mintAccount: '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM',
@@ -82,6 +117,11 @@ void main() {
     // mockito needs a dummy for the executor's non-nullable Result return
     // type even though every called path is explicitly stubbed.
     provideDummy<Result<String, AppFailure>>(const ResultSuccess(''));
+    // `ApiResponse` is a freezed *sealed* class, so mockito cannot synthesise
+    // a smart fake for the create-auction envelope on its own.
+    provideDummy<ApiResponse<UnsignedTxWithSetupResponse>>(
+      createAuctionResponse(),
+    );
   });
 
   setUp(() {
@@ -134,7 +174,7 @@ void main() {
   void stubExecutorSuccess() {
     when(
       mockAuctionRepo.getCreateAuctionTx(any),
-    ).thenAnswer((_) async => testTxBase64);
+    ).thenAnswer((_) async => createAuctionResponse());
     when(
       mockExecutor.execute(
         txsBase64: anyNamed('txsBase64'),
@@ -289,7 +329,7 @@ void main() {
 
   group('requestList', () {
     blocTest<AuctionBloc, AuctionState>(
-      'emits Preparing → Signing → Broadcasting → Success on happy path',
+      'emits Preparing → Ready → Signing → Broadcasting → Success on happy path',
       setUp: stubExecutorSuccess,
       build: buildBloc,
       seed: validSeed,
@@ -299,6 +339,11 @@ void main() {
           (s) => s.flow,
           'flow',
           isA<TxFlowPreparing<void, AuctionSuccessData>>(),
+        ),
+        isA<AuctionState>().having(
+          (s) => s.flow,
+          'flow',
+          isA<TxFlowReady<void, AuctionSuccessData>>(),
         ),
         isA<AuctionState>().having(
           (s) => s.flow,
@@ -387,7 +432,7 @@ void main() {
       setUp: () {
         when(
           mockAuctionRepo.getCreateAuctionTx(any),
-        ).thenAnswer((_) async => testTxBase64);
+        ).thenAnswer((_) async => createAuctionResponse());
         when(
           mockExecutor.execute(
             txsBase64: anyNamed('txsBase64'),
@@ -408,6 +453,11 @@ void main() {
           (s) => s.flow,
           'flow',
           isA<TxFlowPreparing<void, AuctionSuccessData>>(),
+        ),
+        isA<AuctionState>().having(
+          (s) => s.flow,
+          'flow',
+          isA<TxFlowReady<void, AuctionSuccessData>>(),
         ),
         isA<AuctionState>().having(
           (s) => s.flow,
@@ -444,6 +494,334 @@ void main() {
       ],
       verify: (_) {
         verifyNever(mockAuctionRepo.getCreateAuctionTx(any));
+      },
+    );
+
+    // `POST /v2/tx/auctions/create` answers with a `setupTx` whenever the
+    // auction is on a compressed NFT whose eventual settle would not fit the
+    // 1232-byte packet raw: it creates the address lookup table the auction
+    // `tx` is *already compiled against*. [TransactionExecutor.execute] signs
+    // and CONFIRMS each tx before starting the next, so putting the setup
+    // first is the confirmation barrier that makes the table exist by the time
+    // the auction tx names it — and makes a setup failure abort before the
+    // auction tx is ever broadcast. Send them the other way round (or drop the
+    // setup, as this wallet did until plan 049 step 0) and the auction tx
+    // references a lookup table that does not exist and fails on-chain, with
+    // an error that reads to the user like a mallow bug. Order is therefore
+    // the assertion, not batch length.
+    blocTest<AuctionBloc, AuctionState>(
+      'signs the LUT setup tx before the auction tx when the backend sends one',
+      setUp: () {
+        stubExecutorSuccess();
+        when(mockAuctionRepo.getCreateAuctionTx(any)).thenAnswer(
+          (_) async => createAuctionResponse(setupTx: setupTxBase64),
+        );
+      },
+      build: buildBloc,
+      seed: validSeed,
+      act: (bloc) => bloc.add(const AuctionEvent.requestList()),
+      verify: (_) {
+        final batch =
+            verify(
+                  mockExecutor.execute(
+                    txsBase64: captureAnyNamed('txsBase64'),
+                    usdValue: anyNamed('usdValue'),
+                    flow: anyNamed('flow'),
+                    tracker: anyNamed('tracker'),
+                    onStage: anyNamed('onStage'),
+                    useLedger: anyNamed('useLedger'),
+                    additionalSigners: anyNamed('additionalSigners'),
+                  ),
+                ).captured.single
+                as List<String>;
+        expect(batch, [setupTxBase64, testTxBase64]);
+      },
+    );
+
+    // The mirror of the above: a 1/1, an edition print or any cNFT that fits
+    // raw gets no `setupTx`, and must not be charged for a lookup table it
+    // does not need — one prompt, one signature, one rent payment.
+    blocTest<AuctionBloc, AuctionState>(
+      'sends the auction tx alone when the backend omits setupTx',
+      setUp: stubExecutorSuccess,
+      build: buildBloc,
+      seed: validSeed,
+      act: (bloc) => bloc.add(const AuctionEvent.requestList()),
+      verify: (_) {
+        final batch =
+            verify(
+                  mockExecutor.execute(
+                    txsBase64: captureAnyNamed('txsBase64'),
+                    usdValue: anyNamed('usdValue'),
+                    flow: anyNamed('flow'),
+                    tracker: anyNamed('tracker'),
+                    onStage: anyNamed('onStage'),
+                    useLedger: anyNamed('useLedger'),
+                    additionalSigners: anyNamed('additionalSigners'),
+                  ),
+                ).captured.single
+                as List<String>;
+        expect(batch, [testTxBase64]);
+      },
+    );
+
+    // An external signer is prompted once per tx. Without the step count in
+    // the copy both prompts read identically ("Awaiting approval…"), so the
+    // second one looks like the sheet hung on the first and the user backs out
+    // of a listing that is half-signed — the setup rent is already spent and
+    // no auction exists. The suffix format is the contract
+    // `signingLabelForStage` parses, so it is asserted verbatim.
+    blocTest<AuctionBloc, AuctionState>(
+      'numbers each approval prompt on a setup+auction batch',
+      setUp: () {
+        when(mockWalletManager.isLocalSigner()).thenAnswer((_) async => false);
+        when(mockAuctionRepo.getCreateAuctionTx(any)).thenAnswer(
+          (_) async => createAuctionResponse(setupTx: setupTxBase64),
+        );
+        when(
+          mockExecutor.execute(
+            txsBase64: anyNamed('txsBase64'),
+            usdValue: anyNamed('usdValue'),
+            flow: anyNamed('flow'),
+            tracker: anyNamed('tracker'),
+            onStage: anyNamed('onStage'),
+            useLedger: anyNamed('useLedger'),
+            additionalSigners: anyNamed('additionalSigners'),
+          ),
+        ).thenAnswer((inv) async {
+          final onStage =
+              inv.namedArguments[#onStage]
+                  as void Function(ExecutorStageEvent)?;
+          final txs = inv.namedArguments[#txsBase64] as List<String>;
+          for (var i = 0; i < txs.length; i++) {
+            onStage?.call(
+              ExecutorStageEvent(
+                stage: ExecutorStage.awaitingApproval,
+                index: i,
+                total: txs.length,
+              ),
+            );
+          }
+          return const ResultSuccess(testSignature);
+        });
+      },
+      build: buildBloc,
+      seed: validSeed,
+      act: (bloc) => bloc.add(const AuctionEvent.requestList()),
+      expect: () => [
+        isA<AuctionState>().having(
+          (s) => s.flow,
+          'flow',
+          isA<TxFlowPreparing<void, AuctionSuccessData>>(),
+        ),
+        isA<AuctionState>().having(
+          (s) => s.flow,
+          'flow',
+          isA<TxFlowReady<void, AuctionSuccessData>>(),
+        ),
+        isA<AuctionState>().having(
+          (s) => s.flow,
+          'flow',
+          isA<TxFlowSigning<void, AuctionSuccessData>>().having(
+            (f) => f.stage,
+            'stage',
+            'Awaiting approval… (1 of 2)',
+          ),
+        ),
+        isA<AuctionState>().having(
+          (s) => s.flow,
+          'flow',
+          isA<TxFlowSigning<void, AuctionSuccessData>>().having(
+            (f) => f.stage,
+            'stage',
+            'Awaiting approval… (2 of 2)',
+          ),
+        ),
+        isA<AuctionState>().having(
+          (s) => s.flow,
+          'flow',
+          isA<TxFlowSuccess<void, AuctionSuccessData>>(),
+        ),
+      ],
+    );
+  });
+
+  // ── The LUT `setupTx`'s recent_slot, which no blockhash refresh touches ──
+  //
+  // `/v2/tx/auctions/create` is not server-co-signed, so `signSendConfirm`'s
+  // `_refreshBlockhashIfSafe` rewrites the batch's blockhash on the way out and
+  // the transaction never *looks* stale. The `recent_slot` that
+  // `create_lookup_table` bakes into the setup tx runs on a
+  // different clock — the last ~512 slots, roughly 3.4 minutes — and the
+  // refresh leaves those bytes untouched. A confirm sheet left open past that
+  // window therefore broadcasts a setup tx that is already dead, and because
+  // the setup LEADS the batch the failure lands on the FIRST transaction of the
+  // listing, with an on-chain error nothing on screen explains.
+  //
+  // Handing `_flow.execute` the same tracker `_flow.prepare` built with is the
+  // only thing that lets [TransactionExecutor] re-ask the builder instead of
+  // re-signing bytes it cannot freshen. These tests drive the REAL executor —
+  // the rebuild decision (`needsBuilderRebuild` → `createsLookupTable`) is the
+  // behaviour under test, so it must not be stubbed away.
+  group('LUT setupTx staleness', () {
+    late int builds;
+    late int rewardPosts;
+    late List<String> signed;
+
+    AuctionBloc buildBlocWith(StaleTxTracker<List<String>> tracker) =>
+        AuctionBloc(
+          mockAuctionRepo,
+          mockRewardsRepo,
+          mockWalletManager,
+          mockDasApi,
+          mockArtworkRepo,
+          MarketplaceActionFlow(
+            mockAuth,
+            TransactionExecutor(mockPipeline),
+            mockPipeline,
+          ),
+          _NoopMarketRealtime(),
+          TxLandedSlots(),
+          mockMarketplaceConfig,
+          txTracker: tracker,
+        );
+
+    setUp(() {
+      builds = 0;
+      rewardPosts = 0;
+      signed = <String>[];
+
+      // Build #1 is the batch the user sees on the confirm sheet; every later
+      // build is the backend recompiling the lookup table against a live slot.
+      when(mockAuctionRepo.getCreateAuctionTx(any)).thenAnswer((_) async {
+        builds++;
+        return createAuctionResponse(
+          setupTx: builds == 1 ? staleLutSetupTx : freshLutSetupTx,
+        );
+      });
+      when(mockRewardsRepo.postRewardsDescription(any)).thenAnswer((_) async {
+        rewardPosts++;
+        return 'rw-$rewardPosts';
+      });
+      when(
+        mockPipeline.signAndBroadcast(
+          unsignedTxBase64: anyNamed('unsignedTxBase64'),
+          usdValue: anyNamed('usdValue'),
+          flow: anyNamed('flow'),
+          additionalSigners: anyNamed('additionalSigners'),
+          onSigned: anyNamed('onSigned'),
+          onLedgerSigning: anyNamed('onLedgerSigning'),
+          useLedger: anyNamed('useLedger'),
+          rpcOverride: anyNamed('rpcOverride'),
+        ),
+      ).thenAnswer((inv) async {
+        signed.add(inv.namedArguments[#unsignedTxBase64] as String);
+        return const ResultSuccess(testSignature);
+      });
+    });
+
+    /// Stands in for the ~3.4 minutes the confirm sheet sat open. The tracker
+    /// under test is built with a zero-length staleness window, so any real
+    /// elapsed time between the build and the executor's pre-flight check is
+    /// enough to make the batch stale — no clock seam required.
+    void stubLingeringSheet() {
+      when(mockWalletManager.isLocalSigner()).thenAnswer((_) async {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+        return true;
+      });
+    }
+
+    blocTest<AuctionBloc, AuctionState>(
+      'a stale [setupTx, tx] batch goes back to the builder instead of being '
+      'signed with a refreshed blockhash',
+      setUp: stubLingeringSheet,
+      build: () => buildBlocWith(
+        StaleTxTracker<List<String>>(staleAfter: Duration.zero),
+      ),
+      seed: validSeed,
+      act: (bloc) => bloc.add(const AuctionEvent.requestList()),
+      wait: const Duration(milliseconds: 100),
+      verify: (_) {
+        expect(
+          builds,
+          2,
+          reason:
+              'the sheet outlived the baked recent_slot, so the batch has to '
+              'be re-asked; without a tracker on execute the executor has '
+              'nothing to re-ask and silently sends the dead one',
+        );
+        expect(
+          signed,
+          [freshLutSetupTx, testTxBase64],
+          reason:
+              'a refreshed blockhash makes the stale setup tx look fresh while '
+              'its recent_slot is already dead — the FIRST transaction of the '
+              'listing then fails on-chain for a reason nothing on screen '
+              'explains, so the rebuilt setup must be what is broadcast',
+        );
+      },
+    );
+
+    blocTest<AuctionBloc, AuctionState>(
+      'a batch confirmed inside the slot window is NOT rebuilt',
+      build: () => buildBlocWith(
+        StaleTxTracker<List<String>>(staleAfter: const Duration(minutes: 5)),
+      ),
+      seed: validSeed,
+      act: (bloc) => bloc.add(const AuctionEvent.requestList()),
+      wait: const Duration(milliseconds: 100),
+      verify: (_) {
+        expect(
+          builds,
+          1,
+          reason:
+              'a rebuild is not free: it asks the backend for a whole new '
+              'lookup table, so a still-live setup tx must be sent as built',
+        );
+        expect(signed, [staleLutSetupTx, testTxBase64]);
+      },
+    );
+
+    // The rebuild replays the `prepare` build closure verbatim. Anything with a
+    // side effect therefore has to stay OUT of that closure —
+    // `postRewardsDescription` persists a rewards row and hands back its id,
+    // and a second POST would orphan the first row while the listing's memo
+    // points at only one of them.
+    blocTest<AuctionBloc, AuctionState>(
+      'a rebuild re-asks for the transactions but never re-posts the rewards '
+      'description',
+      setUp: stubLingeringSheet,
+      build: () => buildBlocWith(
+        StaleTxTracker<List<String>>(staleAfter: Duration.zero),
+      ),
+      seed: () => AuctionState(
+        userPubkey: testWalletAddress,
+        selectedArtwork: testArtwork,
+        reservePrice: validReservePrice,
+        includeRewards: true,
+        rewardsDescription: 'Signed print shipped to the winner',
+      ),
+      act: (bloc) => bloc.add(const AuctionEvent.requestList()),
+      wait: const Duration(milliseconds: 100),
+      verify: (_) {
+        expect(builds, 2, reason: 'the rebuild path must actually have run');
+        expect(
+          rewardPosts,
+          1,
+          reason:
+              'a replayed POST would persist a duplicate rewards row and '
+              'orphan the first — the closure may only rebuild transactions',
+        );
+        final requests = verify(
+          mockAuctionRepo.getCreateAuctionTx(captureAny),
+        ).captured.cast<CreateAuctionTxRequest>();
+        expect(
+          requests.map((r) => r.memo).toList(),
+          ['rewards:rw-1', 'rewards:rw-1'],
+          reason:
+              'the rebuilt listing must carry the memo of the row that was '
+              'actually persisted, not a second one created by the replay',
+        );
       },
     );
   });
@@ -692,4 +1070,58 @@ void main() {
       await bloc.close();
     });
   });
+}
+
+/// A base64 tx carrying the address-lookup-table program's `CreateLookupTable`
+/// instruction — the shape the backend's `alt::create_and_extend_ixs`
+/// emits for the `setupTx` on a deep-tree cNFT auction. Deliberately NOT
+/// pre-signed: `/v2/tx/auctions/create` is never co-signed, which is exactly
+/// why a client-side blockhash refresh hides the dying [recentSlot].
+String _lutSetupTxBase64(String payerAddress, {required int recentSlot}) {
+  final payer = Ed25519HDPublicKey.fromBase58(payerAddress);
+  final table = Ed25519HDPublicKey(List<int>.filled(32, 0x44));
+  final ix = Instruction(
+    programId: Ed25519HDPublicKey.fromBase58(addressLookupTableProgramId),
+    accounts: [
+      AccountMeta.writeable(pubKey: table, isSigner: false),
+      AccountMeta.writeable(pubKey: payer, isSigner: true),
+    ],
+    // bincode: u32 LE variant 0 (CreateLookupTable), u64 LE recent_slot, bump.
+    data: ByteArray.merge([
+      ByteArray.u32(0),
+      ByteArray.u64(recentSlot),
+      ByteArray.u8(255),
+    ]),
+  );
+  final compiled = Message.only(ix).compile(
+    recentBlockhash: '11111111111111111111111111111111',
+    feePayer: payer,
+  );
+  return SignedTx(
+    signatures: List<Signature>.generate(
+      compiled.requiredSignatureCount,
+      (_) => Signature(List<int>.filled(64, 0), publicKey: payer),
+    ),
+    compiledMessage: compiled,
+  ).encode();
+}
+
+/// Builds a base64-encoded SignedTx with a single self-transfer instruction so
+/// it round-trips through `SignedTx.fromBytes` cleanly. [lamports] only exists
+/// to make two otherwise-identical fixtures byte-distinct.
+String _buildParseableTxBase64(String walletAddress, {int lamports = 1}) {
+  final pubkey = Ed25519HDPublicKey.fromBase58(walletAddress);
+  final message = Message.only(
+    SystemInstruction.transfer(
+      fundingAccount: pubkey,
+      recipientAccount: pubkey,
+      lamports: lamports,
+    ),
+  );
+  return SignedTx(
+    compiledMessage: message.compile(
+      recentBlockhash: '11111111111111111111111111111111',
+      feePayer: pubkey,
+    ),
+  ).encode();
 }

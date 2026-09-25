@@ -357,37 +357,6 @@ class Config {
   }
 
   // ---------------------------------------------------------------------------
-  // Canonical asset URLs
-  // ---------------------------------------------------------------------------
-
-  /// Whether asset URLs are emitted in canonical form — `ipfs://<CID>[/path]` /
-  /// `ar://<TXID>[/path]` embedded in the [imageCdnBaseUrl] resize path.
-  ///
-  /// Resolved like every other setting here: `--dart-define`, then off. Real
-  /// builds set `CANONICAL_ASSET_URLS` in the `.env` that
-  /// `--dart-define-from-file` compiles in. A build that passes neither
-  /// keeps emitting gateway-form resize URLs and fragments the Cloudflare edge
-  /// key per gateway.
-  ///
-  /// Originals are no longer behind this gate: they always go through
-  /// `/original/` (see [MallowImage.originalUrl]).
-  ///
-  /// Assignable so tests can exercise both sides; production never assigns.
-  static bool? _canonicalAssetUrlsOverride;
-
-  static bool get canonicalAssetUrls =>
-      _canonicalAssetUrlsOverride ??
-      _isTruthy(const String.fromEnvironment('CANONICAL_ASSET_URLS'));
-
-  static set canonicalAssetUrls(bool value) =>
-      _canonicalAssetUrlsOverride = value;
-
-  static bool _isTruthy(String value) {
-    final v = value.trim().toLowerCase();
-    return v == 'true' || v == '1';
-  }
-
-  // ---------------------------------------------------------------------------
   // First-party client identification
   // ---------------------------------------------------------------------------
 

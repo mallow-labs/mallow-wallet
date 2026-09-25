@@ -13,7 +13,6 @@
 library;
 
 import '../config/environment.dart';
-import 'asset_url.dart';
 import 'canonical_asset_url.dart';
 
 class MallowImage {
@@ -47,26 +46,16 @@ class MallowImage {
     return _cdnSizes.last;
   }
 
-  /// The source URL embedded in a CDN resize path.
+  /// The source URL embedded in a CDN resize path: the canonical form
+  /// (`ipfs://<CID>` / `ar://<TXID>`, verbatim https otherwise), so every
+  /// arrival shape of one asset collapses onto a single Cloudflare edge key and
+  /// a single R2 object (original-serving spec).
   ///
-  /// With [Config.canonicalAssetUrls] on, that is the canonical form
-  /// (`ipfs://<CID>` / `ar://<TXID>`, verbatim https otherwise) so every arrival
-  /// shape of one asset collapses onto a single Cloudflare edge key and a single
-  /// R2 object (original-serving spec). Off, it keeps the legacy behaviour of
-  /// handing the CDN a resolved gateway URL — see [Config.canonicalAssetUrls]
-  /// for why Flutter trails the rollout.
-  static String _cdnSource(String url) =>
-      Config.canonicalAssetUrls ? canonicalizeAssetUrl(url) : _resolveIpfs(url);
-
-  /// Normalises an IPFS URL to an HTTPS gateway URL, deferring to [AssetUrl] so
-  /// the CDN is handed the same gateway the app prefers for direct fetches
-  /// ([Config.ipfsGatewayUrl]) rather than a second, separately-chosen one.
-  static String _resolveIpfs(String url) {
-    if (url.startsWith('ipfs://')) {
-      return AssetUrl.primaryGatewayUrl(url);
-    }
-    return url;
-  }
+  /// Unconditional since 2026-09. It was gated on a build flag through the
+  /// rollout, while the resizer still had to accept both forms; every
+  /// deployment has been on the canonical side for long enough that the gate
+  /// only made two cache shapes reachable from one build.
+  static String _cdnSource(String url) => canonicalizeAssetUrl(url);
 
   /// Returns a CDN-optimised URL sized for [logicalPx] at [dpr] pixel density.
   ///
@@ -111,10 +100,8 @@ class MallowImage {
   /// The image CDN's `/original/` route when one is configured: it
   /// serves mint-time bytes from R2 when stored — far faster than the public
   /// gateways, which is the whole reason originals are cached — and redirects
-  /// to the best live gateway when not. Not gated on
-  /// [Config.canonicalAssetUrls]; that flag
-  /// only decides the form of the *resize* path. A failed load still falls back
-  /// to the asset's own gateway via `ImageFallback.directUrlFor`.
+  /// to the best live gateway when not. A failed load still falls back to the
+  /// asset's own gateway via `ImageFallback.directUrlFor`.
   static String originalUrl(String imageUrl) {
     if (imageUrl.isEmpty) return imageUrl;
     return getOriginalAssetUrl(imageUrl);
@@ -132,15 +119,10 @@ class MallowImage {
     // result as "the URL to load", and an unresized image is a slower correct
     // answer where a CDN-shaped path pointing nowhere is a broken one.
     //
-    // With the canonical flag on, [_cdnSource] emits `ipfs://` / `ar://` — a
-    // cache key for the resize path, not something an image loader can fetch.
-    // Nothing cross-gates the two settings, so a build that sets the flag with
-    // no CDN would hand every content-addressed image an unfetchable scheme and
-    // render the error fallback. Map it back to a gateway, as the originals
-    // route already does in the same situation.
-    if (base.isEmpty) {
-      return Config.canonicalAssetUrls ? toDirectUrl(resolved) : resolved;
-    }
+    // [_cdnSource] emits `ipfs://` / `ar://` — a cache key for the resize path,
+    // not something an image loader can fetch — so map it back onto a gateway
+    // here, as the originals route already does in the same situation.
+    if (base.isEmpty) return toDirectUrl(resolved);
     final encoded = Uri.encodeComponent(resolved);
     return '$base/${size}x$size/$fit/$encoded?quality=$quality';
   }

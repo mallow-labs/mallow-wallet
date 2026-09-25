@@ -46,7 +46,7 @@ void main() {
     // type-only direction rendered the refund as a second debit.
     await _pump(tester, _tokenTransfer(extra: const {'isRefund': true}));
 
-    final amount = find.text('+1.5000 SOL');
+    final amount = find.text('+1.5 SOL');
     expect(amount, findsOneWidget);
     expect(
       tester.widget<Text>(amount).style?.color,
@@ -58,7 +58,7 @@ void main() {
     // The refund path must not neutralise real outflows.
     await _pump(tester, _tokenTransfer());
 
-    final amount = find.text('-1.5000 SOL');
+    final amount = find.text('-1.5 SOL');
     expect(amount, findsOneWidget);
     expect(
       tester.widget<Text>(amount).style?.color,

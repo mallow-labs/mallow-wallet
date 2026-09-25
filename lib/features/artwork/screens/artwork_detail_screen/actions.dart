@@ -856,6 +856,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
   }
 
   Future<void> _handleTransfer(ArtworkDetails artwork) async {
+    if (isSyntheticSolanaMaster(artwork.mintAccount)) return;
     // EVM holders are threaded through the transfer flow (there is no per-chain
     // active-wallet selection to re-point). Pass `evmHolder: true` so a
     // watch-only ETH holder is still routed to import rather than short-
@@ -948,6 +949,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
   }
 
   Future<void> _handleBurn(ArtworkDetails artwork) async {
+    if (isSyntheticSolanaMaster(artwork.mintAccount)) return;
     // Snapshot the active signer so an abandoned burn restores it (the burn tx
     // builds against the active wallet as soon as the sheet opens, so the
     // re-point must happen up front — hence restore, not defer).
@@ -1095,11 +1097,50 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
           ),
         );
       case UpdateListingCancelResult():
-        _pendingCancellations.add(widget.mintAccount);
-        marketBloc.add(
-          MarketEvent.cancelListing(mintAccount: widget.mintAccount),
-        );
+        _dispatchCancelListing(marketBloc);
     }
+  }
+
+  /// The one delist dispatch, shared by the update sheet's cancel result and
+  /// the direct [_onCancelListing] path so both leave identical state behind.
+  void _dispatchCancelListing(MarketBloc marketBloc) {
+    _pendingCancellations.add(widget.mintAccount);
+    marketBloc.add(MarketEvent.cancelListing(mintAccount: widget.mintAccount));
+  }
+
+  /// Direct delist from the owner-listed sheet — the store-build path where
+  /// "Update listing" (which otherwise hosts cancel) is not rendered.
+  ///
+  /// Same shape as [_onAcceptHighestOffer]: the 🔓 `fixed-price-cancel` entry
+  /// gate FIRST — the update sheet reads that cell itself, so this path must
+  /// read it here, and reading it before the signer re-point keeps a disabled
+  /// flow from putting the user through a login round trip whose best-effort
+  /// restore can leave the signer on the other wallet. Then re-point to the
+  /// owning session wallet (`CancelFixedPriceTxRequest.seller` is the active
+  /// signer), then the view-only guard, which post-switch reads the wallet
+  /// that would sign. Any abort after the switch restores the signer.
+  Future<void> _onCancelListing(ArtworkDetails artwork) async {
+    if (await guardFlowDisabled(
+      context,
+      const FlowKey.solana(AppFlow.fixedPriceCancel),
+    )) {
+      return;
+    }
+    if (!mounted) return;
+    final previousSigner = activeSignerSnapshot();
+    if (!await ensureSignerForAny(
+      context,
+      _ownerAuthorityCandidates(artwork),
+    )) {
+      return;
+    }
+    if (!mounted) return;
+    if (await guardViewOnly(context)) {
+      await restoreSigner(previousSigner);
+      return;
+    }
+    if (!mounted) return;
+    _dispatchCancelListing(context.read<MarketBloc>());
   }
 
   // ----- Action-sheet callback wrappers ---------------------------------

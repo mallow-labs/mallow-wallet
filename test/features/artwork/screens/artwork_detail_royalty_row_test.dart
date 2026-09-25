@@ -30,6 +30,7 @@ import 'package:mallow_wallet/features/profile/data/user_profile_repository.dart
 import 'package:mallow_wallet/features/profile/models/user_profile.dart';
 import 'package:mallow_wallet/features/raffle/services/raffle_bloc.dart';
 import 'package:mallow_wallet/shared/theme/mallow_theme.dart';
+import 'package:mallow_wallet/shared/widgets/mallow_svg_icon.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -249,6 +250,7 @@ void main() {
     WidgetTester tester, {
     required ArtworkDetails artwork,
     required Future<ArtworkPermissions> Function() permissions,
+    Stream<ArtworkState> artworkStates = const Stream.empty(),
   }) async {
     tester.view.physicalSize = const Size(1200, 3000);
     tester.view.devicePixelRatio = 1.0;
@@ -256,7 +258,7 @@ void main() {
 
     whenListen(
       artworkBloc,
-      const Stream<ArtworkState>.empty(),
+      artworkStates,
       initialState: ArtworkState.loaded(artwork: artwork),
     );
     when(
@@ -293,6 +295,72 @@ void main() {
     canBurn: false,
     canList: false,
     onChainRoyaltyBps: bps,
+  );
+
+  testWidgets(
+    'new detail revision keeps an open options sheet loading until its own '
+    'permission read resolves',
+    (tester) async {
+      final states = StreamController<ArtworkState>.broadcast();
+      addTearDown(states.close);
+      final first = Completer<ArtworkPermissions>();
+      final second = Completer<ArtworkPermissions>();
+      var calls = 0;
+      await openDetailsTab(
+        tester,
+        artwork: artworkWith(),
+        artworkStates: states.stream,
+        permissions: () => calls++ == 0 ? first.future : second.future,
+      );
+
+      final dots = find.byWidgetPredicate(
+        (widget) =>
+            widget is MallowSvgIcon &&
+            widget.assetPath == 'assets/icons/dots_vertical.svg',
+      );
+      await tester.tap(
+        find.ancestor(of: dots, matching: find.byType(GestureDetector)).first,
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(calls, 1, reason: 'Opening options must reuse the detail lookup.');
+      expect(
+        find.byKey(const ValueKey('artwork-options-loading')),
+        findsOneWidget,
+      );
+
+      states.add(ArtworkState.loaded(artwork: artworkWith(), revision: 1));
+      await tester.pump();
+      expect(calls, 2);
+      first.complete(
+        const ArtworkPermissions(
+          canTransfer: true,
+          canEdit: true,
+          canBurn: true,
+          canList: true,
+        ),
+      );
+      await tester.pump();
+      expect(find.text('Transfer artwork'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('artwork-options-loading')),
+        findsOneWidget,
+      );
+
+      second.complete(ArtworkPermissions.none);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(
+        find.byKey(const ValueKey('artwork-options-loading')),
+        findsNothing,
+      );
+      expect(find.text('Share'), findsOneWidget);
+      expect(find.text('Transfer artwork'), findsNothing);
+      expect(tester.takeException(), isNull);
+      Navigator.of(tester.element(find.text('Share'))).pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+    },
   );
 
   testWidgets('indexed seller fee renders immediately, without waiting on the '

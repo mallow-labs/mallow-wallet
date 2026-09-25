@@ -24,7 +24,7 @@ import '../../../shared/utils/chain.dart';
 part 'ledger_auth_service.freezed.dart';
 
 /// Unified state of the Ledger BLE session. Replaces the three private state
-/// enums that `LedgerConnectSheet`, `LedgerVerifySheet`, and parts of
+/// enums that `LedgerConnectSheet`, `HardwareVerifySheet`, and parts of
 /// `LedgerConnectBloc` each maintained independently.
 @freezed
 sealed class LedgerSessionState with _$LedgerSessionState {

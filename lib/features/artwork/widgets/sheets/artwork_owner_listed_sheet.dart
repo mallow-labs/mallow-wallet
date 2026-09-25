@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../../core/config/store_build.dart';
 import '../../../../shared/theme/mallow_theme.dart';
 import '../../../../shared/utils/price_format.dart';
 import '../../../../shared/widgets/mallow_button.dart';
@@ -13,11 +14,18 @@ import 'artwork_sheet_frame.dart';
 /// Tapping "Update listing" opens a secondary sheet that owns the price
 /// input *and* the cancel-listing affordance — see `UpdateListingSheet`.
 ///
+/// In a store build that hides commerce (`kShowNftCommerce` off) "Update
+/// listing" is the paid side and is not rendered, and neither is "Accept
+/// highest offer". Cancelling is the escape hatch — how the owner gets the
+/// asset back — so it cannot stay buried inside the hidden update sheet:
+/// [onCancelListing] takes the primary slot directly.
+///
 /// Triggered by `owner` × `buyNow` — see `docs/artwork_state.md`.
 class ArtworkOwnerListedSheet extends StatelessWidget {
   const ArtworkOwnerListedSheet({
     required this.artwork,
     required this.onUpdateListing,
+    required this.onCancelListing,
     required this.onAcceptOffer,
     this.highestOffer,
     this.editionState,
@@ -27,6 +35,10 @@ class ArtworkOwnerListedSheet extends StatelessWidget {
 
   final ArtworkDetails artwork;
   final VoidCallback onUpdateListing;
+
+  /// Direct delist (`fixed-price-cancel`). Rendered only when commerce is
+  /// hidden — otherwise the update sheet hosts it.
+  final VoidCallback onCancelListing;
 
   /// DAS-derived edition state. When present, its `supplyInfo` drives the
   /// "sold" caption in preference to the indexed `quantitySold` /
@@ -95,22 +107,31 @@ class ArtworkOwnerListedSheet extends StatelessWidget {
             ],
           ),
           const SizedBox(height: MallowTheme.spacingMd),
-          MallowButton(
-            label: 'Update listing',
-            variant: MallowButtonVariant.secondary,
-            onPressed: isLoading ? null : onUpdateListing,
-            isLoading: isLoading,
-            isFullWidth: true,
-          ),
-          if (offer != null) ...[
-            const SizedBox(height: MallowTheme.spacingSm),
+          if (showNftCommerce) ...[
             MallowButton(
-              label: 'Accept highest offer',
+              label: 'Update listing',
               variant: MallowButtonVariant.secondary,
-              onPressed: isLoading ? null : () => onAcceptOffer(offer),
+              onPressed: isLoading ? null : onUpdateListing,
+              isLoading: isLoading,
               isFullWidth: true,
             ),
-          ],
+            if (offer != null) ...[
+              const SizedBox(height: MallowTheme.spacingSm),
+              MallowButton(
+                label: 'Accept highest offer',
+                variant: MallowButtonVariant.secondary,
+                onPressed: isLoading ? null : () => onAcceptOffer(offer),
+                isFullWidth: true,
+              ),
+            ],
+          ] else
+            MallowButton(
+              label: 'Cancel listing',
+              variant: MallowButtonVariant.secondary,
+              onPressed: isLoading ? null : onCancelListing,
+              isLoading: isLoading,
+              isFullWidth: true,
+            ),
         ],
       ),
     );

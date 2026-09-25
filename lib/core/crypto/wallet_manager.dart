@@ -17,11 +17,11 @@ import '../network/ledger_connect_controller.dart';
 import '../observability/app_logger.dart';
 import '../security/secure_storage.dart';
 import '../services/ledger_service.dart';
+import '../services/seed_vault_service.dart';
 import '../services/social_auth_service.dart';
 import '../services/wallet_repository.dart';
 import 'derivation.dart';
 import 'exceptions.dart';
-import 'mnemonic_generator.dart';
 
 import '../../shared/utils/chain.dart';
 
@@ -92,55 +92,32 @@ Future<_IsolateSignResult> _signOnIsolate(_IsolateSignTask task) async {
   return _IsolateSignResult(sig.bytes, keypair.publicKey.bytes);
 }
 
-/// Manages wallet creation, import, and signing operations.
+/// Resolves the active wallet and signs with it.
 ///
 /// Uses WalletRepository for wallet CRUD and seedPhraseId-based key derivation.
+/// Creating and importing wallets belong to the onboarding/import flows, which
+/// go through WalletRepository so every new seed lands in the recovery graph.
 @lazySingleton
 class WalletManager {
-  WalletManager(this._storage, this._db, this._walletRepo, this._ledgerService);
+  WalletManager(
+    this._storage,
+    this._db,
+    this._walletRepo,
+    this._ledgerService,
+    this._seedVaultService,
+  );
 
   final SecureWalletStorage _storage;
   final MallowDatabase _db;
   final WalletRepository _walletRepo;
   final LedgerService _ledgerService;
+  final SeedVaultService _seedVaultService;
 
   /// Stream controller for wallet change events.
   final _walletChangedController = StreamController<String>.broadcast();
 
   /// Stream that emits when the active wallet address changes.
   Stream<String> get onWalletChanged => _walletChangedController.stream;
-
-  /// Create a new wallet with a randomly generated mnemonic.
-  ///
-  /// Returns the mnemonic for the user to back up.
-  Future<String> createWallet({bool use24Words = false}) async {
-    final mnemonic = use24Words
-        ? MnemonicGenerator.generate24Words()
-        : MnemonicGenerator.generate12Words();
-
-    // Legacy path: also store in old key for backward compat
-    await _storage.storeMnemonic(mnemonic);
-    return mnemonic;
-  }
-
-  /// Import an existing wallet from a mnemonic phrase.
-  ///
-  /// Validates the mnemonic before storing.
-  /// Returns the wallet address on success.
-  Future<String> importWallet(String mnemonic) async {
-    final normalizedMnemonic = mnemonic.trim().toLowerCase();
-
-    if (!MnemonicGenerator.validate(normalizedMnemonic)) {
-      throw InvalidMnemonicException();
-    }
-
-    if (!MnemonicGenerator.isValidWordCount(normalizedMnemonic)) {
-      throw InvalidMnemonicException('Mnemonic must be 12 or 24 words');
-    }
-
-    await _storage.storeMnemonic(normalizedMnemonic);
-    return getAddress();
-  }
 
   /// Get the active signing/display address for [chain].
   ///
@@ -201,49 +178,80 @@ class WalletManager {
 
   /// Sign arbitrary data with the active wallet's key.
   ///
-  /// Routes Ledger wallets through BLE signing.
+  /// Routes each hardware wallet to its own signer — Ledger over BLE,
+  /// Seed Vault over the on-device IPC — and every other type to the local
+  /// keypair.
   /// Throws [ViewOnlyWalletException] if the active wallet is view-only.
+  ///
+  /// The switch is exhaustive deliberately. Written as `if (type == ledger)`
+  /// this site compiled clean when a second hardware type was added and fell
+  /// through to local keypair signing, which for a key we do not hold can only
+  /// fail — and fails reporting "view-only", which is not what went wrong.
   Future<Signature> signMessage(List<int> message) async {
-    // Check if active wallet is Ledger
     final walletId = await _storage.loadSelectedWalletId();
-    if (walletId != null) {
-      final row = await _db.getWalletById(walletId);
-      if (row != null &&
-          WalletType.fromDbString(row.walletType) == WalletType.ledger) {
+    final row = walletId == null ? null : await _db.getWalletById(walletId);
+    final type = row == null ? null : WalletType.fromDbString(row.walletType);
+
+    switch (type) {
+      case WalletType.ledger:
         return _signMessageWithLedger(
           message,
-          address: row.address,
+          address: row!.address,
           account: row.derivationIndex ?? 0,
           scheme: _schemeFromRow(row),
         );
-      }
+
+      case WalletType.seedVault:
+        return _signMessageWithSeedVault(message, address: row!.address);
+
+      case WalletType.hd:
+      case WalletType.importedKey:
+      case WalletType.social:
+      case WalletType.viewOnly:
+      case null:
+        // Local keypair signing, including the legacy single-mnemonic
+        // fallback when nothing is selected. View-only throws inside.
+        final keypair = await _getKeypair();
+        return keypair.sign(message);
     }
-    final keypair = await _getKeypair();
-    return keypair.sign(message);
   }
 
   /// Sign arbitrary data with a specific wallet's key.
   ///
   /// Used in the wallet link flow where we need to sign with a wallet
-  /// other than the currently active one.
-  /// Routes Ledger wallets through BLE signing.
+  /// other than the currently active one. Routes hardware wallets to their own
+  /// signer (Ledger over BLE, Seed Vault over the on-device IPC).
   /// Throws [ViewOnlyWalletException] if the wallet cannot sign.
+  ///
+  /// Exhaustive for the same reason as [signMessage].
   Future<Signature> signMessageForWallet(
     String walletId,
     List<int> message,
   ) async {
     final row = await _db.getWalletById(walletId);
-    if (row != null &&
-        WalletType.fromDbString(row.walletType) == WalletType.ledger) {
-      return _signMessageWithLedger(
-        message,
-        address: row.address,
-        account: row.derivationIndex ?? 0,
-        scheme: _schemeFromRow(row),
-      );
+    final type = row == null ? null : WalletType.fromDbString(row.walletType);
+
+    switch (type) {
+      case WalletType.ledger:
+        return _signMessageWithLedger(
+          message,
+          address: row!.address,
+          account: row.derivationIndex ?? 0,
+          scheme: _schemeFromRow(row),
+        );
+
+      case WalletType.seedVault:
+        return _signMessageWithSeedVault(message, address: row!.address);
+
+      case WalletType.hd:
+      case WalletType.importedKey:
+      case WalletType.social:
+      case WalletType.viewOnly:
+      case null:
+        // A missing row throws [NoWalletException] inside the loader.
+        final keypair = await _getKeypairForWallet(walletId);
+        return keypair.sign(message);
     }
-    final keypair = await _getKeypairForWallet(walletId);
-    return keypair.sign(message);
   }
 
   /// Sign a message using the connected Ledger device, returning [Signature].
@@ -267,10 +275,37 @@ class WalletManager {
     );
   }
 
+  /// Sign a message with the device's Seed Vault, returning [Signature].
+  ///
+  /// Only the payload and the wallet's own [address] are passed.
+  /// `SeedVaultService` resolves the seed's auth token, the account id and the
+  /// derivation path from the vault's own account table and signs under the
+  /// path the vault itself reported. There is deliberately no parameter for
+  /// handing it a path from here: a reconstructed path that belongs to a
+  /// different key produces a *valid* signature from the wrong address, which
+  /// fails silently downstream rather than erroring.
+  ///
+  /// Unlike the Ledger app's off-chain message signing, Seed Vault does not
+  /// wrap the payload, so these bytes are what gets signed and an ordinary
+  /// ed25519 verification over them succeeds.
+  Future<Signature> _signMessageWithSeedVault(
+    List<int> message, {
+    required String address,
+  }) async {
+    final sigBytes = await _seedVaultService.signMessage(
+      Uint8List.fromList(message),
+      address: address,
+    );
+    return Signature(
+      sigBytes.toList(),
+      publicKey: Ed25519HDPublicKey.fromBase58(address),
+    );
+  }
+
   /// Sign a message with a specific wallet and return the signature as base58.
   ///
-  /// Routes Ledger through BLE; HD, imported-key and social wallets through
-  /// local keypair signing.
+  /// Routes Ledger through BLE and Seed Vault through the on-device IPC; HD,
+  /// imported-key and social wallets through local keypair signing.
   /// Throws [ViewOnlyWalletException] for view-only wallets.
   Future<String> signMessageBase58ForWallet(
     String walletId,
@@ -299,6 +334,18 @@ class WalletManager {
           ),
         );
         return base58encode(sigBytes.toList());
+
+      case WalletType.seedVault:
+        // This is also the login path: [signLoginChallenge] has no per-type
+        // branch of its own, so the ownership proof the backend verifies is
+        // produced right here. Seed Vault signs the bytes verbatim, so the
+        // ordinary `{address, message, signature}` verify body works unchanged
+        // — no memo-transaction shape like the Ledger one.
+        final vaultSignature = await _signMessageWithSeedVault(
+          message,
+          address: row.address,
+        );
+        return vaultSignature.toBase58();
 
       case WalletType.viewOnly:
         throw ViewOnlyWalletException();
@@ -456,6 +503,11 @@ class WalletManager {
         return MultiChainDerivation.signTezosOperationWithSeed(seed, forgedHex);
       case WalletType.ledger:
       case WalletType.viewOnly:
+      // Seed Vault's whole purpose enum is one value, Solana transaction
+      // signing, so it holds no Tezos key and never will. A Seed Vault row is
+      // a Solana row anyway; reaching here at all means something upstream is
+      // wrong, and refusing is the only safe answer.
+      case WalletType.seedVault:
         throw TezosOperationSigningNotSupportedException();
     }
   }
@@ -531,6 +583,11 @@ class WalletManager {
           s: sig.s,
         );
       case WalletType.viewOnly:
+      // Seed Vault signs Solana transactions and nothing else — there is no
+      // secp256k1 path in its API — and a Seed Vault row is a Solana row, so
+      // this arm exists to refuse rather than to fall through to a key that
+      // cannot exist.
+      case WalletType.seedVault:
         throw EthereumTransactionSigningNotSupportedException();
     }
   }
@@ -562,6 +619,9 @@ class WalletManager {
         return MultiChainDerivation.tezosPublicKeyFromSeed(seed);
       case WalletType.ledger:
       case WalletType.viewOnly:
+      // Solana-only, as in [signTezosOperation]: there is no Tezos key to
+      // publish for a Seed Vault row.
+      case WalletType.seedVault:
         throw TezosOperationSigningNotSupportedException();
     }
   }
@@ -655,42 +715,53 @@ class WalletManager {
 
   /// Sign a Solana transaction.
   ///
-  /// For Ledger wallets, compiles the message and sends to the device
-  /// for on-device confirmation. For other wallet types, signs locally.
+  /// Hardware wallets compile the message and hand it to the device for an
+  /// external confirmation — Ledger over BLE, Seed Vault over the on-device
+  /// IPC. Every other type signs locally.
   /// Throws [ViewOnlyWalletException] if the active wallet is view-only.
+  ///
+  /// Exhaustive for the same reason as [signMessage].
   Future<SignedTx> signTransaction({
     required Message message,
     required String recentBlockhash,
   }) async {
-    // Check if active wallet is a Ledger
     final walletId = await _storage.loadSelectedWalletId();
     AppLogger.debug(_tag, 'signTransaction — walletId=$walletId');
-    if (walletId != null) {
-      final row = await _db.getWalletById(walletId);
-      final type = row == null ? null : WalletType.fromDbString(row.walletType);
-      AppLogger.debug(
-        _tag,
-        'signTransaction — row=${row?.address}, type=$type',
-      );
-      if (row != null && type == WalletType.ledger) {
+    final row = walletId == null ? null : await _db.getWalletById(walletId);
+    final type = row == null ? null : WalletType.fromDbString(row.walletType);
+    AppLogger.debug(_tag, 'signTransaction — row=${row?.address}, type=$type');
+
+    switch (type) {
+      case WalletType.ledger:
         AppLogger.debug(_tag, 'routing to _signTransactionWithLedger');
         return _signTransactionWithLedger(
           message,
           recentBlockhash,
-          row.address,
+          row!.address,
           row.derivationIndex ?? 0,
           _schemeFromRow(row),
         );
-      }
-    }
 
-    // Standard keypair-based signing
-    AppLogger.debug(_tag, 'falling through to local keypair signing');
-    final keypair = await _getKeypair();
-    return keypair.signMessage(
-      message: message,
-      recentBlockhash: recentBlockhash,
-    );
+      case WalletType.seedVault:
+        AppLogger.debug(_tag, 'routing to _signTransactionWithSeedVault');
+        return _signTransactionWithSeedVault(
+          message,
+          recentBlockhash,
+          row!.address,
+        );
+
+      case WalletType.hd:
+      case WalletType.importedKey:
+      case WalletType.social:
+      case WalletType.viewOnly:
+      case null:
+        AppLogger.debug(_tag, 'routing to local keypair signing');
+        final keypair = await _getKeypair();
+        return keypair.signMessage(
+          message: message,
+          recentBlockhash: recentBlockhash,
+        );
+    }
   }
 
   /// Sign a transaction that already has a signer or two beyond the user
@@ -722,6 +793,13 @@ class WalletManager {
               row.address,
               row.derivationIndex ?? 0,
               _schemeFromRow(row),
+              additionalSigners: additionalSigners,
+            );
+          case WalletType.seedVault:
+            return _signTransactionWithSeedVault(
+              message,
+              recentBlockhash,
+              row.address,
               additionalSigners: additionalSigners,
             );
           case WalletType.social:
@@ -822,6 +900,20 @@ class WalletManager {
           ),
         );
         userSignature = Signature(sigBytes.toList(), publicKey: userPubkey);
+      case WalletType.seedVault:
+        userPubkey = Ed25519HDPublicKey.fromBase58(row!.address);
+        // Seed Vault returns a detached 64-byte ed25519 signature over the
+        // payload verbatim — the same contract the Ledger arm satisfies — so
+        // the backend's compiled message, its blockhash and any address-table
+        // lookups survive untouched and the signature slots straight in.
+        final vaultSigBytes = await _seedVaultService.signTransaction(
+          Uint8List.fromList(messageBytes),
+          address: row.address,
+        );
+        userSignature = Signature(
+          vaultSigBytes.toList(),
+          publicKey: userPubkey,
+        );
       case WalletType.viewOnly:
         throw ViewOnlyWalletException();
       case WalletType.hd:
@@ -889,6 +981,46 @@ class WalletManager {
     );
   }
 
+  /// Sign a transaction with the device's Seed Vault.
+  ///
+  /// Compiles the message exactly as the Ledger path does: Seed Vault signs
+  /// the payload verbatim and returns a detached 64-byte ed25519 signature, so
+  /// the compiled message goes straight through.
+  ///
+  /// Only the payload and [address] reach the service — see
+  /// [_signMessageWithSeedVault] for why no derivation path is passed from
+  /// here.
+  Future<SignedTx> _signTransactionWithSeedVault(
+    Message message,
+    String recentBlockhash,
+    String address, {
+    List<Ed25519HDKeyPair> additionalSigners = const [],
+  }) async {
+    final feePayer = Ed25519HDPublicKey.fromBase58(address);
+    final compiledMessage = message.compile(
+      recentBlockhash: recentBlockhash,
+      feePayer: feePayer,
+    );
+    final messageBytes = compiledMessage.toByteArray().toList();
+
+    final sigBytes = await _seedVaultService.signTransaction(
+      Uint8List.fromList(messageBytes),
+      address: address,
+    );
+
+    final signature = Signature(sigBytes.toList(), publicKey: feePayer);
+
+    final extraSignatures = <Signature>[];
+    for (final signer in additionalSigners) {
+      extraSignatures.add(await signer.sign(messageBytes));
+    }
+
+    return SignedTx(
+      signatures: [signature, ...extraSignatures],
+      compiledMessage: compiledMessage,
+    );
+  }
+
   /// Check if a wallet exists in storage.
   Future<bool> hasWallet() async {
     // Multi-wallet: check DB first
@@ -899,14 +1031,23 @@ class WalletManager {
     return _storage.hasWallet();
   }
 
-  /// Delete the wallet from storage (full reset).
+  /// Delete every wallet from storage (the storage half of a factory reset).
   ///
   /// Also resets the social-auth SDK so any Google/Apple session it still
   /// holds is logged out; the next sign-in starts from a fresh account
   /// chooser rather than silently reusing the wiped identity.
-  Future<void> deleteWallet() async {
-    await GetIt.instance<SocialAuthService>().reset();
-    await _walletRepo.resetAll();
+  ///
+  /// Best-effort like [WalletRepository.resetAll]: a failing social reset is
+  /// recorded, not thrown, so the secrets and database still go.
+  Future<List<EraseFailure>> deleteWallet() async {
+    final failures = <EraseFailure>[];
+    try {
+      await GetIt.instance<SocialAuthService>().reset();
+    } catch (e) {
+      failures.add(EraseFailure('social.reset', e.runtimeType.toString()));
+    }
+    failures.addAll(await _walletRepo.resetAll());
+    return failures;
   }
 
   /// Remove a single wallet.
@@ -964,11 +1105,18 @@ class WalletManager {
     return current == address;
   }
 
-  /// Check if the wallet at [address] is a Ledger wallet.
-  Future<bool> isLedgerWallet(String address) async {
+  /// Whether the wallet at [address] signs on external hardware — a Ledger, or
+  /// the device's Seed Vault.
+  ///
+  /// Hardware-generic rather than Ledger-specific because every caller is
+  /// asking the same question: does producing a signature here need an
+  /// interactive approval outside this process? Callers that must branch on
+  /// *which* device do so on the concrete [WalletType]; nobody should be
+  /// answering that question with a second predicate.
+  Future<bool> isHardwareWallet(String address) async {
     final row = await _db.getWalletByAddress(address);
     if (row == null) return false;
-    return WalletType.fromDbString(row.walletType) == WalletType.ledger;
+    return WalletType.fromDbString(row.walletType).isHardware;
   }
 
   /// Whether signing for [address] would first have to run the interactive
@@ -999,9 +1147,10 @@ class WalletManager {
   }
 
   /// Whether the active wallet signs locally (HD seed phrase or imported
-  /// private key, plus the legacy single-mnemonic fallback). Returns false
-  /// for Ledger and social wallets where signing requires an external
-  /// approval prompt. View-only wallets cannot sign at all — also false.
+  /// private key, plus the legacy single-mnemonic fallback). Returns false for
+  /// hardware wallets (Ledger, Seed Vault) and social wallets, where signing
+  /// requires an external approval prompt. View-only wallets cannot sign at
+  /// all — also false.
   ///
   /// Used by transaction-pipeline UIs to decide between
   /// "Approve in your wallet…" (external) and the local approving copy
@@ -1015,6 +1164,11 @@ class WalletManager {
     final row = await _db.getWalletById(walletId);
     if (row == null) return false;
     final type = WalletType.fromDbString(row.walletType);
+    // Deliberately an allow-list, not a deny-list: a wallet type added later
+    // reads as external until someone puts it here on purpose. Seed Vault
+    // answers false for free by that shape, which is the right answer — its
+    // signature comes from an OS approval Activity, not from us — so keep the
+    // shape rather than converting this to a set of exclusions.
     return type == WalletType.hd || type == WalletType.importedKey;
   }
 
@@ -1093,8 +1247,12 @@ class WalletManager {
 
       case WalletType.viewOnly:
       case WalletType.ledger:
-        // Switch in [signCompiledTx] handles these branches before
+      case WalletType.seedVault:
+        // The switch in [signCompiledTx] handles these branches before
         // reaching here; surfacing as a state error makes the misuse loud.
+        // None of them can be served from an isolate anyway: an isolate
+        // reaches neither the BLE link nor the platform channel behind
+        // Seed Vault's approval Activity.
         throw StateError(
           'Cannot build isolate sign task for wallet type $walletType',
         );
@@ -1141,6 +1299,9 @@ class WalletManager {
 
       case WalletType.viewOnly:
       case WalletType.ledger:
+      case WalletType.seedVault:
+        // There is no keypair to hand back: mallow holds no key material for
+        // any of these rows, by design for the two hardware types.
         throw ViewOnlyWalletException();
     }
   }

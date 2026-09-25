@@ -1,5 +1,8 @@
 package com.mallow.wallet.android
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.core.view.WindowCompat
@@ -9,10 +12,38 @@ import io.flutter.embedding.engine.FlutterEngine
 
 class MainActivity : FlutterFragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Let the app draw behind system bars so Flutter receives the real
-        // safe-area insets (status bar, display cutout, navigation bar).
-        WindowCompat.setDecorFitsSystemWindows(window, false)
         super.onCreate(savedInstanceState)
+        // Let Flutter paint through the system-bar regions while still
+        // receiving their insets. Running this after super is important:
+        // FlutterFragmentActivity creates and configures the window there.
+        WindowCompat.enableEdgeToEdge(window)
+        createNotificationChannel()
+    }
+
+    /**
+     * Create the channel named by `default_notification_channel_id` in the
+     * manifest, which is also the `channelId` the backend sends.
+     *
+     * Without this the FCM SDK auto-creates the channel at DEFAULT importance,
+     * and an Android channel's importance — not the message's priority — is
+     * what decides whether a notification appears as a heads-up banner. The
+     * backend sends `priority: "high"`, and it was being silently downgraded to
+     * a silent tray entry.
+     *
+     * A channel's importance is fixed at creation: once a device has installed
+     * a build that let the SDK create it, only a reinstall or a new channel id
+     * changes it. The user can still override importance in system settings,
+     * which is deliberate and must not be fought.
+     */
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val channel = NotificationChannel(
+            "mallow_notifications",
+            "mallow",
+            NotificationManager.IMPORTANCE_HIGH,
+        )
+        val manager = getSystemService(NotificationManager::class.java)
+        manager?.createNotificationChannel(channel)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -20,6 +51,7 @@ class MainActivity : FlutterFragmentActivity() {
         flutterEngine.plugins.add(CastPlugin())
         flutterEngine.plugins.add(MnemonicVaultChannel())
         flutterEngine.plugins.add(SecurityChannel())
+        flutterEngine.plugins.add(SeedVaultChannel())
         flutterEngine.plugins.add(TimezoneChannel())
     }
 

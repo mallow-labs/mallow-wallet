@@ -9,6 +9,7 @@ import '../../../core/session/session_manager.dart';
 import '../../../di.dart';
 import '../../../shared/utils/chain.dart'
     show Chain, apiOwnerAddress, isEthereumAddress, isEthereumAsset;
+import '../../../shared/utils/synthetic_master.dart';
 import '../../sale/services/direct_proceeds.dart' show resolveOnChainRoyalties;
 import '../../wallets/services/profile_lookup_service.dart';
 import '../models/on_chain_asset.dart';
@@ -85,6 +86,9 @@ class ArtworkPermissionService {
     ListingType? listingType,
     bool inGroupedSale = false,
   }) async {
+    if (isSyntheticSolanaMaster(mintAccount)) {
+      return ArtworkPermissions.none;
+    }
     final listed = isListedForSale(
       listingType: listingType,
       inGroupedSale: inGroupedSale,
@@ -425,8 +429,12 @@ class ArtworkPermissionService {
     // freezes the child too, so we OR it in here. Mirrors the webapp's
     // `onChainCollectionAsset?.asset.permanentFreezeDelegate?.frozen`
     // check in `useCanBurn` / transfer logic.
+    //
+    // `heldByThirdParty`, not `frozen`: a pNFT's token account is frozen for
+    // its whole life, so the raw flag disabled transfer for every pNFT.
     final notFrozen =
-        !asset.frozen && !(collection?.permanentFreezeDelegateFrozen ?? false);
+        !asset.heldByThirdParty &&
+        !(collection?.permanentFreezeDelegateFrozen ?? false);
     return switch (asset.tokenStandard) {
       TokenStandard.nft ||
       TokenStandard.pnft ||
@@ -460,12 +468,17 @@ class ArtworkPermissionService {
   /// token in the wallet and no prints minted; Core burns for the owner,
   /// the asset's burn delegate, or the parent collection's PERMANENT burn
   /// delegate; Core Collections must be empty and burn for the update
-  /// authority or their permanent burn delegate.
+  /// authority or their permanent burn delegate. The cNFT arm is the one
+  /// with no webapp counterpart (`burnAsset` never grew one); it mirrors what
+  /// `/v2/tx/assets/burn` will actually build for a compressed leaf.
   ///
-  /// One deliberate deviation: the frozen check uses [DigitalAsset.frozen]
-  /// (ownership ∪ freeze delegate ∪ permanent freeze delegate) where the
-  /// webapp consults only a subset per standard. Strictly stricter — it
-  /// only hides burns mpl-core would reject on-chain anyway.
+  /// One deliberate deviation: the frozen check uses
+  /// [DigitalAsset.heldByThirdParty] (ownership ∪ freeze delegate ∪ permanent
+  /// freeze delegate, minus a pNFT's permanent self-freeze) where the webapp
+  /// consults only a subset per standard. Strictly stricter — it only hides
+  /// burns mpl-core would reject on-chain anyway. The pNFT carve-out is not
+  /// optional: without it every pNFT reads as frozen and no pNFT can be
+  /// burned at all, which Token Metadata would have allowed.
   /// [signers], when provided, widens the owner / update-authority arms to any
   /// session wallet (the detail screen then auto-switches the signer). When
   /// null — the market bloc's pre-sign re-check, which runs after the signer is
@@ -481,14 +494,21 @@ class ArtworkPermissionService {
     // freezes the child too. Mirrors webapp `useCanBurn`'s
     // `onChainCollectionAsset.asset.permanentFreezeDelegate?.frozen` check.
     final notFrozen =
-        !asset.frozen && !(collection?.permanentFreezeDelegateFrozen ?? false);
+        !asset.heldByThirdParty &&
+        !(collection?.permanentFreezeDelegateFrozen ?? false);
     return switch (asset.tokenStandard) {
       TokenStandard.nft ||
       TokenStandard.pnft => asset.supply == 0 && notFrozen && owns(asset.owner),
-      // The webapp's burnAsset has no cnft arm, and the v2 burn builder
-      // explicitly rejects cnft with BadRequest. Hide the menu item rather
-      // than fail the request mid-flow.
-      TokenStandard.cnft => false,
+      // cNFT burn IS supported by the v2 builder: `/v2/tx/assets/burn`
+      // dispatches `TokenStandard::Cnft` to `build_cnft_burn_ixs`, which
+      // resolves the leaf, its Merkle proof and (v2) its collection
+      // server-side and emits Bubblegum `Burn` / `BurnV2` — both tree
+      // versions, off the same `{authority, asset, tokenStandard}` body every
+      // other standard sends. Its authority precondition is transfer's: the
+      // DAS leaf owner must be the signer, so a leaf held in a listing /
+      // auction escrow is refused with a 400. `supply` is not part of it —
+      // Bubblegum leaves cannot print editions.
+      TokenStandard.cnft => notFrozen && owns(asset.owner),
       TokenStandard.core =>
         notFrozen &&
             (owns(asset.owner) ||
@@ -519,7 +539,10 @@ class ArtworkPermissionService {
     String user,
     DigitalAsset? collection,
   ) {
-    if (asset.frozen || (collection?.permanentFreezeDelegateFrozen ?? false)) {
+    // `heldByThirdParty` rather than `frozen`: listing a pNFT is exactly what
+    // the raw flag blocked for the entire standard.
+    if (asset.heldByThirdParty ||
+        (collection?.permanentFreezeDelegateFrozen ?? false)) {
       return false;
     }
     return switch (asset.tokenStandard) {

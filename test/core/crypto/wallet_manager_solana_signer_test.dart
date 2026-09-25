@@ -10,6 +10,7 @@ import 'package:mallow_wallet/core/security/mnemonic_vault.dart';
 import 'package:mallow_wallet/core/security/secure_storage.dart';
 import 'package:mallow_wallet/core/services/ledger_service.dart';
 import 'package:mallow_wallet/core/services/preferences_service.dart';
+import 'package:mallow_wallet/core/services/seed_vault_service.dart';
 import 'package:mallow_wallet/core/services/wallet_repository.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -21,6 +22,8 @@ class _MockFss extends Mock implements FlutterSecureStorage {}
 class _MockVault extends Mock implements MnemonicVault {}
 
 class _MockLedgerService extends Mock implements LedgerService {}
+
+class _MockSeedVaultService extends Mock implements SeedVaultService {}
 
 /// The Solana signing entry points resolve their keypair from the *globally
 /// selected* wallet ([WalletInfo.bindsGlobalSigner]), not from an explicit
@@ -81,6 +84,7 @@ void main() {
       db,
       WalletRepository(db, storage, prefs),
       _MockLedgerService(),
+      _MockSeedVaultService(),
     );
   });
 

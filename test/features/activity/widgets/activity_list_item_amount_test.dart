@@ -150,7 +150,7 @@ void main() {
       _transfer(type: api.ActivityType.receive, symbol: 'USDC'),
     );
 
-    expect(find.text('+1.50 USDC'), findsOneWidget);
+    expect(find.text('+1.5 USDC'), findsOneWidget);
   });
 
   testWidgets('send row shows the token symbol with the amount', (
@@ -158,7 +158,7 @@ void main() {
   ) async {
     await _pump(tester, _transfer(type: api.ActivityType.send, symbol: 'USDC'));
 
-    expect(find.text('-1.50 USDC'), findsOneWidget);
+    expect(find.text('-1.5 USDC'), findsOneWidget);
   });
 
   testWidgets('an empty symbol on a known mint resolves from the registry', (
@@ -166,7 +166,7 @@ void main() {
   ) async {
     await _pump(tester, _transfer(type: api.ActivityType.receive, symbol: ''));
 
-    expect(find.text('+1.50 SOL'), findsOneWidget);
+    expect(find.text('+1.5 SOL'), findsOneWidget);
   });
 
   testWidgets('unresolved symbol falls back to the truncated mint', (
@@ -181,7 +181,7 @@ void main() {
       ),
     );
 
-    expect(find.text('+1.50 Unind…1111x'), findsOneWidget);
+    expect(find.text('+1.5 Unind…1111x'), findsOneWidget);
   });
 
   testWidgets('offer-received shows the bid unsigned', (tester) async {
@@ -269,7 +269,7 @@ void main() {
     );
 
     expect(find.text('SOL → Unind…1111x'), findsOneWidget);
-    expect(find.text('+12.50 Unind…1111x'), findsOneWidget);
+    expect(find.text('+12.5 Unind…1111x'), findsOneWidget);
   });
 
   testWidgets('a swap names a token the app knows but the indexer did not', (
@@ -455,7 +455,7 @@ void main() {
 
     expect(find.text('Staked'), findsOneWidget);
     expect(find.text('Native stake'), findsOneWidget);
-    expect(find.text('-1.00 SOL'), findsOneWidget);
+    expect(find.text('-1 SOL'), findsOneWidget);
   });
 
   testWidgets('an unstake shows the amount unsigned', (tester) async {
@@ -468,9 +468,9 @@ void main() {
     );
 
     expect(find.text('Unstaked'), findsOneWidget);
-    expect(find.text('1.00 SOL'), findsOneWidget);
-    expect(find.text('-1.00 SOL'), findsNothing);
-    expect(find.text('+1.00 SOL'), findsNothing);
+    expect(find.text('1 SOL'), findsOneWidget);
+    expect(find.text('-1 SOL'), findsNothing);
+    expect(find.text('+1 SOL'), findsNothing);
   });
 
   testWidgets('claiming deactivated stake reads as a credit', (tester) async {
@@ -480,6 +480,6 @@ void main() {
     );
 
     expect(find.text('Claimed stake'), findsOneWidget);
-    expect(find.text('+1.00 SOL'), findsOneWidget);
+    expect(find.text('+1 SOL'), findsOneWidget);
   });
 }

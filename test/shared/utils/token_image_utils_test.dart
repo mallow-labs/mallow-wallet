@@ -1,5 +1,16 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mallow_wallet/core/data/mallow_tokens.dart';
+import 'package:mallow_wallet/core/services/token_metadata_service.dart';
+import 'package:mallow_wallet/di.dart';
+import 'package:mallow_wallet/shared/theme/mallow_theme.dart';
 import 'package:mallow_wallet/shared/utils/token_image_utils.dart';
+import 'package:mallow_wallet/shared/widgets/mallow_network_image.dart';
+import 'package:mocktail/mocktail.dart';
+
+class _MockTokenMetadataService extends Mock implements TokenMetadataService {}
 
 void main() {
   group('localTokenImagePath', () {
@@ -23,6 +34,10 @@ void main() {
         localTokenImagePath('4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'),
         'assets/images/tokens/usdc.webp',
       );
+    });
+
+    test('returns TOADS asset for its curated listing mint', () {
+      expect(localTokenImagePath(toadsMint), 'assets/images/tokens/toads.webp');
     });
 
     test('returns null for unknown mints', () {
@@ -74,5 +89,68 @@ void main() {
     test('returns null for non-chain tokens', () {
       expect(chainSymbolSvgAsset(symbol: 'USDC'), isNull);
     });
+  });
+
+  group('tokenImageWidget', () {
+    late _MockTokenMetadataService metadataService;
+
+    setUp(() async {
+      await sl.reset();
+      metadataService = _MockTokenMetadataService();
+      sl.registerSingleton<TokenMetadataService>(metadataService);
+    });
+
+    tearDown(() => sl.reset());
+
+    testWidgets(
+      'Given a mint without a bundled image, when metadata resolves, then its network logo is displayed',
+      (tester) async {
+        const mint = 'DynamicBackendMint111111111111111111111111111';
+        const imageUrl = 'https://cdn.example/dynamic.png';
+        when(() => metadataService.imageUrlFor(mint)).thenReturn(null);
+        when(
+          () => metadataService.resolveImageUrl(mint),
+        ).thenAnswer((_) async => imageUrl);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: MallowTheme.lightTheme,
+            home: Scaffold(
+              body: tokenImageWidget(mint: mint, symbol: 'DYN', size: 24),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        final image = tester.widget<MallowNetworkImage>(
+          find.byType(MallowNetworkImage),
+        );
+        expect(image.imageUrl, imageUrl);
+        verify(() => metadataService.resolveImageUrl(mint)).called(1);
+      },
+    );
+
+    testWidgets(
+      'Given a registered mint without a bundled image, when its logo is loading, then its registry symbol is displayed',
+      (tester) async {
+        final lookup = Completer<String?>();
+        when(() => metadataService.imageUrlFor(test22Mint)).thenReturn(null);
+        when(
+          () => metadataService.resolveImageUrl(test22Mint),
+        ).thenAnswer((_) => lookup.future);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: MallowTheme.lightTheme,
+            home: Scaffold(body: tokenImageWidget(mint: test22Mint, size: 24)),
+          ),
+        );
+
+        expect(find.text('TEST2'), findsOneWidget);
+        lookup.complete(null);
+        await tester.pump();
+        expect(find.text('TEST2'), findsOneWidget);
+      },
+    );
   });
 }

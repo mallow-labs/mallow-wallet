@@ -6,6 +6,7 @@ import 'package:mallow_wallet/core/models/account.dart';
 import 'package:mallow_wallet/core/network/auth_service.dart';
 import 'package:mallow_wallet/core/result/app_failure.dart';
 import 'package:mallow_wallet/core/result/result.dart';
+import 'package:mallow_wallet/core/services/stale_tx_tracker.dart';
 import 'package:mallow_wallet/core/services/transaction_executor.dart';
 import 'package:mallow_wallet/core/session/session_manager.dart';
 import 'package:mallow_wallet/di.dart';
@@ -197,6 +198,8 @@ void main() {
         usdValue: anyNamed('usdValue'),
         flow: anyNamed('flow'),
         additionalSigners: anyNamed('additionalSigners'),
+        tracker: anyNamed('tracker'),
+        rebuildsRemainingWork: anyNamed('rebuildsRemainingWork'),
         onStage: anyNamed('onStage'),
       ),
     ).thenAnswer((_) async => const ResultSuccess('sig'));
@@ -243,6 +246,8 @@ void main() {
                   usdValue: anyNamed('usdValue'),
                   flow: anyNamed('flow'),
                   additionalSigners: captureAnyNamed('additionalSigners'),
+                  tracker: anyNamed('tracker'),
+                  rebuildsRemainingWork: anyNamed('rebuildsRemainingWork'),
                   onStage: anyNamed('onStage'),
                 ),
               ).captured.single
@@ -283,6 +288,8 @@ void main() {
                   usdValue: anyNamed('usdValue'),
                   flow: anyNamed('flow'),
                   additionalSigners: captureAnyNamed('additionalSigners'),
+                  tracker: anyNamed('tracker'),
+                  rebuildsRemainingWork: anyNamed('rebuildsRemainingWork'),
                   onStage: anyNamed('onStage'),
                 ),
               ).captured.single
@@ -337,6 +344,8 @@ void main() {
                   usdValue: anyNamed('usdValue'),
                   flow: anyNamed('flow'),
                   additionalSigners: captureAnyNamed('additionalSigners'),
+                  tracker: anyNamed('tracker'),
+                  rebuildsRemainingWork: anyNamed('rebuildsRemainingWork'),
                   onStage: anyNamed('onStage'),
                 ),
               ).captured.single
@@ -431,6 +440,103 @@ void main() {
     },
   );
 
+  // ── Mid-batch blockhash staleness ─────────────────────────────────────
+  //
+  // The backend compiles every chunk of one edit against a SINGLE blockhash
+  // and, when the batch is subsidized, co-signs each chunk with the subsidy
+  // keypair (`edit_collection_artworks`). A co-signed chunk cannot
+  // have its blockhash refreshed client-side, and the executor confirms each
+  // chunk — with its own approval prompt — before starting the next. Past the
+  // ~60s blockhash lifetime chunk k > 0 dies with "Blockhash not found" and
+  // the collection edit is left HALF APPLIED: some artworks moved, some did
+  // not, and nothing on screen says which. Handing the executor a tracker is
+  // the only thing that lets it re-ask the builder mid-flight.
+  blocTest<ManageCollectionArtworksBloc, ManageCollectionArtworksState>(
+    'an add-only edit hands the executor a tracker and opts into mid-batch '
+    'rebuilds',
+    setUp: stubTxBuild,
+    build: build,
+    act: (b) async {
+      b.add(const ManageCollectionArtworksEvent.started(_collection));
+      await Future<void>.delayed(Duration.zero);
+      b.add(const ManageCollectionArtworksEvent.toggled(_oneOfOne));
+      b.add(const ManageCollectionArtworksEvent.submit());
+      await Future<void>.delayed(Duration.zero);
+    },
+    verify: (_) {
+      final captured = verify(
+        executor.execute(
+          txsBase64: anyNamed('txsBase64'),
+          usdValue: anyNamed('usdValue'),
+          flow: anyNamed('flow'),
+          additionalSigners: anyNamed('additionalSigners'),
+          tracker: captureAnyNamed('tracker'),
+          rebuildsRemainingWork: captureAnyNamed('rebuildsRemainingWork'),
+          onStage: anyNamed('onStage'),
+        ),
+      ).captured;
+      expect(
+        captured[0],
+        isA<StaleTxTracker<List<String>>>(),
+        reason: 'without a tracker the executor has nothing to re-ask',
+      );
+      expect(
+        captured[1],
+        isTrue,
+        reason:
+            'the builder skips an asset already in the target collection, so '
+            'a rebuild mid-batch returns only the moves still outstanding',
+      );
+    },
+  );
+
+  // The other half of the same rule. The builder is idempotent on the ADD
+  // side only: `remove_assets` is re-emitted unconditionally and
+  // `remove_master_editions` is hard-400'd ("is not a member of group") once
+  // the detach has landed. Re-asking after a chunk landed would therefore
+  // swap one unrecoverable error for a differently-worded one, so an edit
+  // carrying a removal must NOT opt in.
+  blocTest<ManageCollectionArtworksBloc, ManageCollectionArtworksState>(
+    'an edit that removes a member does not opt into mid-batch rebuilds',
+    setUp: () {
+      stubTxBuild();
+      when(profile.getCollectionByMint(_collection)).thenAnswer(
+        (_) async => const CollectionFullRender(slug: 'c', name: 'C'),
+      );
+      when(
+        profile.getCollectionMintAccounts(_collection),
+      ).thenAnswer((_) async => const [_member]);
+      when(
+        portfolio.getArtworksByUpdateAuth(
+          masterOnly: anyNamed('masterOnly'),
+          tokenStandards: anyNamed('tokenStandards'),
+        ),
+      ).thenAnswer((_) async => [_asset(_oneOfOne), _asset(_member)]);
+    },
+    build: build,
+    act: (b) async {
+      b.add(const ManageCollectionArtworksEvent.started(_collection));
+      await Future<void>.delayed(Duration.zero);
+      b.add(const ManageCollectionArtworksEvent.toggled(_member));
+      b.add(const ManageCollectionArtworksEvent.submit());
+      await Future<void>.delayed(Duration.zero);
+    },
+    verify: (_) {
+      final captured = verify(
+        executor.execute(
+          txsBase64: anyNamed('txsBase64'),
+          usdValue: anyNamed('usdValue'),
+          flow: anyNamed('flow'),
+          additionalSigners: anyNamed('additionalSigners'),
+          tracker: anyNamed('tracker'),
+          rebuildsRemainingWork: captureAnyNamed('rebuildsRemainingWork'),
+          onStage: anyNamed('onStage'),
+        ),
+      ).captured;
+      expect(captured.single, isFalse);
+    },
+  );
+
   blocTest<ManageCollectionArtworksBloc, ManageCollectionArtworksState>(
     'a signing failure surfaces as an error status',
     setUp: () {
@@ -447,6 +553,8 @@ void main() {
           usdValue: anyNamed('usdValue'),
           flow: anyNamed('flow'),
           additionalSigners: anyNamed('additionalSigners'),
+          tracker: anyNamed('tracker'),
+          rebuildsRemainingWork: anyNamed('rebuildsRemainingWork'),
           onStage: anyNamed('onStage'),
         ),
       ).thenAnswer(
@@ -481,6 +589,8 @@ void main() {
           usdValue: anyNamed('usdValue'),
           flow: anyNamed('flow'),
           additionalSigners: anyNamed('additionalSigners'),
+          tracker: anyNamed('tracker'),
+          rebuildsRemainingWork: anyNamed('rebuildsRemainingWork'),
           onStage: anyNamed('onStage'),
         ),
       ).thenAnswer(
@@ -523,6 +633,8 @@ void main() {
           usdValue: anyNamed('usdValue'),
           flow: anyNamed('flow'),
           additionalSigners: anyNamed('additionalSigners'),
+          tracker: anyNamed('tracker'),
+          rebuildsRemainingWork: anyNamed('rebuildsRemainingWork'),
           onStage: anyNamed('onStage'),
         ),
       ).thenAnswer(
@@ -580,6 +692,8 @@ void main() {
           usdValue: anyNamed('usdValue'),
           flow: anyNamed('flow'),
           additionalSigners: anyNamed('additionalSigners'),
+          tracker: anyNamed('tracker'),
+          rebuildsRemainingWork: anyNamed('rebuildsRemainingWork'),
           onStage: anyNamed('onStage'),
         ),
       );
@@ -757,6 +871,8 @@ void main() {
             usdValue: anyNamed('usdValue'),
             flow: anyNamed('flow'),
             additionalSigners: anyNamed('additionalSigners'),
+            tracker: anyNamed('tracker'),
+            rebuildsRemainingWork: anyNamed('rebuildsRemainingWork'),
             onStage: anyNamed('onStage'),
           ),
         ).thenAnswer(
@@ -910,6 +1026,8 @@ void main() {
           usdValue: anyNamed('usdValue'),
           flow: anyNamed('flow'),
           additionalSigners: anyNamed('additionalSigners'),
+          tracker: anyNamed('tracker'),
+          rebuildsRemainingWork: anyNamed('rebuildsRemainingWork'),
           onStage: anyNamed('onStage'),
         ),
       ).thenAnswer((invocation) async {

@@ -31,6 +31,8 @@ Map<String, dynamic> _previewJson({
   String? parentEdition,
   String? updateAuth,
   String? chain,
+  bool? isOwnerHidden,
+  bool? isCreatorHidden,
 }) {
   return <String, dynamic>{
     'mintAccount': mintAccount,
@@ -47,6 +49,8 @@ Map<String, dynamic> _previewJson({
     'parentEdition': ?parentEdition,
     'updateAuth': ?updateAuth,
     'chain': ?chain,
+    'isOwnerHidden': ?isOwnerHidden,
+    'isCreatorHidden': ?isCreatorHidden,
   };
 }
 
@@ -193,6 +197,33 @@ void main() {
       expect(art.supply, 3);
       expect(art.supplyLabel, 'Limited edition of 10');
     });
+
+    test(
+      'combines creator and owner flags because hide writes one based on the wallet relationship',
+      () async {
+        when(apiV2.getPortfolioArtworks(any)).thenAnswer(
+          (_) async => _artworksResponse([
+            _previewJson(mintAccount: 'creator', isCreatorHidden: true),
+            _previewJson(mintAccount: 'owner', isOwnerHidden: true),
+            _previewJson(
+              mintAccount: 'visible',
+              isOwnerHidden: false,
+              isCreatorHidden: false,
+            ),
+            _previewJson(mintAccount: 'withheld'),
+          ]),
+        );
+
+        final result = await repo.getOwnedArtworks();
+
+        expect(result.artworks.map((artwork) => artwork.isHidden), [
+          true,
+          true,
+          false,
+          false,
+        ]);
+      },
+    );
 
     test('falls back to aspectRatio=1.0 when the field is missing', () async {
       when(apiV2.getPortfolioArtworks(any)).thenAnswer(

@@ -534,14 +534,17 @@ void main() {
   });
 
   group('two-step listing (LUT setup tx)', () {
+    late String setupTxBase64;
+
     blocTest<FixedPriceBloc, FixedPriceState>(
       'signs both setup tx and listing tx in one execute call, emitting TxFlowSuccess',
       setUp: () {
+        setupTxBase64 = _buildParseableTxBase64(testWalletAddress, lamports: 2);
         when(mockFixedPriceRepo.getCreateBuyNowTx(any)).thenAnswer(
           (_) async => ApiResponse<CreateFixedPriceTxResponse>(
             result: CreateFixedPriceTxResponse(
               tx: testTxBase64,
-              setupTx: testTxBase64,
+              setupTx: setupTxBase64,
             ),
           ),
         );
@@ -574,14 +577,13 @@ void main() {
       ),
       act: (bloc) => bloc.add(const FixedPriceEvent.requestList()),
       verify: (_) {
-        // signCompiledTx called twice — setup tx then listing tx, both chained
-        // inside the single _flow.execute call via TransactionExecutor's loop.
-        verify(
+        final signed = verify(
           mockWalletManager.signCompiledTx(
-            unsignedTx: anyNamed('unsignedTx'),
+            unsignedTx: captureAnyNamed('unsignedTx'),
             additionalSigners: anyNamed('additionalSigners'),
           ),
-        ).called(2);
+        ).captured.cast<SignedTx>();
+        expect(signed.map((tx) => tx.encode()), [setupTxBase64, testTxBase64]);
       },
       expect: () => [
         isA<FixedPriceState>().having(
@@ -792,13 +794,13 @@ void main() {
   });
 }
 
-String _buildParseableTxBase64(String walletAddress) {
+String _buildParseableTxBase64(String walletAddress, {int lamports = 1}) {
   final pubkey = Ed25519HDPublicKey.fromBase58(walletAddress);
   final message = Message.only(
     SystemInstruction.transfer(
       fundingAccount: pubkey,
       recipientAccount: pubkey,
-      lamports: 1,
+      lamports: lamports,
     ),
   );
   return SignedTx(

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../../core/config/store_build.dart';
 import '../../../../shared/theme/mallow_theme.dart';
 import '../../../../shared/widgets/mallow_button.dart';
 import '../../services/artwork_bloc.dart';
@@ -63,13 +64,19 @@ class ArtworkOwnerSheet extends StatelessWidget {
         children: [
           if (offer != null) ...[
             HighestOfferPanel(offer: offer),
-            const SizedBox(height: MallowTheme.spacingMd),
-            MallowButton(
-              label: 'Accept Offer',
-              variant: MallowButtonVariant.secondary,
-              onPressed: isLoading ? null : () => onAcceptOffer(offer),
-              isFullWidth: true,
-            ),
+            // Accepting is the paid side (`offer-accept`): a store build that
+            // hides commerce still shows the offer, but does not offer to
+            // take it. `List artwork` is hidden upstream — the resolver forces
+            // `canList` false — so this sheet needs no second check for it.
+            if (showNftCommerce) ...[
+              const SizedBox(height: MallowTheme.spacingMd),
+              MallowButton(
+                label: 'Accept Offer',
+                variant: MallowButtonVariant.secondary,
+                onPressed: isLoading ? null : () => onAcceptOffer(offer),
+                isFullWidth: true,
+              ),
+            ],
             const SizedBox(height: MallowTheme.spacingSm),
           ],
           if (canSend)

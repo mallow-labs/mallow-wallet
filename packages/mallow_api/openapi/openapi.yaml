@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
-  title: Mallow API
+  title: mallow API
   version: 1.1.0
   description: |-
-    OpenAPI contract for the Mallow REST API. Generated from the server's schema definitions; edit this vendored copy directly if you are changing the contract for your own backend.
+    OpenAPI contract for the mallow REST API. Generated from the server's schema definitions; edit this vendored copy directly if you are changing the contract for your own backend.
 
     This document describes the operations the mallow mobile wallet calls. The mallow API serves others that are not described here; a deployment that implements this contract can run the app.
 
@@ -46,7 +46,7 @@ components:
         - seller
         - buyer
         - asset
-      description: Accepts an outstanding offer, transferring the asset and releasing the escrowed funds. If the asset is also listed at a fixed price by the same seller, a delist instruction is prepended automatically.
+      description: Accepts an outstanding offer, transferring the asset and releasing the escrowed funds. If the asset is also listed at a fixed price by the same seller, a delist instruction is prepended automatically — except for a cNFT, whose listing must be cancelled first.
     AddCurationArtworkRequest:
       type: object
       properties:
@@ -483,7 +483,7 @@ components:
         - authority
         - asset
         - tokenStandard
-      description: Permanently destroys an asset and reclaims its rent. Accepts `nft`, `pnft`, `core` and `core-collection` only.
+      description: Permanently destroys an asset and reclaims its rent. Accepts `nft`, `pnft`, `cnft`, `core` and `core-collection` only.
     BuyEditionTxItem:
       type: object
       properties:
@@ -590,6 +590,19 @@ components:
         - buyer
         - asset
       description: Buys a listed artwork at its listed price, paid in the listing's currency. Supply a `swapQuote` only to pay with a different token; its `outputMint` must match the listing currency and cover the price.
+    BuyFixedPriceTxResponse:
+      type: object
+      properties:
+        tx:
+          type: string
+          description: base64-encoded VersionedTransaction that performs the purchase. Absent only in a split response, where `swapTx` is present instead.
+        swapTx:
+          type: string
+          description: base64-encoded standalone Jupiter swap into the listing's currency. Present instead of `tx` when the purchase cannot carry the swap in one transaction. Sign it, send it, wait for `confirmed`, then request this endpoint again without `swapQuote` to get the purchase transaction.
+        setupTx:
+          type: string
+          description: base64-encoded prerequisite transaction, present when a compressed NFT's purchase needs an address lookup table the seller's listing does not already provide (its Merkle proof changed since listing). Sign and **confirm** it before broadcasting `tx`, which is compiled against the table it creates.
+      description: Exactly one of `tx` and `swapTx` is present. `tx` is the ordinary single-transaction purchase. `swapTx` means the swap has to land in its own transaction first — send it, confirm it, then re-request without `swapQuote`.
     BuyTicketsTxRequest:
       type: object
       properties:
@@ -886,7 +899,10 @@ components:
           type: array
           items:
             type: string
-          description: Signatures of the edit-collection-artworks transactions the client just confirmed. Optional, but supplying them lets the re-index converge from those transactions rather than from asynchronous chain ingestion, which is not guaranteed to be prompt and on test clusters may not happen at all.
+            minLength: 1
+            maxLength: 128
+          maxItems: 1000
+          description: Signatures of the edit-collection-artworks transactions the client just confirmed. Optional, but supplying them lets the endpoint use cached confirmed transactions for immediate membership updates while DAS remains the reconciliation source.
       required:
         - mintAccount
     CollectionUpdateMetadataBody:
@@ -2526,6 +2542,10 @@ components:
           type: array
           items:
             type: string
+        subscriptions:
+          type: array
+          items:
+            type: string
         expiresAt:
           type: string
           format: date-time
@@ -2541,6 +2561,7 @@ components:
         - user
         - userDetails
         - following
+        - subscriptions
         - expiresAt
         - invitedGumballCount
         - likesByContentType
@@ -2622,6 +2643,11 @@ components:
         pendingWalletApprovals:
           type: array
           items: {}
+        isPrivileged:
+          type: boolean
+          enum:
+            - true
+          description: Present and true only on the owner-only render. Absent on public renders — treat a payload without it as public, and never store it where privileged fields are expected.
       required:
         - addresses
       description: The signed-in account as it sees itself — the public profile plus the fields only the owner may read (full role list, entitlements, pending wallet links, content settings). Returned by login and by the profile and settings mutations.
@@ -2658,6 +2684,11 @@ components:
           type: boolean
         disableEmailNotifications:
           type: boolean
+        isPrivileged:
+          type: boolean
+          enum:
+            - true
+          description: Present and true only on the owner-only render. Absent on public renders — treat a payload without it as public, and never store it where privileged fields are expected.
       description: The profile detail half of the privileged self-render — counts, links, bio, and the contact fields only the owner may read.
     LoginUserSocial:
       type: object
@@ -4083,6 +4114,9 @@ components:
         amount:
           type: string
           description: Amount in the token's smallest unit, as a decimal string — wei for `native`, token base units for `erc20`, token count for `erc1155` (defaults to `1`). Ignored for every Solana standard and `erc721`, which are always 1-of-1. A string rather than a number because these are uint256 values that overflow a 64-bit integer.
+        memo:
+          type: string
+          description: Free-form note written on-chain alongside the transfer, signed by `authority`. Solana standards only; ignored on EVM.
         targetPriorityFeeLamports:
           type: integer
           description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
@@ -4171,6 +4205,18 @@ components:
       required:
         - tx
       description: An unsigned Solana transaction. Deserialize it, sign it with the wallet named in the request, and broadcast it yourself — mallow neither signs nor sends it. The embedded blockhash expires in roughly 60 seconds, so rebuild rather than retry a stale one.
+    UnsignedTxWithSetupResponse:
+      type: object
+      properties:
+        tx:
+          type: string
+          description: base64-encoded serialized VersionedTransaction
+        setupTx:
+          type: string
+          description: "base64-encoded prerequisite transaction, present when the transaction needs an address lookup table that does not exist yet. Sign and **confirm** it before broadcasting `tx`: `tx` is compiled against the table this creates and fails if sent first. Only compressed NFTs produce one, and only when no table the server can find already seats the transaction."
+      required:
+        - tx
+      description: An unsigned Solana transaction, optionally preceded by a setup transaction that must land first. Deserialize, sign with the wallet named in the request, and broadcast them yourself in that order — mallow neither signs nor sends them. The embedded blockhash expires in roughly 60 seconds, so rebuild rather than retry a stale one.
     UpdateFixedPriceTxRequest:
       type: object
       properties:
@@ -4222,13 +4268,16 @@ components:
         user:
           type: object
           additionalProperties: true
-          description: User fields (username, displayName, bio, …)
+          description: User fields (username, displayName, bio, …). `email` is ignored — it is set via the OTP route and cleared via `clearEmail`. A field that is absent is left unchanged.
         pfpPath:
           type: string
           description: "`path` from a /v1/user/createProfileUpload response, after the image has been uploaded to the presigned destination. Must fall under the caller's own prefix."
         bannerPath:
           type: string
           description: "`path` from a /v1/user/createProfileUpload response, after the image has been uploaded to the presigned destination. Must fall under the caller's own prefix."
+        clearEmail:
+          type: boolean
+          description: Delete the stored email address. Omit to leave it unchanged; there is no way to set an email here — verify a new one via /v1/otp.
       required:
         - user
     UpdateSettingsRequest:
@@ -4517,7 +4566,7 @@ paths:
     post:
       tags:
         - Transactions (v1)
-      summary: Build a bid transaction for a Mallow auction
+      summary: Build a bid transaction for a mallow auction
       description: Login required.
       operationId: postV1ArtworkGetBidTx
       requestBody:
@@ -5303,23 +5352,6 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
       security:
         - ApiKeyAuth: []
-  /home:
-    get:
-      tags:
-        - Home
-      summary: The composed home feed
-      operationId: getHome
-      responses:
-        "200":
-          description: The feed. Cached for five minutes and identical for every caller.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/HomeResponse"
-        "400":
-          description: The feed could not be composed — no featured section is live.
-      security:
-        - ApiKeyAuth: []
   /v1/holders/detailed:
     post:
       tags:
@@ -5351,6 +5383,23 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+      security:
+        - ApiKeyAuth: []
+  /home:
+    get:
+      tags:
+        - Home
+      summary: The composed home feed
+      operationId: getHome
+      responses:
+        "200":
+          description: The feed. Cached for five minutes and identical for every caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HomeResponse"
+        "400":
+          description: The feed could not be composed — no featured section is live.
       security:
         - ApiKeyAuth: []
   /v1/ipfsPin:
@@ -7062,7 +7111,7 @@ paths:
                 type: object
                 properties: {}
         "400":
-          description: Missing address, or it is the account's only one.
+          description: Missing address, an address the account neither holds nor has a pending request for, or the account's only one.
         "401":
           description: No signed-login session.
       description: Login required.
@@ -8144,7 +8193,9 @@ paths:
       description: |-
         Builds a transaction that permanently destroys an asset and reclaims its rent to `authority`, which must be the current owner and is the only signer.
 
-        Supported `tokenStandard` values are `nft`, `pnft`, `core` and `core-collection`. Collection membership and printed-edition parentage are resolved on-chain, so neither needs to be supplied — but printed-edition burns work for `nft` only, not `pnft`. The `cnft`, `cnft-v2`, `objkt`, `native`, `erc20`, `erc721` and `erc1155` standards are rejected with a `400`.
+        Supported `tokenStandard` values are `nft`, `pnft`, `cnft`, `core` and `core-collection`. Collection membership and printed-edition parentage are resolved on-chain, so neither needs to be supplied — but printed-edition burns work for `nft` only, not `pnft`. The `cnft-v2`, `objkt`, `native`, `erc20`, `erc721` and `erc1155` standards are rejected with a `400`.
+
+        Send `tokenStandard: cnft` for a compressed leaf on **either** Bubblegum tree version — the server reads the tree account's owning program and emits `Burn` (v1) or `BurnV2` (v2) itself, so `cnft-v2` is never the value to send here. The leaf, its Merkle proof and its collection are resolved server-side: `authority` must be the leaf's current DAS owner (a leaf sitting in a listing or auction escrow is rejected with a `400`), and so is one whose canopy-trimmed proof is too deep to fit the transaction.
 
         Burning is irreversible and there is no on-chain confirmation step beyond your signature.
       security:
@@ -8203,6 +8254,8 @@ paths:
         The response is chain-dependent and exactly one field is present. Solana standards return a base64 `tx`. EVM standards (`native`, `erc20`, `erc721`, `erc1155`) instead return an `evm` object with `to`, `data`, `value` and an advisory `gasLimit` — fill in the nonce and EIP-1559 fees, then sign and broadcast it as an ordinary EVM transaction. When `gasLimit` is absent, estimate it client-side.
 
         EVM NFTs are addressed as `<contract>-<tokenId>`. `amount` is the amount in the token's smallest unit as a decimal **string** — because these are uint256 values that overflow a 64-bit integer — wei for `native`, token base units for `erc20`, and the token count for `erc1155` (defaults to `1`). It is ignored for standards that are always 1-of-1 (every Solana standard, plus `erc721`). `objkt` is not supported on this route.
+
+        Set `memo` (Solana only) to write a note on-chain alongside the transfer. A plain transfer is not a mallow market event, so mallow only picks one up when it carries a 0-lamport marker transfer to the mallow fee account — a transfer built with a `memo` therefore carries that marker too, otherwise nothing would ever read the memo back. Without `memo` the transaction is unchanged: no memo instruction and no marker.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8316,9 +8369,13 @@ paths:
       description: |-
         Builds a metadata update for an existing asset, signed by `authority`, which must hold update authority over it.
 
+        For `tokenStandard: cnft` (Bubblegum V1), the server fetches and validates the current metadata and Merkle proof. The signer must be the verified collection update authority, or the tree creator/delegate when the leaf has no verified collection. Leaf ownership alone does not authorize edits. cNFT edits preserve collection membership and supply; Core group operations and unlockable content are unsupported. `cnft-v2` is not supported.
+
         Replaces `uri` and the on-chain fields carried in `nftMetadata` (`name`, `sellerFeeBasisPoints`, `creators`). Off-chain fields under `extendedMetadata` (description, attributes, tags, media, NSFW flag) are stored by mallow rather than on-chain.
 
         `collection` and `maxSupply` distinguish *absent* from *explicit null*: omit the field to leave it unchanged, or send `null` to clear it. Use `editTarget` to retarget the edit at the asset itself (`asset`, the default) or at its `parent_collection`, and `newParentCollection` / `newGroupSigner` to move the asset between Core groups.
+
+        A compressed NFT may need an address lookup table before its transaction fits the 1232-byte packet. When no usable one exists, the response carries a `setupTx` alongside `tx`: sign and confirm it first, then broadcast `tx`.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8336,7 +8393,7 @@ paths:
                 type: object
                 properties:
                   result:
-                    $ref: "#/components/schemas/UnsignedTxResponse"
+                    $ref: "#/components/schemas/UnsignedTxWithSetupResponse"
                 required:
                   - result
         "400":
@@ -8428,9 +8485,11 @@ paths:
       description: |-
         Builds an offer (bid) from `buyer` on `asset` at `price`, denominated in `currencyMint` — SOL when omitted. Funds are escrowed on-chain when the transaction confirms.
 
-        `price` must be a positive integer in the currency's base units. Offers are only supported on 1/1s and edition prints; other supply types are rejected with a `400`, as are pNFT, cNFT and Objkt assets.
+        `price` must be a positive integer in the currency's base units, and `currencyMint` must be a currency mallow has registered. Offers are only supported on 1/1s and edition prints; other supply types are rejected with a `400`, as is an offer on an asset `buyer` already owns.
 
-        If `buyer` already has an open offer on `asset`, this **updates** the existing offer instead of creating a second one — the on-chain program rejects duplicates. `endTime` is a Unix timestamp after which the offer lapses, and `oneOfOneOnly` restricts the offer to 1/1s.
+        The asset's standard is resolved server-side rather than supplied. `nft`, `pnft`, `cnft` (Bubblegum v1 trees), `core` and `core-collection` are all supported; a `cnft-v2` leaf or an `objkt` is rejected with a `400`.
+
+        If `buyer` already has an open offer on `asset`, this **updates** the existing offer instead of creating a second one — the on-chain program rejects duplicates. An update keeps the original currency, so a request naming a different `currencyMint` is rejected with a `400` asking for the existing offer to be cancelled first. `endTime` is a Unix timestamp after which the offer lapses, and `oneOfOneOnly` restricts the offer to 1/1s.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8542,7 +8601,11 @@ paths:
 
         `seller` must currently own the asset and an offer from `buyer` must exist; both failures return `400`. If the asset is simultaneously listed for a fixed price by the same seller, a delist instruction is prepended automatically, because the on-chain program requires the listing to be closed first.
 
+        A **cNFT** is the exception: a fixed-price cNFT listing escrows the leaf in the listing account, so the seller no longer owns it and there is no delist instruction to prepend. Accepting an offer on a cNFT the same seller has listed is rejected with a `400` asking for the listing to be cancelled first.
+
         Set `enablePrimarySplit` to split the primary-sale proceeds among the creators recorded on-chain. When it is omitted the proceeds go to the seller, with royalties still paid to those creators.
+
+        A compressed NFT may need an address lookup table before its transaction fits the 1232-byte packet. When no usable one exists, the response carries a `setupTx` alongside `tx`: sign and confirm it first, then broadcast `tx`.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8560,7 +8623,7 @@ paths:
                 type: object
                 properties:
                   result:
-                    $ref: "#/components/schemas/UnsignedTxResponse"
+                    $ref: "#/components/schemas/UnsignedTxWithSetupResponse"
                 required:
                   - result
         "400":
@@ -8602,6 +8665,8 @@ paths:
 
         **`swapQuote` is only for paying with a different token than the listing asks for** — SOL for a USDC listing, or vice versa. Fetch a Jupiter quote for `inputMint=<the token you want to spend>`, `outputMint=<the listing's currencyMint>` and pass it through. The quote's `outputMint` must match the listing currency and must yield enough to cover the price, or the request `400`s. The buyer remains the sole signer and fee payer.
 
+        A swap-funded buy of a **pNFT or cNFT** comes back as a two-step response: `swapTx` instead of `tx`. Those buy instructions already spend the packet budget on token records and Merkle proofs, so the swap cannot ride along. Send `swapTx`, wait for `confirmed`, then request this endpoint again with `swapQuote` omitted — the second call is the ordinary purchase, now against a wallet that holds the currency. Every other standard bundles the swap and returns a single `tx` as before.
+
         Listings gated by a whitelist reject buyers who are not on it.
       security:
         - ApiKeyAuth: []
@@ -8620,7 +8685,7 @@ paths:
                 type: object
                 properties:
                   result:
-                    $ref: "#/components/schemas/UnsignedTxResponse"
+                    $ref: "#/components/schemas/BuyFixedPriceTxResponse"
                 required:
                   - result
         "400":
@@ -8770,6 +8835,8 @@ paths:
         Builds a transaction delisting `asset` and returning it to `seller`'s unencumbered control.
 
         `seller` must be the wallet that created the listing. Any escrowed listing state is closed and its rent returned in the same transaction.
+
+        A compressed NFT may need an address lookup table before its transaction fits the 1232-byte packet. When no usable one exists, the response carries a `setupTx` alongside `tx`: sign and confirm it first, then broadcast `tx`.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8787,7 +8854,7 @@ paths:
                 type: object
                 properties:
                   result:
-                    $ref: "#/components/schemas/UnsignedTxResponse"
+                    $ref: "#/components/schemas/UnsignedTxWithSetupResponse"
                 required:
                   - result
         "400":
@@ -8882,6 +8949,8 @@ paths:
         `minBidIncrement` is read as **basis points** of the current bid (minimum 10 bps) unless `absoluteIncrement` is set, in which case it is a flat amount in the bid currency's base units.
 
         `timeExtPeriod` and `timeExtDelta` configure anti-sniping: a bid landing within the final `timeExtPeriod` seconds pushes the deadline out by `timeExtDelta` seconds. `bidMint` denominates bids in an SPL token instead of SOL, and `enablePrimarySplit` splits the primary-sale proceeds among the on-chain creators (omitted, the proceeds go to the seller).
+
+        A compressed NFT whose Merkle tree has too shallow a canopy needs an address lookup table before their transaction fits the 1232-byte packet. When one does not exist yet, the response carries a `setupTx` alongside `tx`: sign and confirm it first, then broadcast `tx`.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8899,7 +8968,7 @@ paths:
                 type: object
                 properties:
                   result:
-                    $ref: "#/components/schemas/UnsignedTxResponse"
+                    $ref: "#/components/schemas/UnsignedTxWithSetupResponse"
                 required:
                   - result
         "400":
@@ -8992,6 +9061,8 @@ paths:
         Builds a transaction cancelling `asset`'s auction and returning the asset to `seller`.
 
         **Only a no-bid auction can be cancelled.** Once a bid has been placed the auction is binding and this returns `400` — use `/v2/tx/auctions/settle` after it ends instead.
+
+        A compressed NFT whose Merkle tree has too shallow a canopy needs an address lookup table before their transaction fits the 1232-byte packet. When one does not exist yet, the response carries a `setupTx` alongside `tx`: sign and confirm it first, then broadcast `tx`.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -9009,7 +9080,7 @@ paths:
                 type: object
                 properties:
                   result:
-                    $ref: "#/components/schemas/UnsignedTxResponse"
+                    $ref: "#/components/schemas/UnsignedTxWithSetupResponse"
                 required:
                   - result
         "400":
@@ -9050,6 +9121,8 @@ paths:
         Auctions with `endTime` set can only be settled once that time has passed, otherwise `400`. An auction with no end time settles on demand once a bid exists.
 
         If the auction ended with **no bids**, this instead builds the reclaim path returning the asset to the seller — and then only the seller may call it.
+
+        A compressed NFT whose Merkle tree has too shallow a canopy needs an address lookup table before their transaction fits the 1232-byte packet. When one does not exist yet, the response carries a `setupTx` alongside `tx`: sign and confirm it first, then broadcast `tx`.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -9067,7 +9140,7 @@ paths:
                 type: object
                 properties:
                   result:
-                    $ref: "#/components/schemas/UnsignedTxResponse"
+                    $ref: "#/components/schemas/UnsignedTxWithSetupResponse"
                 required:
                   - result
         "400":

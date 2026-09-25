@@ -39,6 +39,7 @@ import 'package:mallow_wallet/features/home/screens/home_screen.dart';
 import 'package:mallow_wallet/features/home/widgets/drawer_signal.dart';
 import 'package:mallow_wallet/features/onboarding/screens/biometric_setup_screen.dart';
 import 'package:mallow_wallet/features/onboarding/screens/pin_setup_screen.dart';
+import 'package:mallow_wallet/features/onboarding/screens/push_setup_screen.dart';
 import 'package:mallow_wallet/shared/widgets/bottom_nav_bar.dart';
 import 'package:mallow_wallet/shared/widgets/custom_number_pad.dart';
 import 'package:mallow_wallet/shared/widgets/lock_screen.dart';
@@ -100,8 +101,11 @@ Future<void> bootstrapApp() async {
 /// means the per-seed vault entries are deleted by id — ids that only the
 /// database can enumerate.
 ///
-/// The DB encryption key and the sqlite file itself survive on purpose; every
-/// row inside is deleted, which is what "fresh install" means to the app.
+/// `resetAll` takes the DB encryption key (both copies) and the sqlite file
+/// with it, then reopens: the next query mints a key and creates an empty
+/// file. That is a genuine factory reset, not a row-delete, so it must run on
+/// a graph nothing else is using — see the note at its call site in
+/// [restartApp].
 Future<void> resetAppState() async {
   await bootstrapApp();
   await sl<WalletRepository>().resetAll();
@@ -304,8 +308,6 @@ Future<void> restartApp(WidgetTester tester, {bool wipe = true}) async {
   // `NavBarState` on its way out.
   resetAppStatics();
 
-  if (wipe) await resetAppState();
-
   // Let any in-flight repository write reach the database before the
   // connection goes. Several caches are written from an UNAWAITED future
   // (`HomeFeedRepository.cacheAllHomeSections` off `HomeBloc._revalidate` is
@@ -328,6 +330,23 @@ Future<void> restartApp(WidgetTester tester, {bool wipe = true}) async {
   }
   await sl.reset();
   await bootstrapApp();
+
+  // 🛑 The wipe runs on the NEW graph, after the old one is closed and
+  // dropped — never on the outgoing one.
+  //
+  // `resetAll` deletes the DB encryption key from both stores AND the sqlite
+  // file, so the next open mints a key and creates a file. Run it while the
+  // previous graph is still registered and two `SecureWalletStorage`s are
+  // live at once: a stray query from the disposed tree re-opens the OLD
+  // database, which mints its own key and creates the file, while the new
+  // graph mints a different one and stores it. The file is then encrypted
+  // with a key nothing has, and the launch after next quarantines it
+  // (SQLITE_NOTADB) — wallet rows gone, recovery graph still in the vault, so
+  // the app boots to "We found a previous wallet" instead of Welcome or the
+  // lock screen. Closing the old database first is what forecloses that: a
+  // query on a closed [ReopenableExecutor] fails rather than re-running the
+  // opener, so only one graph can ever mint.
+  if (wipe) await resetAppState();
 
   await tester.pumpWidget(const MallowApp());
   await tester.pump(const Duration(milliseconds: 100));
@@ -391,7 +410,30 @@ Future<void> pumpUntil(
     await tester.pump(step);
     if (finder.evaluate().isNotEmpty) return;
   }
-  fail('Timed out waiting for ${label ?? finder.toString()}');
+  fail(
+    'Timed out waiting for ${label ?? finder.toString()}.\n'
+    'On screen instead: ${_onScreenText(tester)}',
+  );
+}
+
+/// The visible [Text] on screen, for a timeout message.
+///
+/// "Timed out waiting for the lock screen" names what was missing and nothing
+/// about what was there — and the screens this suite lands on by mistake are
+/// the silent ones (the splash, the boot error screen, and above all the
+/// recovery screen, which makes no network call at all). Their copy is the
+/// only thing that tells them apart in a CI log.
+String _onScreenText(WidgetTester tester) {
+  try {
+    return tester
+        .widgetList<Text>(find.byType(Text))
+        .map((t) => t.data ?? '')
+        .where((s) => s.isNotEmpty)
+        .take(25)
+        .join(' | ');
+  } catch (e) {
+    return 'could not be read: $e';
+  }
 }
 
 /// [pumpUntil] that runs [drainKnownAppLeaks] on every round.
@@ -877,7 +919,35 @@ Future<void> completePinSetup(WidgetTester tester) async {
     label: 'PIN setup screen',
     rounds: 150,
   );
+  await dismissPushPrompt(tester);
   await waitForLockArmed(tester);
+}
+
+/// Declines the push-permission step that PIN setup hands off to, so the flow
+/// carries on to Home.
+///
+/// It taps "Not now", never "Turn on notifications": the OS dialog cannot be
+/// driven from `integration_test` (it belongs to the system UI, not this
+/// app's widget tree), so a grant would hang the run.
+///
+/// Tolerates the screen being absent rather than waiting for it, because it is
+/// not on every route into Home — a restored wallet and an unlock both arrive
+/// without passing through onboarding.
+Future<void> dismissPushPrompt(WidgetTester tester) async {
+  final screen = find.byType(PushSetupScreen);
+  for (var i = 0; i < 60; i++) {
+    await tester.pump(const Duration(milliseconds: 100));
+    if (screen.evaluate().isNotEmpty) break;
+  }
+  if (screen.evaluate().isEmpty) return;
+
+  await tapAndSettle(tester, find.text('Not now'));
+  await pumpUntilGone(
+    tester,
+    screen,
+    label: 'push permission screen',
+    rounds: 150,
+  );
 }
 
 /// Waits until the app is on Home with its session initialised.

@@ -10,6 +10,8 @@ flutter pub get
 ./di.sh          # code generation (freezed, retrofit, injectable, swagger)
 flutter test
 ./run.sh         # run on the default device with .env compiled in
+# What the iOS App Store build shows — pass both, as that lane does:
+./run.sh --dart-define=SHOW_NFT_COMMERCE=false --dart-define=SHOW_SWAP=false
 ```
 
 🛑 **Always run `./di.sh`, never `dart run build_runner build` at the repository

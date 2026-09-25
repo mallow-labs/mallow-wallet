@@ -212,8 +212,11 @@ jobs:
       # Analyze and test both pass on a tree that cannot actually produce an
       # app. Only a build proves a fork can still ship one, so this runs on
       # every pull request rather than at release time.
+      #
+      # --flavor is required: the app declares product flavours, and a
+      # flavourless build writes no app-debug.apk for the tool to pick up.
       - name: Build debug APK
-        run: flutter build apk --debug
+        run: flutter build apk --debug --flavor play
 
       # Runs on failure too, which is the case it is for: the ENOSPC this job
       # once hit could say neither how much the build had used nor how much it

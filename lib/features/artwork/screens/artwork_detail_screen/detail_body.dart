@@ -255,7 +255,7 @@ ArtworkInfoViewData _buildArtworkInfoViewData(
 
   return ArtworkInfoViewData(
     description: artwork.description ?? '',
-    mintAddress: artwork.mintAccount,
+    mintAddress: assetMintForDisplay(artwork.mintAccount),
     contractAddress: contractAddress,
     tokenId: tokenId,
     editionCountLabel: editionCountLabel,
@@ -273,7 +273,10 @@ ArtworkInfoViewData _buildArtworkInfoViewData(
     dimensions: artwork.dimensions,
     fileSizeBytes: artwork.fileSizeBytes,
     isImmutable: artwork.isMutable == null ? null : !artwork.isMutable!,
-    tokenStandard: artwork.tokenStandard,
+    tokenStandard: assetTokenStandardForDisplay(
+      artwork.mintAccount,
+      artwork.tokenStandard,
+    ),
     metadataUrl: artwork.metadataUrl,
     chain: artwork.chain,
     categories: mintCategoryDisplayNamesFromTags(artwork.tags),

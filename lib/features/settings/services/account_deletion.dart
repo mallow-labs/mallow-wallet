@@ -11,19 +11,31 @@ import '../../../di.dart';
 /// down; `failed` means nothing changed and the profile is still there.
 enum AccountDeletionOutcome { deleted, failed }
 
-/// The username `POST /v2/user/delete` would remove, or null when the
-/// logged-in address has no mallow profile.
+/// Whether `POST /v2/user/delete` has something to delete, and the username it
+/// would remove — null when the signed-in address never set one.
+///
+/// `signedIn` is the whole predicate; the username only names the doc in the
+/// copy. Every `/v0/login` upserts a `users` document for the address, so an
+/// authenticated address **always** has a server record — the linked addresses,
+/// the sign-in history and the push-notification registrations keyed off them —
+/// whether or not a username was ever chosen. The route looks that doc up by
+/// address, not by name, so a missing username is not a missing record and must
+/// not withhold the delete: App Review signs in and never sets a username, and
+/// that is exactly the account 5.1.1(v) requires be deletable.
 ///
 /// Read from [AuthService.currentUser] rather than
 /// [SessionManager.activeProfile] on purpose: the route is authenticated by the
 /// `login-token` cookie and deletes the user document for **that** address, so
-/// the authenticated user is the only source that names the doc actually being
-/// deleted. It is also mode-agnostic — an Account-mode session whose active
-/// wallet happens to own a profile can still delete it, which is what App
-/// Review discoverability (5.1.1(v)) needs.
-String? deletableUsername() {
-  final username = sl<AuthService>().currentUser?.username?.trim();
-  return (username == null || username.isEmpty) ? null : username;
+/// the authenticated user is the only source that describes the doc actually
+/// being deleted. It is also mode-agnostic — an Account-mode session whose
+/// active wallet happens to own a profile can still delete it.
+({bool signedIn, String? username}) deletableProfile() {
+  final user = sl<AuthService>().currentUser;
+  final username = user?.username?.trim();
+  return (
+    signedIn: user != null,
+    username: (username == null || username.isEmpty) ? null : username,
+  );
 }
 
 /// Delete (anonymize) the logged-in user's mallow profile, then tear the local

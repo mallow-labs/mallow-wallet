@@ -8,8 +8,11 @@ import 'package:get_it/get_it.dart';
 import 'package:mallow_api/mallow_api.dart';
 import 'package:mallow_wallet/core/config/environment.dart';
 import 'package:mallow_wallet/core/crypto/wallet_manager.dart';
+import 'package:mallow_wallet/core/models/account.dart';
 import 'package:mallow_wallet/core/network/auth_service.dart';
+import 'package:mallow_wallet/core/network/hardware_verify_controller.dart';
 import 'package:mallow_wallet/core/security/secure_storage.dart';
+import 'package:mallow_wallet/core/services/wallet_repository.dart';
 import 'package:mallow_wallet/core/services/preferences_service.dart';
 import 'package:mallow_wallet/core/session/session_manager.dart';
 import 'package:mallow_wallet/shared/utils/chain.dart';
@@ -24,6 +27,8 @@ class _MockStorage extends Mock implements SecureWalletStorage {}
 class _MockSession extends Mock implements SessionManager {}
 
 class _MockPrefs extends Mock implements PreferencesService {}
+
+class _MockWalletRepo extends Mock implements WalletRepository {}
 
 /// Dio adapter that stubs `/v0/login` (returning a minimal LoginResult plus a
 /// `login-token` Set-Cookie so the auth interceptor is installed) and records
@@ -146,6 +151,9 @@ class _StubVerifyAdapter implements HttpClientAdapter {
   /// non-active-wallet verify does not overwrite what the first one adopted.
   List<String> perks = const ['gif-pfp'];
 
+  /// Set when `/v0/authToken/verify` is reached.
+  bool verifyCalled = false;
+
   static final _jsonHeaders = {
     Headers.contentTypeHeader: [Headers.jsonContentType],
   };
@@ -171,6 +179,7 @@ class _StubVerifyAdapter implements HttpClientAdapter {
       );
     }
     if (options.path.endsWith('/v0/authToken/verify')) {
+      verifyCalled = true;
       final address = (options.data as Map)['address'] as String;
       return ResponseBody.fromString(
         jsonEncode({
@@ -287,6 +296,9 @@ class _SigLapseAdapter implements HttpClientAdapter {
   /// The `Cookie` header of every `/gated` attempt, in order.
   final List<String?> gatedCookies = [];
 
+  /// The body of every `/v0/authToken/verify` POST, in order.
+  final List<Map<String, dynamic>> verifyBodies = [];
+
   static final _jsonHeaders = {
     Headers.contentTypeHeader: [Headers.jsonContentType],
   };
@@ -310,6 +322,7 @@ class _SigLapseAdapter implements HttpClientAdapter {
       );
     }
     if (options.path.endsWith('/v0/authToken/verify')) {
+      verifyBodies.add(Map<String, dynamic>.from(options.data as Map));
       return ResponseBody.fromString(
         jsonEncode({'result': <String, dynamic>{}}),
         200,
@@ -399,6 +412,42 @@ void main() {
       expect(auth.hasAnyVerifiedSession([address]), isFalse);
     });
 
+    // Regression: Reset app / Start fresh erased the on-disk wallet-sig JWTs
+    // but the in-memory map survived (logout() never cleared it), so a
+    // freshly onboarded identity could still ride the previous identity's
+    // ownership proof until the process died.
+    test('logout forgets every in-memory wallet-sig', () async {
+      when(
+        () => storage.loadWalletSigCookie(address),
+      ).thenAnswer((_) async => _jwt(futureExp));
+      when(() => storage.deleteLoginToken()).thenAnswer((_) async {});
+      when(() => storage.deleteSessionExpiry()).thenAnswer((_) async {});
+      when(() => storage.deleteAuthToken()).thenAnswer((_) async {});
+      await auth.hasValidWalletSigForAny([address]);
+      expect(auth.hasAnyVerifiedSession([address]), isTrue);
+
+      await auth.logout();
+
+      expect(auth.hasAnyVerifiedSession([address]), isFalse);
+    });
+
+    test('forgetWalletSig drops one address, normalizing EVM casing', () async {
+      const evm = '0xAbCdEf0000000000000000000000000000000001';
+      when(
+        () => storage.loadWalletSigCookie(any()),
+      ).thenAnswer((_) async => _jwt(futureExp));
+      // Hydrate one at a time: the any-check short-circuits on the first hit.
+      await auth.hasValidWalletSigForAny([address]);
+      await auth.hasValidWalletSigForAny([evm]);
+      expect(auth.hasAnyVerifiedSession([address]), isTrue);
+      expect(auth.hasAnyVerifiedSession([evm]), isTrue);
+
+      auth.forgetWalletSig(evm.toUpperCase().replaceFirst('0X', '0x'));
+
+      expect(auth.hasAnyVerifiedSession([evm]), isFalse);
+      expect(auth.hasAnyVerifiedSession([address]), isTrue);
+    });
+
     test('no sig on disk → false', () async {
       when(
         () => storage.loadWalletSigCookie(address),
@@ -462,7 +511,7 @@ void main() {
         () => storage.storeWalletSigCookie(any(), any()),
       ).thenAnswer((_) async {});
       when(
-        () => walletManager.isLedgerWallet(any()),
+        () => walletManager.isHardwareWallet(any()),
       ).thenAnswer((_) async => false);
       when(
         () => walletManager.needsSocialKeyRecovery(any()),
@@ -663,7 +712,7 @@ void main() {
         () => storage.loadWalletSigCookie(any()),
       ).thenAnswer((_) async => null);
       when(
-        () => walletManager.isLedgerWallet(any()),
+        () => walletManager.isHardwareWallet(any()),
       ).thenAnswer((_) async => false);
       when(
         () => walletManager.needsSocialKeyRecovery(any()),
@@ -713,7 +762,7 @@ void main() {
         () => storage.loadWalletSigCookie(any()),
       ).thenAnswer((_) async => null);
       when(
-        () => walletManager.isLedgerWallet(any()),
+        () => walletManager.isHardwareWallet(any()),
       ).thenAnswer((_) async => false);
       when(
         () => walletManager.needsSocialKeyRecovery(any()),
@@ -774,7 +823,7 @@ void main() {
         () => storage.storeWalletSigCookie(any(), any()),
       ).thenAnswer((_) async {});
       when(
-        () => walletManager.isLedgerWallet(any()),
+        () => walletManager.isHardwareWallet(any()),
       ).thenAnswer((_) async => false);
       when(
         () => api.getAuthToken(any()),
@@ -1402,6 +1451,289 @@ void main() {
 
       expect(auth.currentAddress, c);
       expect(adapter.loginCount(c), 1);
+    });
+  });
+
+  // The Seed Vault contract, and the reason Phase 4 exists at all: a Seed Vault
+  // signature is approved in a full-screen OS Activity. A prompt with no user
+  // action behind it does not read as a stray bottom sheet — it reads as a
+  // system-level security event, and it would fire on every cold start and
+  // every resume. Ledger has always been deferred here for the milder version
+  // of the same reason; these tests hold the line for both devices.
+  group('hardware wallets and the no-unexpected-prompt contract', () {
+    const vaultAddr = 'SEEDVAULT_A';
+
+    late _MockSession session;
+    late _MockWalletRepo wallets;
+    late HardwareVerifyController controller;
+
+    setUpAll(() {
+      registerFallbackValue(const AuthTokenRequest(address: vaultAddr));
+    });
+
+    /// Registers the session plus the wallet row `hardwareVerifyDeviceFor`
+    /// reads to tell the two devices apart.
+    void registerSession(WalletType type) {
+      session = _MockSession();
+      when(() => session.sessionAddresses).thenReturn({vaultAddr});
+      when(() => session.settingsScopeId()).thenAnswer((_) async => null);
+      if (GetIt.instance.isRegistered<SessionManager>()) {
+        GetIt.instance.unregister<SessionManager>();
+      }
+      GetIt.instance.registerSingleton<SessionManager>(session);
+
+      wallets = _MockWalletRepo();
+      when(() => wallets.getWalletByAddress(any())).thenAnswer(
+        (_) async => WalletInfo(
+          id: 'w1',
+          address: vaultAddr,
+          name: 'Seeker',
+          walletType: type,
+          chain: 'solana',
+        ),
+      );
+      if (GetIt.instance.isRegistered<WalletRepository>()) {
+        GetIt.instance.unregister<WalletRepository>();
+      }
+      GetIt.instance.registerSingleton<WalletRepository>(wallets);
+    }
+
+    setUp(() {
+      Config.debugOverrides['API_BASE_URL'] = 'https://api.test';
+      registerSession(WalletType.seedVault);
+
+      controller = HardwareVerifyController();
+      if (GetIt.instance.isRegistered<HardwareVerifyController>()) {
+        GetIt.instance.unregister<HardwareVerifyController>();
+      }
+      GetIt.instance.registerSingleton<HardwareVerifyController>(controller);
+
+      when(() => walletManager.getAddress()).thenAnswer((_) async => vaultAddr);
+      when(() => storage.storeLoginToken(any())).thenAnswer((_) async {});
+      when(
+        () => storage.storeWalletSigCookie(any(), any()),
+      ).thenAnswer((_) async {});
+      when(
+        () => walletManager.isHardwareWallet(any()),
+      ).thenAnswer((_) async => true);
+      when(
+        () => walletManager.needsSocialKeyRecovery(any()),
+      ).thenAnswer((_) async => false);
+      when(
+        () => api.getAuthToken(any()),
+      ).thenAnswer((_) async => const ApiResponse<String>(result: 'TOKEN'));
+    });
+
+    tearDown(() {
+      controller.dispose();
+      if (GetIt.instance.isRegistered<HardwareVerifyController>()) {
+        GetIt.instance.unregister<HardwareVerifyController>();
+      }
+      if (GetIt.instance.isRegistered<SessionManager>()) {
+        GetIt.instance.unregister<SessionManager>();
+      }
+      if (GetIt.instance.isRegistered<WalletRepository>()) {
+        GetIt.instance.unregister<WalletRepository>();
+      }
+    });
+
+    test(
+      'a background login on a Seed Vault wallet issues no signing call',
+      () async {
+        // Nothing cached, so this is the shape that *would* sign: a first-ever
+        // login for the wallet. It must still not reach the signer.
+        when(
+          () => storage.loadWalletSigCookie(any()),
+        ).thenAnswer((_) async => null);
+        var signCalls = 0;
+        when(
+          () => walletManager.signLoginChallengeForAddress(
+            any(),
+            message: any(named: 'message'),
+            token: any(named: 'token'),
+          ),
+        ).thenAnswer((_) async {
+          signCalls++;
+          return const LoginChallengeSignature(
+            chain: Chain.solana,
+            signature: 'SIG',
+          );
+        });
+        var sheetRequests = 0;
+        final sub = controller.requests.listen((_) => sheetRequests++);
+
+        final adapter = _StubVerifyAdapter();
+        auth = AuthService(
+          api,
+          walletManager,
+          storage,
+          Dio()..httpClientAdapter = adapter,
+        );
+        await auth.initializeSession();
+        await sub.cancel();
+
+        // The signer is what launches the approval Activity, so counting its
+        // calls is counting OS prompts. Zero is the whole contract.
+        expect(signCalls, 0);
+        expect(sheetRequests, 0, reason: 'a background path shows no sheet');
+        verifyNever(() => api.getAuthToken(any()));
+        expect(adapter.verifyCalled, isFalse);
+        // Basic login still succeeded — the wallet-sig is simply deferred until
+        // the user does something that needs it.
+        expect(auth.currentAddress, vaultAddr);
+        expect(auth.hasAnyVerifiedSession([vaultAddr]), isFalse);
+      },
+    );
+
+    for (final type in [WalletType.ledger, WalletType.seedVault]) {
+      test('currentWalletNeedsHardwareVerification is true for a ${type.name} '
+          'wallet with no sig', () async {
+        registerSession(type);
+        when(
+          () => walletManager.isHardwareWallet(any()),
+        ).thenAnswer((_) async => type.isHardware);
+        when(
+          () => storage.loadWalletSigCookie(any()),
+        ).thenAnswer((_) async => null);
+        final adapter = _StubVerifyAdapter();
+        auth = AuthService(
+          api,
+          walletManager,
+          storage,
+          Dio()..httpClientAdapter = adapter,
+        );
+        await auth.initializeSession();
+
+        // Ledger-only would have answered false for the Seed Vault row and
+        // silently skipped the pre-flight prompt callers rely on (casting,
+        // the private-curations CTA).
+        expect(await auth.currentWalletNeedsHardwareVerification(), isTrue);
+      });
+    }
+
+    // A 401 "Signature required" is trigger-blind — it can arrive from a
+    // background refresh as easily as from a tap. So the consent sheet has to
+    // come first, and the signature (and with it the OS Activity) only after.
+    group('the 401 retry', () {
+      late _SigLapseAdapter adapter;
+      late Dio dio;
+      late String freshSig;
+      late int signCalls;
+
+      setUp(() {
+        freshSig = _jwt(futureExp + 60);
+        adapter = _SigLapseAdapter(vaultAddr, freshSig);
+        dio = Dio()..httpClientAdapter = adapter;
+        auth = AuthService(api, walletManager, storage, dio);
+        // A sig the client still believes in; only the backend knows it lapsed.
+        when(
+          () => storage.loadWalletSigCookie(any()),
+        ).thenAnswer((_) async => _jwt(futureExp));
+        signCalls = 0;
+        when(
+          () => walletManager.signLoginChallengeForAddress(
+            any(),
+            message: any(named: 'message'),
+            token: any(named: 'token'),
+          ),
+        ).thenAnswer((_) async {
+          signCalls++;
+          return const LoginChallengeSignature(
+            chain: Chain.solana,
+            signature: 'SIG',
+          );
+        });
+      });
+
+      test('shows the consent sheet before Seed Vault is asked to sign', () async {
+        await auth.initializeSession();
+
+        HardwareVerifyRequest? request;
+        var signCallsWhenAsked = -1;
+        final sub = controller.requests.listen((r) {
+          request = r;
+          // Captured at the moment the sheet would appear: anything above zero
+          // means the OS approval screen beat our own consent step to it.
+          signCallsWhenAsked = signCalls;
+          r.completer.complete(true);
+        });
+
+        final response = await dio.get<dynamic>('https://api.test/gated');
+        await sub.cancel();
+
+        expect(request, isNotNull);
+        expect(request!.address, vaultAddr);
+        // The sheet renders a different flow per device; a Seed Vault user told
+        // to connect a Ledger is sent somewhere they cannot go.
+        expect(request!.walletType, WalletType.seedVault);
+        expect(signCallsWhenAsked, 0);
+        expect(signCalls, 1, reason: 'consent granted, so it signs once');
+        expect(response.statusCode, 200);
+      });
+
+      test('a Seed Vault login uses the ordinary verify body', () async {
+        await auth.initializeSession();
+        final sub = controller.requests.listen(
+          (r) => r.completer.complete(true),
+        );
+
+        await dio.get<dynamic>('https://api.test/gated');
+        await sub.cancel();
+
+        // D6: Seed Vault signs the challenge verbatim, so the proof is the same
+        // {address, message, signature} the backend already verifies for HD and
+        // imported wallets — no `chain` discriminator, and none of the
+        // memo-transaction shape Ledger needs. Getting this wrong is a silent
+        // 401 loop, not a crash.
+        expect(adapter.verifyBodies, hasLength(1));
+        expect(adapter.verifyBodies.single, {
+          'address': vaultAddr,
+          'message': 'mallow Login',
+          'signature': 'SIG',
+        });
+      });
+
+      test('a cancelled sheet never reaches the device', () async {
+        await auth.initializeSession();
+        final sub = controller.requests.listen(
+          (r) => r.completer.complete(false),
+        );
+
+        await expectLater(
+          dio.get<dynamic>('https://api.test/gated'),
+          throwsA(isA<DioException>()),
+        );
+        await sub.cancel();
+
+        // Declining the sheet is the user saying no. The 401 surfaces to the
+        // caller instead — an error they can act on, not a prompt they cannot.
+        expect(signCalls, 0);
+        expect(adapter.verifyBodies, isEmpty);
+      });
+
+      test('a Ledger 401 does not sign a second time after the sheet', () async {
+        registerSession(WalletType.ledger);
+        await auth.initializeSession();
+
+        HardwareVerifyRequest? request;
+        final sub = controller.requests.listen((r) {
+          request = r;
+          r.completer.complete(true);
+        });
+
+        // The real sheet caches the JWT itself via LedgerAuthService, so there
+        // is nothing left for the interceptor to sign. Signing here would mean
+        // a second on-device confirmation for one 401 — and a login-challenge
+        // body the backend rejects for a Ledger.
+        await expectLater(
+          dio.get<dynamic>('https://api.test/gated'),
+          throwsA(isA<DioException>()),
+        );
+        await sub.cancel();
+
+        expect(request!.walletType, WalletType.ledger);
+        expect(signCalls, 0);
+      });
     });
   });
 }

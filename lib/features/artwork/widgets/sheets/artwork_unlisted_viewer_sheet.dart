@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../../core/config/store_build.dart';
 import '../../../../shared/theme/mallow_theme.dart';
 import '../../../../shared/widgets/mallow_sheet.dart';
 import '../../../../shared/widgets/sheet_drag_handle.dart';
@@ -112,19 +113,33 @@ class ArtworkUnlistedViewerSheet extends StatelessWidget {
               ),
             ),
           ],
-          const SizedBox(height: MallowTheme.spacingMd),
-          // The offer is funded in the artwork's currency (SOL when unlisted
-          // artworks carry none).
-          ArtworkFundingSource(
-            currencyMint: artwork.currency,
-            builder: (context, switching) => OfferActionButtons(
-              userOwnOffer: userOwnOffer,
-              isLoading: isLoading || switching,
+          // Make/update offer and its funding line go with `kShowNftCommerce`;
+          // a store build that hides commerce keeps the offer status above
+          // and, when this wallet already holds an offer, the way to cancel it.
+          if (showNftCommerce) ...[
+            const SizedBox(height: MallowTheme.spacingMd),
+            // The offer is funded in the artwork's currency (SOL when unlisted
+            // artworks carry none).
+            ArtworkFundingSource(
+              currencyMint: artwork.currency,
+              builder: (context, switching) => OfferActionButtons(
+                userOwnOffer: userOwnOffer,
+                isLoading: isLoading || switching,
+                isPrimary: true,
+                onMakeOffer: onMakeOffer,
+                onCancelOffer: onCancelOffer,
+              ),
+            ),
+          ] else if (userOwnOffer) ...[
+            const SizedBox(height: MallowTheme.spacingMd),
+            OfferActionButtons(
+              userOwnOffer: true,
+              isLoading: isLoading,
               isPrimary: true,
               onMakeOffer: onMakeOffer,
               onCancelOffer: onCancelOffer,
             ),
-          ),
+          ],
         ],
       ),
     );

@@ -35,6 +35,11 @@ import 'staking_season_banner.dart';
 /// path. The gates live per-action in [StakingFormTab]; all this does is
 /// refresh the config on the way in so those gates read a fresh value.
 ///
+/// The **store** gate is not here either, for the sharper version of the same
+/// reason: `kShowSwap` hides only `stake-liquid`, so hiding this entry would
+/// take native staking — and the unstake and Claim escape hatches — with it.
+/// [StakingFormTab] drops the type selector instead.
+///
 /// The **chain** gate does belong here, though: that objection turns on the
 /// four cells being independently killable, and all four are `{Chain.solana}`,
 /// so one check covers the sheet. Gating here rather than at the callers is

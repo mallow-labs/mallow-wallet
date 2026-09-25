@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../../core/config/store_build.dart';
 import '../../../../shared/theme/mallow_theme.dart';
 import '../../../../shared/widgets/mallow_button.dart';
 
@@ -31,6 +32,22 @@ class OfferActionButtons extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (!showNftCommerce) {
+      // Store build: making or updating an offer is a purchase CTA and is
+      // not rendered; cancelling a live offer is the escape hatch that
+      // reclaims the escrowed bid, so it stays.
+      if (!userOwnOffer) return const SizedBox.shrink();
+      return MallowButton(
+        label: 'Cancel offer',
+        variant: MallowButtonVariant.secondary,
+        onPressed: isLoading ? null : onCancelOffer,
+        // Sole CTA in this branch, so it carries the in-flight spinner
+        // itself — the sibling buttons that hold it when commerce is shown
+        // (Buy, make/update offer) are not rendered here.
+        isLoading: isLoading,
+        isFullWidth: true,
+      );
+    }
     final makeOfferVariant = isPrimary
         ? MallowButtonVariant.primary
         : MallowButtonVariant.secondary;

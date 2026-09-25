@@ -27,7 +27,24 @@ enum CastDeviceType {
 }
 
 /// Current state of the cast session.
-enum CastSessionState { disconnected, connecting, connected, error }
+enum CastSessionState {
+  disconnected,
+  connecting,
+  connected,
+
+  /// The transport dropped but the session is expected back: the sender app
+  /// was backgrounded (the iOS Cast SDK suspends on that by default), the
+  /// phone locked, or the network blipped. Both Cast SDKs resume such a
+  /// session themselves and report [connected] again.
+  ///
+  /// 🛑 Distinct from [disconnected] on purpose. Reporting a suspend as a
+  /// disconnect ends the session in [CastBloc] — queue, device and slideshow
+  /// all gone — and the SDK's later resume then has nothing to resume into,
+  /// which is why every lock-screen round trip used to kill casting.
+  suspended,
+
+  error,
+}
 
 /// Platform-agnostic interface for sending art to a display device.
 ///

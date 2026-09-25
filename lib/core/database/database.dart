@@ -12,6 +12,7 @@ import 'package:sentry_flutter/sentry_flutter.dart' show SentryLevel;
 
 import '../security/secure_storage.dart';
 import '../services/sentry_service.dart';
+import 'reopenable_executor.dart';
 
 part 'database.g.dart';
 
@@ -584,12 +585,52 @@ class PendingEvmTransactions extends Table {
 )
 @lazySingleton
 class MallowDatabase extends _$MallowDatabase {
-  MallowDatabase(SecureWalletStorage storage) : super(_openConnection(storage));
+  MallowDatabase(SecureWalletStorage storage)
+    : this._(ReopenableExecutor(() => _openEncryptedDatabase(storage)));
+
+  MallowDatabase._(ReopenableExecutor executor)
+    : _reopenable = executor,
+      super(executor);
 
   /// Opens the database against a caller-supplied executor (e.g. an in-memory
   /// [NativeDatabase] in tests), bypassing the encrypted on-disk connection.
   @visibleForTesting
-  MallowDatabase.forTesting(super.executor);
+  MallowDatabase.forTesting(super.executor) : _reopenable = null;
+
+  /// The on-disk connection's executor; null for [forTesting] databases.
+  final ReopenableExecutor? _reopenable;
+
+  /// Factory-reset the on-disk database: close it, delete the file, its
+  /// `-wal`/`-shm` sidecars and any quarantined copies left by an earlier
+  /// incident, then reopen lazily on the next query. The database object stays
+  /// valid — streams, migrations and every caller keep working; the next query
+  /// creates a fresh file.
+  ///
+  /// Pairs with [SecureWalletStorage.eraseAllSecrets], which deletes both
+  /// copies of the encryption key: a file left behind after that would be
+  /// undecryptable on the next launch and get quarantined as "corrupt", so
+  /// the file must go with the key.
+  ///
+  /// A [forTesting] database has no file; its rows are cleared instead, which
+  /// is the same end state.
+  Future<void> resetStorage() async {
+    final reopenable = _reopenable;
+    if (reopenable == null) {
+      await clearAll();
+      return;
+    }
+    await reopenable.reset(() async {
+      final file = await databaseFile();
+      for (final path in [file.path, '${file.path}-wal', '${file.path}-shm']) {
+        final f = File(path);
+        if (f.existsSync()) f.deleteSync();
+      }
+      // Earlier incidents left `<name>.invalid-<millis>` copies beside it.
+      // Those hold wallet rows too, so the reset takes them with the live file
+      // — see [deleteQuarantinedCopies].
+      deleteQuarantinedCopies(file);
+    });
+  }
 
   @override
   int get schemaVersion => 22;
@@ -711,6 +752,20 @@ class MallowDatabase extends _$MallowDatabase {
     return (select(accounts)..where(
           (t) =>
               t.kind.equals('hardware') &
+              t.derivationIndex.equals(derivationIndex),
+        ))
+        .getSingleOrNull();
+  }
+
+  /// Find the `seedVault` account for a given derivation index, or null.
+  ///
+  /// Separate from [getHardwareAccountByIndex] on purpose: that one matches on
+  /// the index alone, so sharing the `hardware` kind would merge a Ledger and a
+  /// Seed Vault imported at the same index into one account card.
+  Future<AccountRow?> getSeedVaultAccountByIndex(int derivationIndex) {
+    return (select(accounts)..where(
+          (t) =>
+              t.kind.equals('seedVault') &
               t.derivationIndex.equals(derivationIndex),
         ))
         .getSingleOrNull();
@@ -1362,11 +1417,6 @@ class MallowDatabase extends _$MallowDatabase {
     return into(cachedPortfolios).insertOnConflictUpdate(data);
   }
 
-  /// Delete all cached portfolio snapshots.
-  Future<void> deletePortfolioCache() {
-    return delete(cachedPortfolios).go();
-  }
-
   // ============================================================================
   // User Profile Cache Operations
   // ============================================================================
@@ -1471,6 +1521,10 @@ class MallowDatabase extends _$MallowDatabase {
   // ============================================================================
 
   /// Clear all cached data (keeps wallet/seed phrase info).
+  ///
+  /// Session-scoped caches only. The token-registry caches (Jupiter / EVM
+  /// token lists and info) are chain-global metadata, cheap to keep, and are
+  /// left alone here — [clearAll] covers them.
   Future<void> clearCache() async {
     await delete(cachedArtworks).go();
     await delete(cachedTokens).go();
@@ -1480,17 +1534,19 @@ class MallowDatabase extends _$MallowDatabase {
     await delete(tokenTransfers).go();
     await delete(cachedHomeFeed).go();
     await delete(cachedUserProfiles).go();
+    // Raw portfolio wire JSON keyed by the session's addresses — identity
+    // data, not registry data.
+    await delete(cachedPortfolios).go();
   }
 
-  /// Clear everything (full reset).
+  /// Clear every row in every table (full reset).
+  ///
+  /// Iterates [allTables] rather than a hand-written list so a table added
+  /// later can never be left behind by a reset — five were, until this loop.
   Future<void> clearAll() async {
-    await delete(wallets).go();
-    await delete(accounts).go();
-    await delete(seedPhrases).go();
-    // Durable user state, so it is dropped here rather than in [clearCache] —
-    // a full reset deletes every wallet, which deletes their pending rows too.
-    await delete(pendingEvmTransactions).go();
-    await clearCache();
+    for (final table in allTables) {
+      await delete(table).go();
+    }
   }
 }
 
@@ -1498,33 +1554,46 @@ class MallowDatabase extends _$MallowDatabase {
 // Database Connection
 // ============================================================================
 
-LazyDatabase _openConnection(SecureWalletStorage storage) {
-  return LazyDatabase(() async {
-    final dbFolder = await getApplicationDocumentsDirectory();
-    final file = File(p.join(dbFolder.path, 'mallow.sqlite'));
+/// The on-disk database file: `mallow.sqlite` in the app documents directory.
+Future<File> databaseFile() async {
+  final dbFolder = await getApplicationDocumentsDirectory();
+  return File(p.join(dbFolder.path, 'mallow.sqlite'));
+}
 
-    // Bootstrap (load or generate) the DB encryption key. The Completer-guarded
-    // accessor ensures concurrent cold-start callers share one key instead of
-    // racing to write two. `dbFileExists` is the safety interlock: with a
-    // database already on disk, a transient keystore "not found" must not
-    // mint a fresh key — that would make the file undecryptable (and, before
-    // this guard, silently destroyed it).
-    final hexKey = await storage.getOrCreateDbEncryptionKey(
-      dbFileExists: file.existsSync(),
+/// Opener for the encrypted on-disk database. Wrapped in a
+/// [ReopenableExecutor] by the production constructor, so it runs again after
+/// a failed open (e.g. [DbEncryptionKeyUnavailable] on a locked-device
+/// background launch) and after [MallowDatabase.resetStorage].
+Future<QueryExecutor> _openEncryptedDatabase(
+  SecureWalletStorage storage,
+) async {
+  final file = await databaseFile();
+
+  // Bootstrap (load or generate) the DB encryption key. The Completer-guarded
+  // accessor ensures concurrent cold-start callers share one key instead of
+  // racing to write two. `dbFileExists` is the safety interlock: with a
+  // database already on disk, a transient keystore "not found" must not
+  // mint a fresh key — that would make the file undecryptable (and, before
+  // this guard, silently destroyed it).
+  final resolution = await storage.resolveDbEncryptionKey(
+    dbFileExists: file.existsSync(),
+  );
+
+  // Build the setup closure via a top-level factory so it only captures
+  // `hexKey`. Defining it inline here would capture the enclosing scope
+  // (including `storage`), and `SecureWalletStorage` holds an
+  // _AsyncCompleter that's not sendable to the background isolate.
+  final setupEncryption = _makeSetupEncryption(resolution.key);
+
+  if (file.existsSync()) {
+    probeEncryptedDatabase(
+      file,
+      setupEncryption,
+      migrationSuspected: resolution.migrationSuspected,
     );
+  }
 
-    // Build the setup closure via a top-level factory so it only captures
-    // `hexKey`. Defining it inline here would capture the enclosing scope
-    // (including `storage`), and `SecureWalletStorage` holds an
-    // _AsyncCompleter that's not sendable to the background isolate.
-    final setupEncryption = _makeSetupEncryption(hexKey);
-
-    if (file.existsSync()) {
-      probeEncryptedDatabase(file, setupEncryption);
-    }
-
-    return NativeDatabase.createInBackground(file, setup: setupEncryption);
-  });
+  return NativeDatabase.createInBackground(file, setup: setupEncryption);
 }
 
 /// Eagerly probe [file] so a corrupt/wrong-key header (recoverable by moving
@@ -1538,8 +1607,19 @@ LazyDatabase _openConnection(SecureWalletStorage storage) {
 /// (rename-aside) rather than deleting it. NOTADB also means "right file,
 /// wrong key", and deleting on that signal is what used to permanently
 /// destroy wallet metadata after a keystore misread.
+///
+/// [migrationSuspected] (from [SecureWalletStorage.resolveDbEncryptionKey])
+/// means the key was re-minted because the Keychain held nothing of ours at
+/// all — the database file travelled to a new device (backup restore, device
+/// transfer) while every `*ThisDeviceOnly` Keychain item stayed behind. The
+/// quarantine is then the expected outcome, not a corruption: it is logged as
+/// information so it does not page anyone as an error.
 @visibleForTesting
-void probeEncryptedDatabase(File file, void Function(sqlite3.Database) setup) {
+void probeEncryptedDatabase(
+  File file,
+  void Function(sqlite3.Database) setup, {
+  bool migrationSuspected = false,
+}) {
   sqlite3.Database? probe;
   try {
     probe = sqlite3.sqlite3.open(file.path);
@@ -1564,14 +1644,47 @@ void probeEncryptedDatabase(File file, void Function(sqlite3.Database) setup) {
     quarantineCorruptDatabase(file);
     unawaited(
       SentryService.captureMessage(
-        'Encrypted DB failed the header check (SQLITE_NOTADB); '
-        'file quarantined and recreated',
-        level: SentryLevel.error,
-        extras: {'extendedResultCode': e.extendedResultCode},
+        migrationSuspected
+            ? 'Encrypted DB failed the header check after a key re-mint with '
+                  'no Keychain data present (likely device migration); file '
+                  'quarantined and recreated'
+            : 'Encrypted DB failed the header check (SQLITE_NOTADB); '
+                  'file quarantined and recreated',
+        level: migrationSuspected ? SentryLevel.info : SentryLevel.error,
+        extras: {
+          'extendedResultCode': e.extendedResultCode,
+          'reason': migrationSuspected ? 'no-keychain-data' : 'unknown',
+        },
       ),
     );
   } finally {
     probe?.close();
+  }
+}
+
+/// Delete every quarantined copy of [file] — `<name>.invalid-<millis>` and
+/// the same-suffixed `-wal`/`-shm` sidecars — sitting beside it.
+///
+/// Two callers, both of which must leave none behind:
+/// [quarantineCorruptDatabase] prunes so copies cannot accumulate, and
+/// [MallowDatabase.resetStorage] because a quarantined copy still holds real
+/// wallet rows. A factory reset deletes the encryption key, which makes those
+/// rows unreadable but not gone — and "unreadable with today's key" is not
+/// what a user asking to erase the app means.
+@visibleForTesting
+void deleteQuarantinedCopies(File file) {
+  final dir = file.parent;
+  if (!dir.existsSync()) return;
+  final base = p.basename(file.path);
+  for (final entity in dir.listSync()) {
+    final name = p.basename(entity.path);
+    if (entity is File && name.startsWith(base) && name.contains('.invalid-')) {
+      try {
+        entity.deleteSync();
+      } on FileSystemException catch (e) {
+        debugPrint('[Database] Failed to delete quarantined file: $e');
+      }
+    }
   }
 }
 
@@ -1586,22 +1699,7 @@ void probeEncryptedDatabase(File file, void Function(sqlite3.Database) setup) {
 /// recovery.
 @visibleForTesting
 void quarantineCorruptDatabase(File file) {
-  final dir = file.parent;
-  final base = p.basename(file.path);
-  if (dir.existsSync()) {
-    for (final entity in dir.listSync()) {
-      final name = p.basename(entity.path);
-      if (entity is File &&
-          name.startsWith(base) &&
-          name.contains('.invalid-')) {
-        try {
-          entity.deleteSync();
-        } on FileSystemException catch (e) {
-          debugPrint('[Database] Failed to prune old quarantined file: $e');
-        }
-      }
-    }
-  }
+  deleteQuarantinedCopies(file);
   final suffix = '.invalid-${DateTime.now().millisecondsSinceEpoch}';
   file.renameSync('${file.path}$suffix');
   for (final sidecar in ['${file.path}-wal', '${file.path}-shm']) {

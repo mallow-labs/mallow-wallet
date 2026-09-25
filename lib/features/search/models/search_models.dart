@@ -235,6 +235,9 @@ class SearchTokenResult {
   final double? priceChange24h;
 }
 
+/// Independent endpoints supplying the text search sections.
+enum SearchSource { mallow, curations, tokens }
+
 /// Aggregated search results for all sections.
 class SearchResults {
   const SearchResults({
@@ -243,6 +246,7 @@ class SearchResults {
     this.collections = const [],
     this.curations = const [],
     this.tokens = const [],
+    this.pendingSources = const {},
   });
 
   final List<SearchUserResult> users;
@@ -250,6 +254,11 @@ class SearchResults {
   final List<SearchCollectionResult> collections;
   final List<SearchCurationResult> curations;
   final List<SearchTokenResult> tokens;
+
+  /// Endpoints whose sections still need loading placeholders.
+  final Set<SearchSource> pendingSources;
+
+  bool get isLoading => pendingSources.isNotEmpty;
 
   bool get isEmpty =>
       users.isEmpty &&

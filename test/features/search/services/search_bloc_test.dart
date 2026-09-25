@@ -55,10 +55,98 @@ void main() {
   SearchBloc buildBloc() => SearchBloc(repo);
 
   group('SearchBloc text search', () {
+    test(
+      'shows partial results while the remaining requests are pending',
+      () async {
+        final pending = Completer<SearchResults>();
+        late void Function(SearchResults) update;
+        final started = Completer<void>();
+        when(
+          () => repo.search('art', onUpdate: any(named: 'onUpdate')),
+        ).thenAnswer((invocation) {
+          update =
+              invocation.namedArguments[#onUpdate]
+                  as void Function(SearchResults);
+          started.complete();
+          return pending.future;
+        });
+        final bloc = buildBloc();
+        addTearDown(bloc.close);
+        bloc.add(const SearchEvent.recentSearchTapped('art'));
+        await started.future;
+        const partial = SearchResults(
+          tokens: [
+            SearchTokenResult(
+              mintAddress: 'mint',
+              name: 'Token',
+              symbol: 'TKN',
+            ),
+          ],
+          pendingSources: {SearchSource.mallow},
+        );
+        update(partial);
+        expect((bloc.state as SearchLoaded).results, same(partial));
+        expect(pending.isCompleted, isFalse);
+        final finished = bloc.stream.firstWhere(
+          (state) => state is SearchLoaded && !state.results.isLoading,
+        );
+        pending.complete(SearchResults(tokens: partial.tokens));
+        await finished;
+        expect((bloc.state as SearchLoaded).results.tokens, partial.tokens);
+      },
+    );
+
+    test(
+      'ignores partial and final responses from an earlier identical query',
+      () async {
+        final requests = <Completer<SearchResults>>[];
+        final updates = <void Function(SearchResults)>[];
+        final started = StreamController<void>();
+        addTearDown(started.close);
+        when(
+          () => repo.search('art', onUpdate: any(named: 'onUpdate')),
+        ).thenAnswer((invocation) {
+          updates.add(
+            invocation.namedArguments[#onUpdate]
+                as void Function(SearchResults),
+          );
+          final pending = Completer<SearchResults>();
+          requests.add(pending);
+          started.add(null);
+          return pending.future;
+        });
+        final starts = StreamIterator(started.stream);
+        addTearDown(starts.cancel);
+        final bloc = buildBloc();
+        addTearDown(bloc.close);
+        bloc.add(const SearchEvent.recentSearchTapped('art'));
+        await starts.moveNext();
+        bloc.add(const SearchEvent.clear());
+        bloc.add(const SearchEvent.recentSearchTapped('art'));
+        await starts.moveNext();
+        updates.first(
+          const SearchResults(pendingSources: {SearchSource.mallow}),
+        );
+        expect(bloc.state, isA<SearchLoading>());
+        requests.first.complete(const SearchResults());
+        final finished = bloc.stream.firstWhere((s) => s is SearchLoaded);
+        const latest = SearchResults(
+          tokens: [
+            SearchTokenResult(mintAddress: 'new', name: 'New', symbol: 'NEW'),
+          ],
+        );
+        requests.last.complete(latest);
+        await finished;
+        expect((bloc.state as SearchLoaded).results, same(latest));
+      },
+    );
+
     blocTest<SearchBloc, SearchState>(
       'emits loading then loaded with the repository results',
       setUp: () {
-        when(() => repo.search('art')).thenAnswer(
+        when(
+          () => repo.search('art', onUpdate: any(named: 'onUpdate')),
+        ).thenAnswer(
           (_) async => const SearchResults(
             tokens: [
               SearchTokenResult(
@@ -85,7 +173,9 @@ void main() {
     blocTest<SearchBloc, SearchState>(
       'surfaces stable copy without leaking raw error text when the repository throws',
       setUp: () {
-        when(() => repo.search('art')).thenThrow(Exception('boom'));
+        when(
+          () => repo.search('art', onUpdate: any(named: 'onUpdate')),
+        ).thenThrow(Exception('boom'));
       },
       build: buildBloc,
       act: (bloc) => bloc.add(const SearchEvent.recentSearchTapped('art')),

@@ -35,7 +35,16 @@ enum AccountKind {
   social,
 
   /// All imported Ledger hardware wallets, grouped into one account.
-  hardware;
+  hardware,
+
+  /// Seed Vault wallets at one derivation index, grouped into one account.
+  ///
+  /// Deliberately *not* [hardware], even though a Seed Vault wallet is a
+  /// hardware wallet in every other sense. Hardware accounts are resolved by
+  /// derivation index alone, so a Ledger and a Seed Vault imported at the same
+  /// index would collapse into a single account card holding two unrelated
+  /// devices' addresses.
+  seedVault;
 
   String toDbString() => switch (this) {
     AccountKind.seed => 'seed',
@@ -43,6 +52,7 @@ enum AccountKind {
     AccountKind.viewOnly => 'viewOnly',
     AccountKind.social => 'social',
     AccountKind.hardware => 'hardware',
+    AccountKind.seedVault => 'seedVault',
   };
 
   static AccountKind fromDbString(String value) => switch (value) {
@@ -51,11 +61,19 @@ enum AccountKind {
     'viewOnly' => AccountKind.viewOnly,
     'social' => AccountKind.social,
     'hardware' => AccountKind.hardware,
+    'seedVault' => AccountKind.seedVault,
     _ => AccountKind.seed,
   };
 }
 
 /// Type of wallet within an account.
+///
+/// 🛑 [fromDbString] fails soft: an unrecognized DB string becomes [hd]. So a
+/// row written by a newer build and read by an older one loads as an HD wallet
+/// with no key behind it, which fails at signing rather than at load. Only
+/// reachable by downgrading, or by running a build compiled from a tree that
+/// predates the value — but it is silent either way, so a new value here is a
+/// one-way door: never rename or remove an existing DB string.
 enum WalletType {
   /// HD-derived from a seed phrase
   hd,
@@ -71,7 +89,14 @@ enum WalletType {
   social,
 
   /// Connected via Ledger hardware wallet (BLE)
-  ledger;
+  ledger,
+
+  /// Held in the device's Seed Vault (Solana Mobile, Android). Like [ledger],
+  /// the key never leaves the secure environment and every signature needs an
+  /// explicit user approval outside our process — but the transport is
+  /// same-device IPC rather than BLE, and Seed Vault defines exactly one
+  /// purpose, so these rows are always Solana.
+  seedVault;
 
   // Future: keystone — QR-based air-gapped signing
 
@@ -82,6 +107,7 @@ enum WalletType {
     WalletType.viewOnly => 'view_only',
     WalletType.social => 'social',
     WalletType.ledger => 'ledger',
+    WalletType.seedVault => 'seed_vault',
   };
 
   /// Parse from database string.
@@ -92,11 +118,13 @@ enum WalletType {
     'social' => WalletType.social,
     'ledger' => WalletType.ledger,
     'hardware' => WalletType.ledger, // backward compat
+    'seed_vault' => WalletType.seedVault,
     _ => WalletType.hd,
   };
 
-  /// Whether this is a hardware wallet type (Ledger, Keystone, etc.)
-  bool get isHardware => this == WalletType.ledger;
+  /// Whether this is a hardware wallet type (Ledger, Seed Vault, etc.)
+  bool get isHardware =>
+      this == WalletType.ledger || this == WalletType.seedVault;
 
   /// Whether signing requires an external device.
   bool get needsDeviceForSigning => isHardware;
@@ -105,7 +133,7 @@ enum WalletType {
 /// The provenance badge shown beside a wallet/account name. Each value maps to
 /// a single icon (see `WalletTypeBadge`). Plain HD/imported wallets carry no
 /// badge.
-enum WalletBadge { watchOnly, hardware, google, apple }
+enum WalletBadge { watchOnly, ledger, seedVault, google, apple }
 
 /// A single wallet (HD, imported key, view-only, social, or hardware).
 @freezed
@@ -209,9 +237,17 @@ abstract class WalletInfo with _$WalletInfo {
 
   /// The provenance badge for this wallet, or null for plain HD/imported keys.
   /// Social wallets without a recorded provider default to the Google mark.
+  ///
+  /// Ledger and Seed Vault each carry their own mark. Both are hardware
+  /// wallets, but the badge names *which* device holds the key, and that is
+  /// the one thing a user cannot infer from the account name: the two demand
+  /// different things to sign — a paired Ledger over BLE, or an on-device
+  /// Seed Vault prompt. Use [WalletType.isHardware] to ask the weaker
+  /// "needs an external signer?" question.
   WalletBadge? get badge => switch (walletType) {
     WalletType.viewOnly => WalletBadge.watchOnly,
-    WalletType.ledger => WalletBadge.hardware,
+    WalletType.ledger => WalletBadge.ledger,
+    WalletType.seedVault => WalletBadge.seedVault,
     WalletType.social =>
       socialProvider == 'apple' ? WalletBadge.apple : WalletBadge.google,
     WalletType.hd || WalletType.importedKey => null,

@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../../core/data/mallow_tokens.dart'
-    show solMint, ethMint, xtzMint, oXtzMint;
+    show solMint, ethMint, xtzMint, oXtzMint, tokenByMint;
+import '../../core/services/token_metadata_service.dart';
+import '../../di.dart';
 import '../theme/mallow_theme.dart';
 import '../widgets/mallow_network_image.dart';
 import '../widgets/mallow_svg_icon.dart';
@@ -65,6 +67,9 @@ const _mintToAsset = <String, String>{
   // STASH
   'EWMfSJgDCE7CXDAYz3hbCaA7NsFHTnddySXx3shco2Hs':
       'assets/images/tokens/stash.webp',
+  // TOADS
+  'DMXBsVBwfuzc5axa2vz6Ba2BzAxcUmn6V7ZtsJFEpump':
+      'assets/images/tokens/toads.webp',
   // USD*
   'star9agSpjiFe3M49B3RniVU4CMBBEK3Qnaqn3RGiFM':
       'assets/images/tokens/usd-star.webp',
@@ -191,16 +196,11 @@ Widget tokenImageWidget({
 
   // 2. Network image
   if (logoUrl != null && logoUrl.isNotEmpty) {
-    return MallowNetworkImage(
-      imageUrl: logoUrl,
-      logicalSize: size,
-      width: size,
-      height: size,
-      borderRadius: BorderRadius.circular(MallowTheme.radiusPrimary),
-      placeholderBuilder: (_) =>
-          _symbolFallback(size: size, symbol: symbol, mint: mint),
-      errorBuilder: (_) =>
-          _symbolFallback(size: size, symbol: symbol, mint: mint),
+    return _networkTokenImage(
+      mint: mint,
+      symbol: symbol,
+      logoUrl: logoUrl,
+      size: size,
     );
   }
 
@@ -239,8 +239,91 @@ Widget tokenImageWidget({
     }
   }
 
-  // 3. Symbol fallback
+  // 3. Resolve image metadata for any Solana mint that reaches a display
+  // without a bundled or caller-provided logo. This includes curated tokens
+  // added between app releases and unregistered mints returned by the backend.
+  if (sl.isRegistered<TokenMetadataService>()) {
+    return _ResolvedTokenImage(mint: mint, symbol: symbol, size: size);
+  }
+
+  // 4. Symbol fallback
   return _symbolFallback(size: size, symbol: symbol, mint: mint);
+}
+
+Widget _networkTokenImage({
+  required String mint,
+  required double size,
+  required String logoUrl,
+  String? symbol,
+}) => MallowNetworkImage(
+  imageUrl: logoUrl,
+  logicalSize: size,
+  width: size,
+  height: size,
+  borderRadius: BorderRadius.circular(MallowTheme.radiusPrimary),
+  placeholderBuilder: (_) =>
+      _symbolFallback(size: size, symbol: symbol, mint: mint),
+  errorBuilder: (_) => _symbolFallback(size: size, symbol: symbol, mint: mint),
+);
+
+class _ResolvedTokenImage extends StatefulWidget {
+  const _ResolvedTokenImage({
+    required this.mint,
+    required this.symbol,
+    required this.size,
+  });
+
+  final String mint;
+  final String? symbol;
+  final double size;
+
+  @override
+  State<_ResolvedTokenImage> createState() => _ResolvedTokenImageState();
+}
+
+class _ResolvedTokenImageState extends State<_ResolvedTokenImage> {
+  late Future<String?> _lookup;
+
+  @override
+  void initState() {
+    super.initState();
+    _startLookup();
+  }
+
+  @override
+  void didUpdateWidget(_ResolvedTokenImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.mint != widget.mint) _startLookup();
+  }
+
+  void _startLookup() {
+    final service = sl<TokenMetadataService>();
+    final cached = service.imageUrlFor(widget.mint);
+    _lookup = cached != null
+        ? Future<String?>.value(cached)
+        : service.resolveImageUrl(widget.mint);
+  }
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<String?>(
+    future: _lookup,
+    builder: (context, snapshot) {
+      final logoUrl = snapshot.data;
+      if (logoUrl == null || logoUrl.isEmpty) {
+        return _symbolFallback(
+          size: widget.size,
+          symbol: widget.symbol,
+          mint: widget.mint,
+        );
+      }
+      return _networkTokenImage(
+        mint: widget.mint,
+        symbol: widget.symbol,
+        logoUrl: logoUrl,
+        size: widget.size,
+      );
+    },
+  );
 }
 
 /// Displays the token symbol text in a muted background container,
@@ -248,9 +331,12 @@ Widget tokenImageWidget({
 Widget _symbolFallback({required double size, String? symbol, String? mint}) {
   return Builder(
     builder: (context) {
+      final resolvedSymbol = symbol ?? tokenByMint(mint)?.symbol;
       final String display;
-      if (symbol != null) {
-        display = symbol.length > 5 ? symbol.substring(0, 5) : symbol;
+      if (resolvedSymbol != null) {
+        display = resolvedSymbol.length > 5
+            ? resolvedSymbol.substring(0, 5)
+            : resolvedSymbol;
       } else if (mint != null) {
         display = truncateAddress(mint);
       } else {

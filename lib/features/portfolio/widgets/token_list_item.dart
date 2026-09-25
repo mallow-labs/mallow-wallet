@@ -86,16 +86,17 @@ class TokenListItem extends StatelessWidget {
     );
   }
 
-  static final _thousandsTwoDp = NumberFormat('#,##0.00');
+  static final _thousands = NumberFormat('#,##0.##');
 
   String _formatBalanceWithSymbol(double balance, String symbol) {
     final String balanceStr;
     if (balance >= 1000000) {
-      balanceStr = '${(balance / 1000000).toStringAsFixed(2)}M';
+      balanceStr =
+          '${stripTrailingZeros((balance / 1000000).toStringAsFixed(2))}M';
     } else if (balance >= 1000) {
-      balanceStr = _thousandsTwoDp.format(balance);
+      balanceStr = _thousands.format(balance);
     } else if (balance > 0) {
-      balanceStr = balance.toStringAsFixed(5);
+      balanceStr = stripTrailingZeros(balance.toStringAsFixed(5));
     } else {
       balanceStr = '0';
     }

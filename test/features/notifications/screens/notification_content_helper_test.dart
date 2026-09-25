@@ -240,4 +240,191 @@ void main() {
       expect(item.type, api.NotificationType.unknown);
     });
   });
+
+  // WHY: these six types (wire values 45-50) shipped on the backend while this
+  // client still stopped at 44, so every one of them rendered as the "Unable to
+  // display notification" placeholder. The copy mirrors the backend's
+  // notification handlers so the in-app row and the push that accompanies it
+  // say the same thing.
+  group('subscription notifications (webapp parity)', () {
+    test('a listed artwork states creator, name and price', () {
+      final contents = NotificationContentHelper.getContents(
+        api.NotificationType.subscribedCreatorListedArtwork,
+        {
+          'creatorUser': _user('artist'),
+          'nft': _nft(),
+          'price': 3000000000,
+          'currencyMint': _solMint,
+          'listingType': 'buy-now',
+        },
+      );
+      expect(contents.title, '@artist listed new work');
+      expect(contents.message, '"Sunset" for 3 SOL');
+      expect(contents.linkPath, '/artwork/MINT1');
+    });
+
+    test('an auction listing says "Starting at", not "for"', () {
+      // A reserve price is not a sale price. Saying "for" would tell the user
+      // the piece costs the reserve, which is the one number it is guaranteed
+      // not to sell at.
+      final contents = NotificationContentHelper.getContents(
+        api.NotificationType.subscribedCreatorListedArtwork,
+        {
+          'creatorUser': _user('artist'),
+          'nft': _nft(),
+          'price': 1000000000,
+          'currencyMint': _solMint,
+          'listingType': 'auction',
+        },
+      );
+      expect(contents.message, '"Sunset" Starting at 1 SOL');
+    });
+
+    test('a raffle listing prices the ticket, not the artwork', () {
+      final contents = NotificationContentHelper.getContents(
+        api.NotificationType.subscribedCreatorListedArtwork,
+        {
+          'creatorUser': _user('artist'),
+          'nft': _nft(),
+          'price': 500000000,
+          'currencyMint': _solMint,
+          'listingType': 'raffle',
+        },
+      );
+      expect(contents.message, '"Sunset" Tickets 0.5 SOL');
+    });
+
+    test('a grouped drop names the group and says "from"', () {
+      // The payload carries the drop's CHEAPEST tier, so "for" would quote one
+      // tier's price as the whole drop's.
+      final contents = NotificationContentHelper.getContents(
+        api.NotificationType.subscribedCreatorListedArtwork,
+        {
+          'creatorUser': _user('artist'),
+          'nft': _nft(),
+          'price': 1000000000,
+          'currencyMint': _solMint,
+          'listingType': 'buy-now',
+          'groupName': 'Winter Set',
+          'itemCount': 4,
+        },
+      );
+      expect(contents.message, '"Winter Set" — 4 works, from 1 SOL');
+    });
+
+    test('a one-item group is not pluralised', () {
+      final contents = NotificationContentHelper.getContents(
+        api.NotificationType.subscribedCreatorListedArtwork,
+        {
+          'creatorUser': _user('artist'),
+          'nft': _nft(),
+          'price': 1000000000,
+          'currencyMint': _solMint,
+          'listingType': 'buy-now',
+          'groupName': 'Solo',
+          'itemCount': 1,
+        },
+      );
+      expect(contents.message, '"Solo" — 1 work, from 1 SOL');
+    });
+
+    test('a gumball launch renders name and UTC start', () {
+      final contents = NotificationContentHelper.getContents(
+        api.NotificationType.subscribedCreatorGumballLive,
+        {
+          'creatorUser': _user('artist'),
+          'gumball': {
+            'publicKey': 'GUM1',
+            'metadata': {'name': 'Candy'},
+          },
+          'startsAt': '2026-01-02T15:04:00.000Z',
+        },
+      );
+      expect(contents.title, '@artist launched a Gumball');
+      expect(contents.message, '"Candy" — Starts Jan 2 at 3:04 PM UTC');
+      expect(contents.linkPath, '/gumball/GUM1');
+    });
+
+    test('a gumball with no start date drops that half of the body', () {
+      // A machine can match the upcoming filter with no start date at all, so
+      // the date is never assumed.
+      final contents = NotificationContentHelper.getContents(
+        api.NotificationType.subscribedCreatorGumballLive,
+        {
+          'creatorUser': _user('artist'),
+          'gumball': {
+            'publicKey': 'GUM1',
+            'metadata': {'name': 'Candy'},
+          },
+        },
+      );
+      expect(contents.message, '"Candy"');
+    });
+
+    test('a jellybean launch links to the jellybean', () {
+      final contents = NotificationContentHelper.getContents(
+        api.NotificationType.subscribedCreatorJellybeanLive,
+        {
+          'creatorUser': _user('artist'),
+          'jellybean': {
+            'publicKey': 'JB1',
+            'metadata': {'name': 'Beans'},
+          },
+        },
+      );
+      expect(contents.title, '@artist launched a jellybean');
+      expect(contents.message, '"Beans"');
+      expect(contents.linkPath, '/jellybean/JB1');
+    });
+
+    test('a post carries its title and post link', () {
+      final contents = NotificationContentHelper.getContents(
+        api.NotificationType.subscribedCreatorPosted,
+        {
+          'creatorUser': _user('artist'),
+          'postId': 'POST1',
+          'title': 'Studio update',
+        },
+      );
+      expect(contents.title, '@artist posted');
+      expect(contents.message, 'Studio update');
+      expect(contents.linkPath, '/p/POST1');
+    });
+
+    test('a single new subscriber links to their profile', () {
+      final contents = NotificationContentHelper.getContents(
+        api.NotificationType.newSubscriber,
+        {'actorUser': _user('fan')},
+      );
+      expect(contents.title, '@fan subscribed to you');
+      expect(contents.linkPath, '/u/fan');
+    });
+
+    test('grouped subscribers count the others, not the total', () {
+      // actorCount is the total; the copy names one actor and counts the rest.
+      final contents = NotificationContentHelper.getContents(
+        api.NotificationType.newSubscribers,
+        {'actorUser': _user('fan'), 'actorCount': 3},
+      );
+      expect(contents.title, '@fan and 2 others subscribed to you');
+    });
+
+    test('exactly two subscribers reads "1 other", singular', () {
+      final contents = NotificationContentHelper.getContents(
+        api.NotificationType.newSubscribers,
+        {'actorUser': _user('fan'), 'actorCount': 2},
+      );
+      expect(contents.title, '@fan and 1 other subscribed to you');
+    });
+
+    test('a malformed payload degrades to the de-camel-cased title', () {
+      // Every accessor casts blind, so the blanket catch is what keeps one bad
+      // payload from blanking the row.
+      final contents = NotificationContentHelper.getContents(
+        api.NotificationType.subscribedCreatorListedArtwork,
+        const {'nft': 'not-a-map'},
+      );
+      expect(contents.title, 'Subscribed Creator Listed Artwork');
+    });
+  });
 }

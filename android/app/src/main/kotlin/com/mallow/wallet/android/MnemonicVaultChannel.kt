@@ -53,6 +53,11 @@ class MnemonicVaultChannel : FlutterPlugin, MethodCallHandler {
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
+        // Enumeration takes no key: it lists every secret in the store.
+        if (call.method == "listKeys") {
+            vaultListKeys(result)
+            return
+        }
         val key = call.argument<String>("key")
         if (key == null) {
             result.error("invalid_args", "Missing key", null)
@@ -84,10 +89,18 @@ class MnemonicVaultChannel : FlutterPlugin, MethodCallHandler {
             cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey(key))
             val iv = cipher.iv
             val ct = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
-            prefs().edit()
+            // commit(), not apply(): the caller writes the seed row and the
+            // recovery graph as soon as this returns, so the ciphertext must
+            // be on disk first — an async apply() lets a kill leave a row
+            // whose secret never landed.
+            val committed = prefs().edit()
                 .putString(KEY_PREFIX_IV + key, Base64.encodeToString(iv, Base64.NO_WRAP))
                 .putString(KEY_PREFIX_CT + key, Base64.encodeToString(ct, Base64.NO_WRAP))
-                .apply()
+                .commit()
+            if (!committed) {
+                result.error("write_failed", "prefs commit failed", null)
+                return
+            }
             result.success(null)
         } catch (e: Exception) {
             result.error("write_failed", e.message, null)
@@ -142,6 +155,22 @@ class MnemonicVaultChannel : FlutterPlugin, MethodCallHandler {
             if (ks.containsAlias(keystoreAlias(key))) ks.deleteEntry(keystoreAlias(key))
         } catch (_: Exception) {}
         result.success(null)
+    }
+
+    // -------------------------------------------------------------------------
+    // List: every stored key. Lets the Dart side sweep the store on an explicit
+    // wipe, so no ciphertext/keystore alias outlives the identity it belonged to.
+    // -------------------------------------------------------------------------
+
+    private fun vaultListKeys(result: Result) {
+        try {
+            val keys = prefs().all.keys
+                .filter { it.startsWith(KEY_PREFIX_CT) }
+                .map { it.removePrefix(KEY_PREFIX_CT) }
+            result.success(keys)
+        } catch (e: Exception) {
+            result.error("list_failed", e.message, null)
+        }
     }
 
     // -------------------------------------------------------------------------

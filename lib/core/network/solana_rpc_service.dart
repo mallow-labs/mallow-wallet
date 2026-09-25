@@ -1094,7 +1094,10 @@ class SolanaRpcService {
 
   /// Get transaction details by signature.
   Future<TransactionDetails?> getTransaction(String signature) async {
-    return _rpcClient.getTransaction(signature);
+    return _rpcClient.getTransaction(
+      signature,
+      maxSupportedTransactionVersion: 1,
+    );
   }
 
   /// Raw `getTransaction` for [signature] at **confirmed** commitment, JSON
@@ -1119,7 +1122,7 @@ class SolanaRpcService {
             {
               'encoding': 'jsonParsed',
               'commitment': 'confirmed',
-              'maxSupportedTransactionVersion': 0,
+              'maxSupportedTransactionVersion': 1,
             },
           ],
         },

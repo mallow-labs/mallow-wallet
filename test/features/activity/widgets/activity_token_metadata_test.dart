@@ -135,7 +135,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('SOL → WEN'), findsOneWidget);
-    expect(find.text('+12.50 WEN'), findsOneWidget);
+    expect(find.text('+12.5 WEN'), findsOneWidget);
     // The logo the same read returned — the wire row carries no `logoUrl`, so
     // without it the leg stays a letter tile however well we name it.
     final image = tester.widget<MallowNetworkImage>(
@@ -168,7 +168,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('+12.50 WEN'), findsOneWidget);
+    expect(find.text('+12.5 WEN'), findsOneWidget);
     final image = tester.widget<MallowNetworkImage>(
       find.byType(MallowNetworkImage),
     );

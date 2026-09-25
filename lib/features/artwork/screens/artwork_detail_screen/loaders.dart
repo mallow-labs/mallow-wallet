@@ -10,26 +10,120 @@ part of '../artwork_detail_screen.dart';
 /// and creator usernames. Each loader is deduped on its own key so it
 /// is safe to call from build().
 extension _ArtworkDetailLoaders on _ArtworkDetailViewState {
-  void _maybeLoadPermissions(ArtworkDetails artwork) {
-    if (_permissionsLoading || _permissions != null) return;
-    _permissionsLoading = true;
-    sl<ArtworkPermissionService>()
+  void _maybeLoadPermissions(ArtworkDetails artwork, int revision) {
+    _optionsArtwork = artwork;
+    final session = sl<SessionManager>();
+    final sessionAddresses = session.sessionAddresses;
+    final currentAddress = sl<AuthService>().currentAddress;
+    if (isSyntheticSolanaMaster(artwork.mintAccount)) {
+      _permissionsLoadKey = artwork.mintAccount;
+      _permissions = ArtworkPermissions.none;
+      _resolvedOptionsPermissions = ArtworkPermissions.none;
+      _resolvedOptionsCanSign = false;
+      _setOptionsMenuState(null);
+      return;
+    }
+    final isListed = ArtworkPermissionService.isListedForSale(
+      listingType: artwork.listingType,
+      inGroupedSale: artwork.groupedSale != null,
+    );
+    if (_optimisticPermissionPins.contains(artwork.mintAccount)) {
+      final mine = <String>{?currentAddress, ...sessionAddresses};
+      final stillOwnsArtwork =
+          mine.contains(artwork.ownerAddress) ||
+          artwork.ownerAddresses.any(mine.contains);
+      if (!stillOwnsArtwork || isListed) {
+        _optimisticPermissionPins.remove(artwork.mintAccount);
+      }
+    }
+    final sortedSession = sessionAddresses.toList()..sort();
+    final key = <Object?>[
+      artwork.mintAccount,
+      revision,
+      artwork.listingType,
+      artwork.groupedSale != null,
+      artwork.ownerAddress,
+      ...artwork.ownerAddresses,
+      artwork.updateAuthority,
+      currentAddress,
+      ...sortedSession,
+    ].join('|');
+    if (_permissionsLoadKey == key) {
+      _publishOptionsMenuState();
+      return;
+    }
+    _permissionsLoadKey = key;
+    final generation = ++_permissionsLoadGeneration;
+    if (!_optimisticPermissionPins.contains(artwork.mintAccount)) {
+      _permissions = null;
+    }
+    _resolvedOptionsPermissions = null;
+    _resolvedOptionsCanSign = null;
+    _setOptionsMenuState(null);
+    final permissionsFuture = sl<ArtworkPermissionService>()
         .checkPermissions(
           artwork.mintAccount,
           // Widen the owner-sheet gates (List, etc.) across the session so an
           // artwork held by a non-active session wallet still shows its owner
           // actions; `_ensureSigner` switches to the holder before signing.
-          sessionAddresses: sl<SessionManager>().sessionAddresses,
+          sessionAddresses: sessionAddresses,
           // Transfer/burn must see the indexed listing state: the frozen bit
           // alone misses delegate-only and non-custodial listings.
           listingType: artwork.listingType,
           inGroupedSale: artwork.groupedSale != null,
         )
-        .then((perms) {
-          if (!mounted) return;
-          setState(() => _permissions = perms);
-        })
-        .whenComplete(() => _permissionsLoading = false);
+        .onError(
+          (Object _, StackTrace _) => const UnresolvedArtworkPermissions(),
+        );
+    final canSignFuture = sl.isRegistered<WalletRepository>()
+        ? sl<WalletRepository>()
+              .getActiveWallet()
+              .then((wallet) => wallet?.canSign ?? true)
+              .onError((Object _, StackTrace _) => false)
+        : Future.value(false);
+    Future.wait<Object?>([permissionsFuture, canSignFuture]).then((results) {
+      if (!mounted ||
+          generation != _permissionsLoadGeneration ||
+          _permissionsLoadKey != key) {
+        return;
+      }
+      final perms = results[0]! as ArtworkPermissions;
+      final canSign = results[1]! as bool;
+      final preserveOptimistic =
+          _optimisticPermissionPins.contains(artwork.mintAccount) &&
+          !perms.canList;
+      if (!preserveOptimistic) {
+        _optimisticPermissionPins.remove(artwork.mintAccount);
+      }
+      setState(() {
+        if (!preserveOptimistic) _permissions = perms;
+        _resolvedOptionsPermissions = perms;
+        _resolvedOptionsCanSign = canSign;
+        _publishOptionsMenuState();
+      });
+    });
+  }
+
+  void _publishOptionsMenuState() {
+    final artwork = _optionsArtwork;
+    final permissions = _resolvedOptionsPermissions;
+    if (artwork == null || permissions == null) return;
+    final creatorAddresses = _collectArtworkInfoAddresses(artwork);
+    if (_creatorProfilesResolvedFor == null ||
+        !_listEquals(_creatorProfilesResolvedFor!, creatorAddresses)) {
+      return;
+    }
+    final resolvedCanSign = _resolvedOptionsCanSign;
+    if (resolvedCanSign == null) return;
+    _setOptionsMenuState(
+      ArtworkContextMenuState(
+        artwork: artwork.toPortfolioArtwork(),
+        permissions: permissions,
+        canCast: _canCast(artwork),
+        canSign: resolvedCanSign,
+        inGroupedSale: artwork.groupedSale != null,
+      ),
+    );
   }
 
   /// DAS-derived edition state — fetched once per mint. Drives the
@@ -37,6 +131,7 @@ extension _ArtworkDetailLoaders on _ArtworkDetailViewState {
   /// supply progress bar on the edition sheet. Backend wraps
   /// `getSupplyInfoFromDigitalAsset` + `isPrintableMasterEditionFromSupplyType`.
   void _maybeLoadEditionLive(String mintAccount) {
+    if (isSyntheticSolanaMaster(mintAccount)) return;
     if (_editionLiveLoadedFor == mintAccount) return;
     _editionLiveLoadedFor = mintAccount;
     sl<MarketListingRepository>().getEditionState(mintAccount).then((state) {
@@ -52,6 +147,7 @@ extension _ArtworkDetailLoaders on _ArtworkDetailViewState {
   /// Mirrors the webapp, which reads the raffle account directly
   /// (`useRaffle` via `useRaffleState`).
   void _maybeLoadRaffleLive(ArtworkDetails artwork) {
+    if (isSyntheticSolanaMaster(artwork.mintAccount)) return;
     final raffleKey = artwork.raffleMetadata?.raffleAccount;
     if (raffleKey == null || raffleKey.isEmpty) return;
     if (_raffleLiveLoadedFor == raffleKey) return;
@@ -95,6 +191,7 @@ extension _ArtworkDetailLoaders on _ArtworkDetailViewState {
   /// buy-now master edition. Runs once per (mint × buyer) pair. The
   /// backend resolves the listing PDA from the mint internally.
   void _maybeLoadEditionStats(ArtworkDetails artwork) {
+    if (isSyntheticSolanaMaster(artwork.mintAccount)) return;
     final me = sl<AuthService>().currentAddress;
     final isMaster =
         artwork.supplyType == SupplyType.limitedEdition ||
@@ -190,6 +287,7 @@ extension _ArtworkDetailLoaders on _ArtworkDetailViewState {
   /// invalidation events drive the per-screen refetches that match the
   /// webapp's on-account-change handlers.
   void _maybeStartRealtime(String mintAccount) {
+    if (isSyntheticSolanaMaster(mintAccount)) return;
     if (_realtimeMint == mintAccount && _realtimeSub != null) return;
     _realtimeSub?.cancel();
     _realtimeMint = mintAccount;
@@ -248,6 +346,7 @@ extension _ArtworkDetailLoaders on _ArtworkDetailViewState {
       'programs=${event.programs} slot=${event.slot} '
       '@${DateTime.now().toIso8601String()}',
     );
+    setState(() => _invalidatePermissions(preserveOptimisticFor: mintAccount));
     // The invalidation carries its triggering tx's slot (post-index publish):
     // state for this mint changed at that slot, so raise the bloc's chain
     // floor — an absent read with an older view predates the change. Covers
@@ -491,29 +590,52 @@ extension _ArtworkDetailLoaders on _ArtworkDetailViewState {
       return;
     }
     _loadedCreatorAddresses = key;
-    if (key.isEmpty) return;
-    sl<UserProfileRepository>().getUserProfiles(key).then((map) {
-      if (!mounted ||
-          _loadedCreatorAddresses == null ||
-          !_listEquals(_loadedCreatorAddresses!, key)) {
-        return;
-      }
-      setState(() {
-        _creatorUsernames
-          ..clear()
-          ..addEntries(
-            map.entries.map((e) => MapEntry(e.key, e.value?.username)),
-          );
-        _creatorLinkedAddresses
-          ..clear()
-          ..addAll(map.keys.where((a) => a.isNotEmpty))
-          ..addAll(
-            map.values
-                .whereType<UserProfile>()
-                .expand((p) => p.linkedAddresses)
-                .where((a) => a.isNotEmpty),
-          );
-      });
-    });
+    _creatorProfilesResolvedFor = null;
+    _creatorUsernames.clear();
+    _creatorLinkedAddresses.clear();
+    _setOptionsMenuState(null);
+    if (key.isEmpty) {
+      _creatorProfilesResolvedFor = key;
+      _publishOptionsMenuState();
+      return;
+    }
+    sl<UserProfileRepository>()
+        .getUserProfiles(key)
+        .then((map) {
+          if (!mounted ||
+              _loadedCreatorAddresses == null ||
+              !_listEquals(_loadedCreatorAddresses!, key)) {
+            return;
+          }
+          setState(() {
+            _creatorUsernames
+              ..clear()
+              ..addEntries(
+                map.entries.map((e) => MapEntry(e.key, e.value?.username)),
+              );
+            _creatorLinkedAddresses
+              ..clear()
+              ..addAll(map.keys.where((a) => a.isNotEmpty))
+              ..addAll(
+                map.values
+                    .whereType<UserProfile>()
+                    .expand((p) => p.linkedAddresses)
+                    .where((a) => a.isNotEmpty),
+              );
+            _creatorProfilesResolvedFor = key;
+            _publishOptionsMenuState();
+          });
+        })
+        .catchError((Object _) {
+          if (!mounted ||
+              _loadedCreatorAddresses == null ||
+              !_listEquals(_loadedCreatorAddresses!, key)) {
+            return;
+          }
+          setState(() {
+            _creatorProfilesResolvedFor = key;
+            _publishOptionsMenuState();
+          });
+        });
   }
 }

@@ -186,9 +186,10 @@ class PreferencesService {
       _prefs.setInt(_kLoggedInTrackedAt, at.millisecondsSinceEpoch);
 
   /// JSON-encoded `{mint: {symbol, decimals, imageUrl, fetchedAt}}` map of
-  /// token metadata resolved from DAS for mints the static registry doesn't
-  /// key (managed by `TokenMetadataService`). One key, not one per mint, so
-  /// the whole cache prunes and migrates atomically.
+  /// token metadata resolved from DAS. It includes full metadata for mints the
+  /// static registry doesn't key and image enrichment for registered mints
+  /// without bundled logos. One key, not one per mint, so the whole cache
+  /// prunes and migrates atomically.
   String? get tokenMetadataCache => _prefs.getString(_kTokenMetadataCache);
 
   Future<void> setTokenMetadataCache(String json) =>

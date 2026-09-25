@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../../core/config/store_build.dart';
 import '../../../../shared/theme/mallow_theme.dart';
 import '../../../../shared/widgets/mallow_button.dart';
 import '../../../../shared/widgets/user_handle_text.dart';
@@ -81,21 +82,24 @@ class ArtworkAuctionClaimSheet extends StatelessWidget {
 
     // Observers (neither seller nor winner) get the same ended-auction panel
     // as the seller's settle sheet — final price + "Auction ended" status and
-    // the highest-bid strip — capped with a "Make offer" CTA instead.
+    // the highest-bid strip — capped with a "Make offer" CTA instead. The CTA
+    // is the paid side and goes with `kShowNftCommerce`; the panel stays.
     if (role == AuctionEndedRole.observer) {
       return ArtworkAuctionLivePanel(
         artwork: artwork,
         currentBidderUsername: winnerUsername,
         forceEnded: true,
-        actionBuilder: (context, _) => Padding(
-          padding: const EdgeInsets.only(top: MallowTheme.spacingMd),
-          child: MallowButton(
-            label: 'Make offer',
-            onPressed: isLoading ? null : onMakeOffer,
-            isLoading: isLoading,
-            isFullWidth: true,
-          ),
-        ),
+        actionBuilder: (context, _) => showNftCommerce
+            ? Padding(
+                padding: const EdgeInsets.only(top: MallowTheme.spacingMd),
+                child: MallowButton(
+                  label: 'Make offer',
+                  onPressed: isLoading ? null : onMakeOffer,
+                  isLoading: isLoading,
+                  isFullWidth: true,
+                ),
+              )
+            : const SizedBox.shrink(),
       );
     }
 

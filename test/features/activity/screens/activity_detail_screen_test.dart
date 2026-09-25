@@ -1,12 +1,33 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_api/mallow_api.dart' as api;
+import 'package:mallow_wallet/core/models/account.dart';
+import 'package:mallow_wallet/core/network/auth_service.dart';
 import 'package:mallow_wallet/core/services/preferences_service.dart';
+import 'package:mallow_wallet/core/services/wallet_repository.dart';
 import 'package:mallow_wallet/di.dart';
 import 'package:mallow_wallet/features/activity/screens/activity_detail_screen.dart';
+import 'package:mallow_wallet/features/artwork/models/on_chain_asset.dart';
+import 'package:mallow_wallet/features/artwork/services/artwork_permission_service.dart';
+import 'package:mallow_wallet/features/cast/services/cast_bloc.dart';
 import 'package:mallow_wallet/shared/utils/chain.dart';
 import 'package:mallow_wallet/shared/widgets/mallow_kv_row.dart';
+import 'package:mallow_wallet/shared/widgets/mallow_svg_icon.dart';
+import 'package:mocktail/mocktail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+class _MockArtworkPermissionService extends Mock
+    implements ArtworkPermissionService {}
+
+class _MockAuthService extends Mock implements AuthService {}
+
+class _MockWalletRepository extends Mock implements WalletRepository {}
+
+class _MockWallet extends Mock implements WalletInfo {}
+
+class _MockCastBloc extends Mock implements CastBloc {}
 
 // The activity detail sheet is the only place a user can audit what a
 // transaction actually cost and which direction the money moved. Every test
@@ -47,6 +68,7 @@ Future<void> _pump(
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  late _MockArtworkPermissionService permissionService;
 
   setUpAll(() async {
     // The explorer button resolves the user's preferred Solana explorer by
@@ -57,6 +79,23 @@ void main() {
         await PreferencesService.create(),
       );
     }
+  });
+
+  setUp(() {
+    permissionService = _MockArtworkPermissionService();
+    when(
+      () => permissionService.checkPermissions(
+        any(),
+        sessionAddresses: any(named: 'sessionAddresses'),
+        listingType: any(named: 'listingType'),
+        inGroupedSale: any(named: 'inGroupedSale'),
+      ),
+    ).thenAnswer((_) async => ArtworkPermissions.none);
+    sl.registerSingleton<ArtworkPermissionService>(permissionService);
+  });
+
+  tearDown(() async {
+    await sl.unregister<ArtworkPermissionService>();
   });
 
   group('chain-aware explorer link', () {
@@ -649,4 +688,93 @@ void main() {
       expect(find.text('+1.0023 SOL'), findsWidgets);
     });
   });
+
+  testWidgets(
+    'NFT detail starts one permission lookup before the menu opens and reuses it',
+    (tester) async {
+      final authService = _MockAuthService();
+      final walletRepository = _MockWalletRepository();
+      final wallet = _MockWallet();
+      final castBloc = _MockCastBloc();
+      final resolution = Completer<ArtworkPermissions>();
+      const mint = 'Mint1111111111111111111111111111111111111';
+
+      when(
+        () => permissionService.checkPermissions(
+          mint,
+          sessionAddresses: any(named: 'sessionAddresses'),
+          listingType: any(named: 'listingType'),
+          inGroupedSale: any(named: 'inGroupedSale'),
+        ),
+      ).thenAnswer((_) => resolution.future);
+      when(
+        () => authService.isLiked(any(), api.ContentType.nft),
+      ).thenReturn(false);
+      when(() => wallet.address).thenReturn('owner');
+      when(() => wallet.canSign).thenReturn(true);
+      when(
+        () => walletRepository.getActiveWallet(),
+      ).thenAnswer((_) async => wallet);
+      when(() => castBloc.state).thenReturn(const CastState.idle());
+
+      sl.registerSingleton<AuthService>(authService);
+      sl.registerSingleton<WalletRepository>(walletRepository);
+      sl.registerSingleton<CastBloc>(castBloc);
+      addTearDown(() async {
+        await sl.unregister<CastBloc>();
+        await sl.unregister<WalletRepository>();
+        await sl.unregister<AuthService>();
+      });
+
+      tester.view.physicalSize = const Size(1000, 1600);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await _pump(
+        tester,
+        _activity(
+          type: api.ActivityType.send,
+          data: const {
+            'token': {'mint': mint, 'symbol': '', 'amount': 1, 'decimals': 0},
+            'counterparty': {'address': 'recipient'},
+            'isNft': true,
+            'nftName': 'Piece',
+          },
+        ),
+        chain: Chain.solana,
+      );
+
+      verify(() => permissionService.checkPermissions(mint)).called(1);
+
+      final menuIcon = find.byWidgetPredicate(
+        (widget) =>
+            widget is MallowSvgIcon &&
+            widget.assetPath == 'assets/icons/dots_vertical.svg',
+      );
+      await tester.tap(
+        find.ancestor(of: menuIcon, matching: find.byType(GestureDetector)),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      verifyNever(
+        () => permissionService.checkPermissions(
+          any(),
+          sessionAddresses: any(named: 'sessionAddresses'),
+          listingType: any(named: 'listingType'),
+          inGroupedSale: any(named: 'inGroupedSale'),
+        ),
+      );
+      expect(
+        find.byKey(const ValueKey('artwork-options-loading')),
+        findsOneWidget,
+      );
+
+      resolution.complete(ArtworkPermissions.none);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.text('Share'), findsOneWidget);
+    },
+  );
 }

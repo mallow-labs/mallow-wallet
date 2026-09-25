@@ -16,6 +16,7 @@ import '../../../core/services/fee_config.dart'
     show kDefaultPriorityFeeLamports;
 import '../../../core/services/marketplace_action_flow.dart';
 import '../../../core/services/signing_copy.dart';
+import '../../../core/services/stale_tx_tracker.dart';
 import '../../../core/services/transaction_flow_state.dart';
 import '../../../core/services/tx_landed_slots.dart';
 import '../../../shared/utils/artwork_mappers.dart';
@@ -455,8 +456,13 @@ class AuctionBloc extends Bloc<AuctionEvent, AuctionState> {
     this._flow,
     this._realtime,
     this._txLandedSlots,
-    this._marketplaceConfig,
-  ) : super(const AuctionState()) {
+    this._marketplaceConfig, {
+    // Test-only: the staleness window is wall-clock, so a test can only reach
+    // the rebuild path by supplying a tracker with a short `staleAfter`.
+    // `@ignoreParam` keeps it out of injectable's generated construction.
+    @ignoreParam @visibleForTesting StaleTxTracker<List<String>>? txTracker,
+  }) : _txTracker = txTracker ?? StaleTxTracker<List<String>>(),
+       super(const AuctionState()) {
     on<AuctionStarted>(_onStarted);
     on<AuctionNext>(_onNext);
     on<AuctionBack>(_onBack);
@@ -516,7 +522,10 @@ class AuctionBloc extends Bloc<AuctionEvent, AuctionState> {
     on<AuctionDismissError>(
       (e, emit) => emit(state.copyWith(flow: const TxFlowIdle())),
     );
-    on<AuctionReset>((e, emit) => emit(const AuctionState()));
+    on<AuctionReset>((e, emit) {
+      _txTracker.clear();
+      emit(const AuctionState());
+    });
   }
 
   final AuctionRepository _auctionRepo;
@@ -528,6 +537,20 @@ class AuctionBloc extends Bloc<AuctionEvent, AuctionState> {
   final MarketRealtimeService _realtime;
   final TxLandedSlots _txLandedSlots;
   final MarketplaceConfigService _marketplaceConfig;
+
+  /// Staleness recovery for the `[setupTx, tx]` create-auction batch.
+  ///
+  /// A cNFT auction whose settle would not fit the packet raw leads with a
+  /// `setupTx` that CREATES an address lookup table, and
+  /// `create_lookup_table` bakes a `recent_slot` the runtime only honours for
+  /// ~512 slots (~3.4 min). This route is not co-signed, so
+  /// `_refreshBlockhashIfSafe` keeps rewriting the blockhash and the batch
+  /// never *looks* stale while that slot quietly dies. Handing the tracker to
+  /// the executor is the only thing that lets it re-ask the builder instead —
+  /// without it a sheet left open past the slot window broadcasts a dead
+  /// `recent_slot` and the FIRST transaction of the listing fails on-chain for
+  /// a reason nothing on screen explains.
+  final StaleTxTracker<List<String>> _txTracker;
 
   Future<void> _onStarted(
     AuctionStarted event,
@@ -642,31 +665,67 @@ class AuctionBloc extends Bloc<AuctionEvent, AuctionState> {
       return;
     }
 
-    emit(state.copyWith(flow: const TxFlowPreparing()));
+    final sink = txFlowSink<void, AuctionSuccessData>(
+      (flow) => emit(state.copyWith(flow: flow)),
+    );
 
-    // 1. Persist rewards/physical metadata and fold its id into the memo.
-    // 2. Ask the backend to build the unsigned createAuction tx.
-    final buildResult = await Result.guard(() async {
+    // 1. Persist rewards/physical metadata up-front (once per list attempt) and
+    // fold its id into the memo. This must NOT live inside the `prepare` build
+    // closure below: [_txTracker] replays that closure on a staleness rebuild,
+    // and `postRewardsDescription` is non-idempotent, so a replay would persist
+    // a duplicate record and orphan the first — the memo the listing carries
+    // would point at one of two rewards rows. Doing it here means a rebuild
+    // only re-asks for the (idempotent) auction txs around the same memo. A
+    // fresh retry re-runs this handler and re-persists, which matches the
+    // pre-tracker behaviour.
+    final rewardsResult = await Result.guard(() async {
       final rewardsPayload = state.toRewardsPayload();
-      String? memo;
-      if (rewardsPayload != null) {
-        final id = await _rewardsRepo.postRewardsDescription(rewardsPayload);
-        memo = 'rewards:$id';
-      }
-      return _auctionRepo.getCreateAuctionTx(state.toRequest(memo: memo));
+      if (rewardsPayload == null) return null;
+      final id = await _rewardsRepo.postRewardsDescription(rewardsPayload);
+      return 'rewards:$id';
     });
-
-    final String unsignedTxBase64;
-    switch (buildResult) {
+    final String? memo;
+    switch (rewardsResult) {
       case ResultSuccess(:final value):
-        unsignedTxBase64 = value;
+        memo = value;
       case ResultFailure(:final error):
-        emit(
-          state.copyWith(
-            flow: TxFlowFailure(error.prefixedWith('Listing failed')),
-          ),
-        );
+        sink.onFailure(error.prefixedWith('Listing failed'));
         return;
+    }
+
+    // 2. Prepare: ask the backend to build the unsigned createAuction tx, plus
+    // — for a compressed NFT whose eventual settle would not fit the packet raw
+    // — the `setupTx` that creates the address lookup table the auction tx is
+    // compiled against. The batch order `[setupTx, tx]` is the on-chain
+    // contract, not a preference: the executor signs AND confirms each tx
+    // before starting the next, so leading with the setup is what guarantees
+    // the table exists by the time the auction tx names it, and a setup
+    // failure aborts before the auction tx is ever broadcast. Seller pubkey is
+    // already on `state.userPubkey`, so `requireWallet` is false. Tracking the
+    // build is what lets the executor re-ask for a LUT `setupTx` whose
+    // `recent_slot` aged out while the sheet sat open — see [_txTracker].
+    List<String>? builtBatch;
+    await _flow.prepare<void, AuctionSuccessData>(
+      sink: sink,
+      tracker: _txTracker,
+      requireWallet: false,
+      build: (_) async {
+        final response = await _auctionRepo.getCreateAuctionTx(
+          state.toRequest(memo: memo),
+        );
+        return builtBatch = [?response.result.setupTx, response.result.tx];
+      },
+      // No confirmation sheet — the flow runs end-to-end without a
+      // user-facing confirm step (TPrep is void, onReady is transient).
+      toPrep: (_, _) {},
+      errorPrefix: 'Listing failed',
+    );
+
+    // Bail on prepare failure (sink already emitted TxFlowFailure).
+    final unsignedTxsBase64 = builtBatch;
+    if (unsignedTxsBase64 == null ||
+        state.flow is! TxFlowReady<void, AuctionSuccessData>) {
+      return;
     }
 
     // 3. Sign + broadcast + confirm via [MarketplaceActionFlow].
@@ -675,18 +734,24 @@ class AuctionBloc extends Bloc<AuctionEvent, AuctionState> {
     // escrow but does not move any SOL/token value out of the wallet
     // beyond ~5k lamports of network fee — well below the gate threshold.
     final isLocal = await _walletManager.isLocalSigner();
-    String approvalCopy(bool ledger) => ledger
-        ? kLedgerSigningStage
-        : (isLocal ? kLocalSigningLabel : kExternalSigningLabel);
 
     await _flow.execute(
-      sink: txFlowSink<void, AuctionSuccessData>(
-        (flow) => emit(state.copyWith(flow: flow)),
-      ),
-      txsBase64: [unsignedTxBase64],
+      sink: sink,
+      tracker: _txTracker,
+      txsBase64: unsignedTxsBase64,
       usdValue: 0.0,
       flow: const FlowKey.solana(AppFlow.auctionCreate),
-      stageFor: (_, _, ledger) => approvalCopy(ledger),
+      // On the two-step (setup + auction) batch the copy carries the step
+      // count so the user knows a second approval prompt is coming — an
+      // unqualified "Awaiting approval…" twice reads as a stuck sheet.
+      stageFor: (index, total, ledger) {
+        if (ledger) return kLedgerSigningStage;
+        if (isLocal) return kLocalSigningLabel;
+        if (total > 1) {
+          return '$kExternalSigningLabel (${index + 1} of $total)';
+        }
+        return kExternalSigningLabel;
+      },
       toSuccess: (_) => const AuctionSuccessData(),
       isClosed: () => isClosed,
       onIndexedAck: (sig, ok) =>

@@ -115,7 +115,12 @@ class MintRepository {
   /// The chain-side metadata payload is much smaller in v2 — extended
   /// fields (description, attributes, image, …) live only in the IPFS
   /// JSON pointed to by the request's `uri`.
-  Future<ApiResponse<UnsignedTxResponse>> buildEditNftTx(
+  ///
+  /// A compressed NFT whose merkle proof does not fit the packet answers
+  /// with an optional `setupTx` alongside `tx`: the transaction that creates
+  /// the address lookup table `tx` is compiled against. Callers must sign and
+  /// confirm it first, before broadcasting `tx`.
+  Future<ApiResponse<UnsignedTxWithSetupResponse>> buildEditNftTx(
     EditNftV2Request request,
   ) {
     return _apiV2.editNftTx(request);

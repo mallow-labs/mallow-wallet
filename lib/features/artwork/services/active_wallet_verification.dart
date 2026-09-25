@@ -13,14 +13,15 @@ import '../../../di.dart';
 /// proves the ACTIVE wallet specifically:
 /// - the active wallet already has a valid sig (in memory or on disk) → pass;
 /// - else `signAndVerifyForWallet` signs it: HD / imported / social sign
-///   silently from a local key, and a Ledger pops the `LedgerVerifyController`
-///   connect + verify sheet. A social wallet is silent *unless* its stored key
+///   silently from a local key; a Ledger pops the `HardwareVerifyController`
+///   connect + verify sheet; a Seed Vault wallet signs through its own
+///   full-screen OS approval. A social wallet is silent *unless* its stored key
 ///   is missing, in which case it pops an interactive Web3Auth re-login.
 ///
 /// 🛑 **Call this only from a user-initiated action.** An interactive prompt is
 /// acceptable as the direct result of a tap, never from a background/automated
 /// path — a login or resume must not ambush the user with it. Background
-/// callers use `AuthService.verifySessionWallet`, which defers Ledger wallets
+/// callers use `AuthService.verifySessionWallet`, which defers hardware wallets
 /// and social wallets whose stored key is missing instead.
 ///
 /// Returns null on success, or a user-facing message the caller surfaces.
@@ -45,7 +46,7 @@ Future<String?> ensureActiveWalletVerified() async {
   try {
     await auth.signAndVerifyForWallet(active.id, active.address);
     return null;
-  } on LedgerVerificationCancelledException {
+  } on HardwareVerificationCancelledException {
     // The verify sheet already named the reason (out of range, wrong app, blind
     // signing off, …) — don't dump the exception on top of it.
     return 'Hardware wallet not verified';

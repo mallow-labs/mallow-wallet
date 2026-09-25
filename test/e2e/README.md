@@ -387,15 +387,18 @@ Eight rules, in order of how expensive it is to get them wrong:
    inside.
 2. **Start every `testWidgets` with `restartApp(tester)`.** Within a file all
    cases share one process and one app-data dir, and `configureDependencies()`
-   cannot be called twice; `restartApp` disposes the tree, wipes app state,
-   rebuilds the DI graph and relaunches. Pass `wipe: false` for the "kill and
+   cannot be called twice; `restartApp` disposes the tree, rebuilds the DI
+   graph, wipes app state and relaunches. Pass `wipe: false` for the "kill and
    reopen the app" scenario. Skip it and case 2 inherits case 1's wallet, PIN
    and session. See `resetAppState()` in `harness.dart` for what is wiped —
-   four stores, not two — and why it runs after DI init, not before. It also
-   pops any open sheet/menu through the real navigator and resets the app-level
-   statics a real process restart would clear (`resetAppStatics`): `restartApp`
-   disposes a widget tree, so without that step `NavBarState.selectedTab` /
-   `.activeTab` / `.visible` and `DrawerSignal.*` all leak into the next case.
+   four stores, not two — and `restartApp` for why the wipe runs on the NEW
+   graph, after the old database is closed: the wipe deletes the DB encryption
+   key and the sqlite file, and two live graphs can mint two different keys for
+   one file. It also pops any open sheet/menu through the real navigator and
+   resets the app-level statics a real process restart would clear
+   (`resetAppStatics`): `restartApp` disposes a widget tree, so without that
+   step `NavBarState.selectedTab` / `.activeTab` / `.visible` and
+   `DrawerSignal.*` all leak into the next case.
 
    *Measured, because the answer is not obvious:* app data does **not** survive
    from file to file today. `flutter test` uninstalls the app after each file

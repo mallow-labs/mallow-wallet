@@ -10,6 +10,7 @@ import '../../../core/services/signing_copy.dart';
 import '../../../di.dart';
 import '../../market/services/analytics_failure_reason.dart';
 import '../../../shared/utils/artwork_display.dart';
+import '../../../shared/utils/synthetic_master.dart';
 import '../../../shared/widgets/app_snack_bar.dart';
 import '../../../shared/widgets/flow_unavailable_sheet.dart';
 import '../../../shared/widgets/mallow_sheet.dart';
@@ -37,6 +38,7 @@ Future<bool> runBurnArtworkFlow(
   required PortfolioArtwork artwork,
   bool isCollection = false,
 }) async {
+  if (isSyntheticSolanaMaster(artwork.mintAccount)) return false;
   // Kill-switch entry gate — in the shared helper
   // so the ~5 other burn call sites inherit it, reading the same `nft-burn`
   // cell the signing backstop checks.

@@ -7,24 +7,24 @@ import 'package:mallow_wallet/core/utils/price_formatter.dart';
 /// `formatCompactValue`. These render token amounts, marketplace prices,
 /// spot prices, and market-cap/volume figures across the market and
 /// portfolio screens, so the tier boundaries (1K / 1M) and decimal clamping
-/// are correctness-critical: a misplaced threshold shows "1000.00" where the
-/// UI expects "1.00K" (or vice versa).
+/// are correctness-critical: a misplaced threshold shows "1000" where the UI
+/// expects "1K" (or vice versa).
 void main() {
   group('PriceFormatter.formatCompactAmount', () {
     test('millions tier clamps decimals to 2 and suffixes M', () {
-      expect(PriceFormatter.formatCompactAmount(1500000, 6), '1.50M');
+      expect(PriceFormatter.formatCompactAmount(1500000, 6), '1.5M');
     });
 
     test('exactly 1,000,000 enters the M tier (>= boundary, inclusive)', () {
-      expect(PriceFormatter.formatCompactAmount(1000000, 2), '1.00M');
+      expect(PriceFormatter.formatCompactAmount(1000000, 2), '1M');
     });
 
     test('thousands tier clamps decimals to 2 and suffixes K', () {
-      expect(PriceFormatter.formatCompactAmount(2500, 6), '2.50K');
+      expect(PriceFormatter.formatCompactAmount(2500, 6), '2.5K');
     });
 
     test('exactly 1,000 enters the K tier', () {
-      expect(PriceFormatter.formatCompactAmount(1000, 2), '1.00K');
+      expect(PriceFormatter.formatCompactAmount(1000, 2), '1K');
     });
 
     test('just below 1,000 stays in the base tier (no K suffix)', () {
@@ -34,6 +34,12 @@ void main() {
     test('base tier (>= 1) clamps to maxBaseDecimals (default 4)', () {
       // decimals=9 is clamped to 4 in the [1, 1000) tier.
       expect(PriceFormatter.formatCompactAmount(12.34567, 9), '12.3457');
+    });
+
+    test('base tier strips only insignificant fractional zeros', () {
+      expect(PriceFormatter.formatCompactAmount(1.2300, 4), '1.23');
+      expect(PriceFormatter.formatCompactAmount(1.2304, 4), '1.2304');
+      expect(PriceFormatter.formatCompactAmount(1, 4), '1');
     });
 
     test('sub-1 tier clamps to maxSubDecimals (default 6)', () {
@@ -48,8 +54,8 @@ void main() {
       );
     });
 
-    test('zero renders with the requested decimals (sub-1 tier)', () {
-      expect(PriceFormatter.formatCompactAmount(0, 2), '0.00');
+    test('zero renders without a decimal point', () {
+      expect(PriceFormatter.formatCompactAmount(0, 2), '0');
     });
   });
 
@@ -59,7 +65,7 @@ void main() {
     });
 
     test('exactly 1000 is the K boundary', () {
-      expect(PriceFormatter.formatCompactPrice(1000), '1.0K');
+      expect(PriceFormatter.formatCompactPrice(1000), '1K');
     });
 
     test('sub-1000 keeps up to 4 decimals, stripping trailing zeros', () {

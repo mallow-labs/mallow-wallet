@@ -7,28 +7,25 @@ part of '../artwork_detail_screen.dart';
 /// orchestration and scroll body.
 extension _ArtworkDetailDotsMenu on _ArtworkDetailViewState {
   Future<void> _showDotsMenu(ArtworkDetails artwork) async {
+    final isSyntheticMaster = isSyntheticSolanaMaster(artwork.mintAccount);
     // Same sheet as the grid/curation surfaces — the detail screen only
     // hides "View artwork" (the viewer is already here) and adds the
     // detail-only Sync token / View master edition rows.
-    final portfolioArtwork = artwork.toPortfolioArtwork();
+    final initialPortfolioArtwork = artwork.toPortfolioArtwork();
     final action = await showArtworkContextMenu(
       context,
-      artwork: portfolioArtwork,
+      artwork: initialPortfolioArtwork,
       showViewArtwork: false,
-      showSyncToken: true,
+      showSyncToken: !isSyntheticMaster,
       // "View master edition" only for printed editions — `parentEdition`
       // is the master mint and is populated by the DAS edition-state load
       // only for print children (null for masters / 1-of-1s).
       showViewMasterEdition: _editionLive?.parentEdition != null,
       inGroupedSale: artwork.groupedSale != null,
-      ownerAddresses: [
-        if (artwork.ownerAddress != null) artwork.ownerAddress!,
-        ...artwork.ownerAddresses,
-      ],
       collectionMint: artwork.collectionMint,
-      // Cast is allowed for owner OR any creator (royalty splits, linked
-      // addresses) — richer than the sheet's on-chain owner/update-auth gate.
-      canCastOverride: _canCast(artwork),
+      // Reuse the detail screen's prefetch and keep an already-open sheet in
+      // sync with live ownership, listing, supply, session, and creator data.
+      liveState: _optionsMenuState,
       // Route like taps through the bloc so the on-screen like count and
       // heart stay in sync with the sheet's row.
       initialIsLiked: artwork.isLiked,
@@ -43,6 +40,13 @@ extension _ArtworkDetailDotsMenu on _ArtworkDetailViewState {
       dismissOnReport: true,
     );
     if (!mounted || action == null) return;
+    final latestState = context.read<ArtworkBloc>().state;
+    final latestArtwork =
+        latestState is ArtworkLoaded &&
+            latestState.artwork.mintAccount == artwork.mintAccount
+        ? latestState.artwork
+        : artwork;
+    final portfolioArtwork = latestArtwork.toPortfolioArtwork();
 
     switch (action) {
       case ArtworkContextMenuAction.download:
@@ -53,22 +57,22 @@ extension _ArtworkDetailDotsMenu on _ArtworkDetailViewState {
         await toggleArtworkHidden(
           context,
           mintAccount: artwork.mintAccount,
-          currentlyHidden: artwork.isHidden,
+          currentlyHidden: latestArtwork.isHidden,
         );
       case ArtworkContextMenuAction.castToScreen:
-        unawaited(_onCast(artwork));
+        unawaited(_onCast(latestArtwork));
       case ArtworkContextMenuAction.addToCastQueue:
-        _onAddToCast(artwork);
+        _onAddToCast(latestArtwork);
       case ArtworkContextMenuAction.addToCuration:
-        unawaited(_addToCuration(artwork));
+        unawaited(_addToCuration(latestArtwork));
       case ArtworkContextMenuAction.syncToken:
-        unawaited(_syncToken(artwork));
+        unawaited(_syncToken(latestArtwork));
       case ArtworkContextMenuAction.viewMasterEdition:
         context.goToArtwork(_editionLive!.parentEdition!);
       case ArtworkContextMenuAction.transfer:
-        unawaited(_handleTransfer(artwork));
+        unawaited(_handleTransfer(latestArtwork));
       case ArtworkContextMenuAction.burn:
-        unawaited(_handleBurn(artwork));
+        unawaited(_handleBurn(latestArtwork));
       default:
         break;
     }
@@ -80,6 +84,7 @@ extension _ArtworkDetailDotsMenu on _ArtworkDetailViewState {
   /// dedupes per mint for 5 minutes, so an error usually just means
   /// "still working", not "failed".
   Future<void> _syncToken(ArtworkDetails artwork) async {
+    if (isSyntheticSolanaMaster(artwork.mintAccount)) return;
     try {
       await sl<ArtworkRepository>().syncArtwork(artwork.mintAccount);
       if (!mounted) return;

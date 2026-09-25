@@ -20,7 +20,6 @@ import '../../../shared/widgets/mallow_svg_icon.dart';
 import '../../../shared/widgets/mallow_toggle.dart';
 import '../../../shared/widgets/sheet_drag_handle.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
-import '../services/account_deletion.dart';
 import '../widgets/settings_page_scaffold.dart';
 import 'package:go_router/go_router.dart';
 
@@ -42,11 +41,6 @@ class _SecurityPrivacyScreenState extends State<SecurityPrivacyScreen>
   // Opted-in view of the analytics pref (pref stores opt-OUT; UI shows enabled).
   bool _analyticsEnabled = true;
   bool _loaded = false;
-
-  /// Username of the mallow profile owned by the logged-in address, or null
-  /// when there is none. Gates the "Delete profile" row: with no profile there
-  /// is nothing for `POST /v2/user/delete` to remove.
-  String? _deletableUsername;
 
   @override
   void initState() {
@@ -88,7 +82,6 @@ class _SecurityPrivacyScreenState extends State<SecurityPrivacyScreen>
       _txAuthThresholdUsd = threshold ?? kTransactionAuthThresholdUsd;
       _useFingerprintIcon = hasFingerprint && !hasFaceId;
       _analyticsEnabled = !analyticsOptOut;
-      _deletableUsername = deletableUsername();
       _loaded = true;
     });
   }
@@ -211,15 +204,7 @@ class _SecurityPrivacyScreenState extends State<SecurityPrivacyScreen>
               onAnalyticsChanged: _onAnalyticsToggled,
               onResetApp: () => context.push(AppRoutes.resetApp),
               onBlockedAccounts: () => context.push(AppRoutes.blockedAccounts),
-              onDeleteAccount: _deletableUsername == null
-                  ? null
-                  : () async {
-                      await context.push(AppRoutes.deleteAccount);
-                      // The delete pops straight back past this screen, but a
-                      // cancel returns here — re-read so the row disappears if
-                      // the profile went away some other way.
-                      if (mounted) await _load();
-                    },
+              onDeleteAccount: () => context.push(AppRoutes.deleteAccount),
             )
           : const SizedBox.shrink(),
     );
@@ -252,9 +237,11 @@ class _Body extends StatelessWidget {
   final VoidCallback onResetApp;
   final VoidCallback onBlockedAccounts;
 
-  /// Null when the logged-in address owns no profile — the row is then hidden
-  /// entirely rather than rendered dead.
-  final VoidCallback? onDeleteAccount;
+  /// Always present. The row used to hide when the logged-in address owned no
+  /// profile, which left a reviewer who signed in and never set a username
+  /// with no account-deletion path to find (App Store 5.1.1(v)); the screen
+  /// behind it now explains the no-account case itself.
+  final VoidCallback onDeleteAccount;
 
   @override
   Widget build(BuildContext context) {
@@ -328,16 +315,15 @@ class _Body extends StatelessWidget {
           label: 'Reset app',
           onTap: onResetApp,
         ),
-        // Only shown when there is a profile to delete. Reset app (wallets) and
-        // Delete profile are deliberately adjacent and deliberately distinct.
-        if (onDeleteAccount != null) ...[
-          const SizedBox(height: 8),
-          _DangerMenuItem(
-            iconAsset: 'assets/icons/user_minus.svg',
-            label: 'Delete profile',
-            onTap: onDeleteAccount!,
-          ),
-        ],
+        // Reset app (wallets) and Delete profile (the server-side profile)
+        // are deliberately adjacent and deliberately distinct. The label
+        // matches the title of the screen behind it.
+        const SizedBox(height: 8),
+        _DangerMenuItem(
+          iconAsset: 'assets/icons/user_minus.svg',
+          label: 'Delete profile',
+          onTap: onDeleteAccount,
+        ),
       ],
     );
   }

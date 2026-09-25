@@ -64,16 +64,20 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  // Product decision: with no profile there is nothing for
-  // `POST /v2/user/delete` to remove, so the row is hidden rather than shown
-  // and failing. Reset app must still be there — the two rows are adjacent and
-  // only one of them depends on a profile.
-  testWidgets('no username → no Delete profile row', (tester) async {
+  // The row used to hide when the signed-in address had no username. That left
+  // a reviewer who signed in and never set one with no account-deletion entry
+  // to find — an App Store 5.1.1(v) finding — even though that address does
+  // have a server record. The row is always present and the screen behind it
+  // deletes for real. Reset app stays beside it; the two are adjacent and
+  // distinct.
+  testWidgets('no username → Delete profile row is still present', (
+    tester,
+  ) async {
     when(() => auth.currentUser).thenReturn(const api.User());
 
     await pumpScreen(tester);
 
-    expect(find.text('Delete profile'), findsNothing);
+    expect(find.text('Delete profile'), findsOneWidget);
     expect(find.text('Reset app'), findsOneWidget);
   });
 
@@ -83,6 +87,9 @@ void main() {
     await pumpScreen(tester);
 
     expect(find.text('Delete profile'), findsOneWidget);
+    // The old label. The screen the row opens is titled "Delete profile" —
+    // the two must agree.
+    expect(find.text('Delete account'), findsNothing);
   });
 
   // The sibling moderation screen was routed but never linked from Settings;

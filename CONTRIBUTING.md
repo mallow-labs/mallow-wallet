@@ -29,8 +29,8 @@ required step, not an optimisation.
 
 `flutter analyze` and `flutter test` need no configuration at all — nothing
 reads config from disk at runtime. You only need real values in `.env` to *run*
-the app. See the README's build-variable table for what each one does, whether
-you need it, and where a value comes from.
+the app. See [docs/configuration.md](docs/configuration.md) for what each one
+does, whether you need it, and where a value comes from.
 
 ### Building for iOS
 

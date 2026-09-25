@@ -57,6 +57,13 @@ void main() {
   });
 
   group('buildTokenExplorerUrl', () {
+    test('does not create a link for a database-only synthetic master', () {
+      expect(
+        buildTokenExplorerUrl('cnft-master-collection-hash', 'solscan'),
+        '',
+      );
+    });
+
     test('uses /token/ path for solscan and /address/ for the rest', () {
       expect(
         buildTokenExplorerUrl(mint, 'solscan'),

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
+import '../../../../core/config/store_build.dart';
 import '../../../../shared/theme/mallow_theme.dart';
 import '../../../../shared/utils/price_format.dart';
 import '../../../../shared/utils/balance_check.dart';
@@ -98,48 +99,62 @@ class ArtworkBuySheet extends StatelessWidget {
               ),
             ),
           ],
-          const SizedBox(height: MallowTheme.spacingMd),
-          // Both CTAs are funded in the listing currency, so one source line
-          // covers the pair. The affordability check below re-derives off
-          // TokenBalanceBloc, which the switch reloads for the new wallet.
-          ArtworkFundingSource(
-            currencyMint: artwork.currency,
-            builder: (context, switching) => Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                BlocBuilder<TokenBalanceBloc, TokenBalanceState>(
-                  builder: (context, balanceState) {
-                    final result = checkBalanceOrSkip(
-                      paymentMint: artwork.currency,
-                      requiredRawAmount: artwork.price?.round(),
-                      balanceState: balanceState,
-                    );
-                    return MallowButton(
-                      label: buyLabel,
-                      enabled: block == null && !switching,
-                      onPressed: isLoading || block != null
-                          ? null
-                          : () {
-                              if (!ensureSufficientBalance(context, result)) {
-                                return;
-                              }
-                              onBuy();
-                            },
-                      isLoading: isLoading && block == null,
-                      isFullWidth: true,
-                    );
-                  },
-                ),
-                const SizedBox(height: MallowTheme.spacingSm),
-                OfferActionButtons(
-                  userOwnOffer: userOwnOffer,
-                  isLoading: isLoading || switching,
-                  onMakeOffer: onMakeOffer,
-                  onCancelOffer: onCancelOffer,
-                ),
-              ],
+          // The purchase CTAs — Buy and make/update offer — and the funding
+          // line above them (it exists to pay) go with `kShowNftCommerce`. A
+          // store build that hides commerce keeps the price and status above
+          // and, when the viewer already holds an offer, the way to cancel it.
+          if (showNftCommerce) ...[
+            const SizedBox(height: MallowTheme.spacingMd),
+            // Both CTAs are funded in the listing currency, so one source line
+            // covers the pair. The affordability check below re-derives off
+            // TokenBalanceBloc, which the switch reloads for the new wallet.
+            ArtworkFundingSource(
+              currencyMint: artwork.currency,
+              builder: (context, switching) => Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  BlocBuilder<TokenBalanceBloc, TokenBalanceState>(
+                    builder: (context, balanceState) {
+                      final result = checkBalanceOrSkip(
+                        paymentMint: artwork.currency,
+                        requiredRawAmount: artwork.price?.round(),
+                        balanceState: balanceState,
+                      );
+                      return MallowButton(
+                        label: buyLabel,
+                        enabled: block == null && !switching,
+                        onPressed: isLoading || block != null
+                            ? null
+                            : () {
+                                if (!ensureSufficientBalance(context, result)) {
+                                  return;
+                                }
+                                onBuy();
+                              },
+                        isLoading: isLoading && block == null,
+                        isFullWidth: true,
+                      );
+                    },
+                  ),
+                  const SizedBox(height: MallowTheme.spacingSm),
+                  OfferActionButtons(
+                    userOwnOffer: userOwnOffer,
+                    isLoading: isLoading || switching,
+                    onMakeOffer: onMakeOffer,
+                    onCancelOffer: onCancelOffer,
+                  ),
+                ],
+              ),
             ),
-          ),
+          ] else if (userOwnOffer) ...[
+            const SizedBox(height: MallowTheme.spacingMd),
+            OfferActionButtons(
+              userOwnOffer: true,
+              isLoading: isLoading,
+              onMakeOffer: onMakeOffer,
+              onCancelOffer: onCancelOffer,
+            ),
+          ],
         ],
       ),
     );

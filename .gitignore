@@ -74,7 +74,6 @@ settings.local.json
 .mcp_data
 
 /android/.kotlin/sessions
-/.claude
 .review/
 
 .wrangler/

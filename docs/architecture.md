@@ -15,6 +15,29 @@ features/
     └── widgets/        # Feature-specific components
 ```
 
+### Platform-gated features
+
+A feature directory may exist on only one platform. The gate is a **runtime probe, not a compile-time split** — one binary per platform still contains every feature, and the entry points simply do not render where the capability is absent.
+
+`lib/features/seed_vault/` is the current example. It imports and signs with wallets held in Solana Mobile's Seed Vault, which exists only on Android hardware that ships it, so every entry point into the feature is gated on `SeedVaultService.isAvailable()` (`lib/core/services/seed_vault_service.dart`). That probe answers `false` on iOS, on an ordinary Android phone, and in unit tests, so the rest of the app needs no conditional import and no per-platform build. Two conventions come with it:
+
+- **The platform half lives in the Android app module**, as a method channel beside the others (`android/app/src/main/kotlin/com/mallow/wallet/android/SeedVaultChannel.kt`) rather than as a package under `packages/`. The Dart side owns policy — which flows are allowed to raise an approval — and the channel owns mechanism.
+- **The availability probe is the only fail-soft call.** It swallows every error and answers `false`, because a broken probe should hide a feature rather than break the screen that asked about it. Everything else on that service raises a typed exception; a raw `MissingPluginException` must never reach a caller, or "this device has no Seed Vault" reads as a crash.
+
+### Standalone packages
+
+The Dart packages under `packages/` are written to stand alone and may be useful outside this app. They are path dependencies today rather than published packages.
+
+| Package | What it does |
+|---|---|
+| `ledger_solana` | Solana app bindings for Ledger hardware wallets |
+| `ledger_ethereum` | Ethereum app bindings for Ledger hardware wallets |
+| `ledger_tezos` | Tezos app bindings for Ledger hardware wallets |
+| `jupiter_aggregator` | Typed client for Jupiter's Ultra, classic swap, and price APIs |
+| `mallow_api` | Generated client for the backend, from the vendored `openapi/openapi.yaml` |
+
+`flutter test` does not descend into `packages/` — each has its own suite, run separately. See [CONTRIBUTING.md](../CONTRIBUTING.md).
+
 ## Naming Conventions
 - **Files**: `snake_case` (e.g., `artwork_detail_screen.dart`)
 - **Classes**: `PascalCase` (e.g., `ArtworkDetailScreen`)

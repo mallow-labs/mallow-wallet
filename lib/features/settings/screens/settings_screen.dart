@@ -203,7 +203,7 @@ class _SettingsScreenState extends State<SettingsScreen>
       _awaitingOsPushGrant = false;
       if (!prefs.pushNotificationsEnabled) {
         await prefs.setPushNotificationsEnabled(true);
-        await pushService.register();
+        await pushService.syncAddresses();
       }
       if (!mounted) return;
       setState(() => _pushEnabled = true);

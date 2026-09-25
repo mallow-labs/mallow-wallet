@@ -304,6 +304,8 @@ void main() {
     );
 
     await enterPin(tester);
+    // The push-permission step sits between the last PIN digit and Home.
+    await dismissPushPrompt(tester);
     await waitForHome(tester);
   });
 

@@ -13,6 +13,7 @@ import '../../../shared/widgets/mallow_button.dart';
 import '../widgets/artwork_ring_3d.dart';
 import '../widgets/create_wallet_menu.dart';
 import '../widgets/import_wallet_menu.dart';
+import '../../seed_vault/widgets/seed_vault_entry.dart';
 
 /// Welcome/splash screen for new users.
 ///
@@ -27,6 +28,23 @@ class WelcomeScreen extends StatefulWidget {
 }
 
 class _WelcomeScreenState extends State<WelcomeScreen> {
+  /// Whether this device has a Seed Vault implementation. Probed once here
+  /// rather than inside the import sheet so the sheet stays a pure view, and so
+  /// the row is never briefly present and then gone.
+  bool _seedVaultAvailable = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_probeSeedVault());
+  }
+
+  Future<void> _probeSeedVault() async {
+    final available = await isSeedVaultAvailable();
+    if (!mounted || !available) return;
+    setState(() => _seedVaultAvailable = true);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -169,6 +187,13 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
         Navigator.pop(context);
         context.push(AppRoutes.ledgerScan);
       },
+      // Null on a device without Seed Vault, which hides the row entirely.
+      onSeedVaultTap: _seedVaultAvailable
+          ? () {
+              Navigator.pop(context);
+              context.push(AppRoutes.seedVaultImport);
+            }
+          : null,
       onRecoveryPhraseTap: () {
         Navigator.pop(context);
         context.push(AppRoutes.importWallet);
