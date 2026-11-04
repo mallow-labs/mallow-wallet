@@ -1,5 +1,7 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_cache_manager/flutter_cache_manager.dart'
+    show BaseCacheManager;
 
 import '../../core/observability/app_logger.dart';
 import '../../core/utils/image_fallback.dart';
@@ -53,6 +55,7 @@ class MallowNetworkImage extends StatefulWidget {
     this.placeholderBuilder,
     this.errorBuilder,
     this.semanticLabel,
+    this.cacheManager,
   });
 
   final String imageUrl;
@@ -89,6 +92,12 @@ class MallowNetworkImage extends StatefulWidget {
   /// pass a label for meaningful images (e.g. an NFT title or avatar owner).
   final String? semanticLabel;
 
+  /// Disk cache to read and fill. Null is [MallowImageCacheManager.instance],
+  /// which every image should share; pass another only for images that must
+  /// be erasable on their own, such as
+  /// [MallowImageCacheManager.browserSiteIcons].
+  final BaseCacheManager? cacheManager;
+
   @override
   State<MallowNetworkImage> createState() => _MallowNetworkImageState();
 }
@@ -103,7 +112,7 @@ class _MallowNetworkImageState extends State<MallowNetworkImage> {
   /// True once the probe has run for the current asset. Set *before* the probe
   /// resolves so a rebuild storm can't fire several, and left set afterwards so
   /// a failure on the fallback URL falls through to the error widget rather than
-  /// looping — decision 26's "exactly once, then placeholder".
+  /// looping: exactly one retry, then the placeholder.
   bool _fallbackAttempted = false;
 
   @override
@@ -147,9 +156,28 @@ class _MallowNetworkImageState extends State<MallowNetworkImage> {
           );
     final url = _fallbackUrl ?? cdnUrl;
 
-    Widget image = CachedNetworkImage(
+    // No source at all (an artwork or avatar the backend has no image for yet)
+    // goes straight to the error widget, which is where the request would end:
+    // an empty URL is not a request, and the HTTP client rejects it outright.
+    Widget image = url.trim().isEmpty
+        ? (widget.errorBuilder?.call(context) ?? _defaultError(context))
+        : _network(url, cap);
+
+    if (widget.borderRadius != null) {
+      image = ClipRRect(borderRadius: widget.borderRadius!, child: image);
+    }
+
+    // CachedNetworkImage exposes no semantic hooks, so annotate here: label it
+    // as an image for screen readers, or exclude it entirely when decorative.
+    return widget.semanticLabel != null
+        ? Semantics(image: true, label: widget.semanticLabel, child: image)
+        : ExcludeSemantics(child: image);
+  }
+
+  Widget _network(String url, int cap) {
+    return CachedNetworkImage(
       imageUrl: url,
-      cacheManager: MallowImageCacheManager.instance,
+      cacheManager: widget.cacheManager ?? MallowImageCacheManager.instance,
       width: widget.width,
       height: widget.height,
       fit: widget.fit,
@@ -181,16 +209,6 @@ class _MallowNetworkImageState extends State<MallowNetworkImage> {
         return widget.errorBuilder?.call(ctx) ?? _defaultError(ctx);
       },
     );
-
-    if (widget.borderRadius != null) {
-      image = ClipRRect(borderRadius: widget.borderRadius!, child: image);
-    }
-
-    // CachedNetworkImage exposes no semantic hooks, so annotate here: label it
-    // as an image for screen readers, or exclude it entirely when decorative.
-    return widget.semanticLabel != null
-        ? Semantics(image: true, label: widget.semanticLabel, child: image)
-        : ExcludeSemantics(child: image);
   }
 
   Widget _defaultPlaceholder(BuildContext context) {

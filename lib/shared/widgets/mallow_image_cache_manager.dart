@@ -7,6 +7,8 @@ import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 
+import 'oversized_image_guard.dart';
+
 /// Shared [CacheManager] for every remote image in the app.
 ///
 /// Exists instead of [DefaultCacheManager] for two reasons:
@@ -24,13 +26,19 @@ import 'package:http/io_client.dart';
 ///      buckets on disk so scroll-back on a large portfolio hits the disk
 ///      instead of re-fetching over the network.
 ///
+///   3. **No full-size decode of huge originals.** Downloads pass through
+///      [OversizedImageGuardFileService], which aborts a PNG/GIF/WebP whose
+///      header exceeds [kMaxFullDecodePixels] — the decode cap cannot shrink
+///      those, so one such original in a grid is enough for an OOM kill.
+///
 /// Every image surface — [MallowNetworkImage] and the [ArtworkSheetImage] cache
 /// probe — MUST use this one instance so a file warmed by one is visible to the
-/// others.
+/// others. The one exception is [browserSiteIcons].
 class MallowImageCacheManager {
   MallowImageCacheManager._();
 
   static const _key = 'mallowImageCache';
+  static const _siteIconsKey = 'mallowBrowserSiteIconCache';
 
   /// Parallel downloads the cache-manager queue will start. Well above the
   /// default 10 because HTTP/2 multiplexes them cheaply over one connection.
@@ -39,15 +47,41 @@ class MallowImageCacheManager {
   /// Disk-cache object budget (default is 200). Eviction stays LRU past this.
   static const _maxCacheObjects = 1000;
 
+  /// Site icons budget: a few hundred visited sites, each in one or two
+  /// buckets.
+  static const _maxSiteIcons = 300;
+
   static final CacheManager instance = CacheManager(
     Config(
       _key,
       maxNrOfCacheObjects: _maxCacheObjects,
       stalePeriod: const Duration(days: 30),
-      fileService: HttpFileService(httpClient: _client())
-        ..concurrentFetches = _concurrentFetches,
+      fileService: _fileService(),
     ),
   );
+
+  /// The in-app browser's site icons (tabs, bookmarks, recent-site tiles).
+  ///
+  /// Kept out of [instance] on purpose. Each entry is keyed by the icon URL of
+  /// a site the user opened, so the cache's index is a browsing history.
+  /// "Clear browsing data" empties this cache whole, which it cannot do to the
+  /// shared cache without dropping every artwork thumbnail with it.
+  static final CacheManager browserSiteIcons = CacheManager(
+    Config(
+      _siteIconsKey,
+      maxNrOfCacheObjects: _maxSiteIcons,
+      stalePeriod: const Duration(days: 30),
+      fileService: _fileService(),
+    ),
+  );
+
+  static FileService _fileService() =>
+      OversizedImageGuardFileService(HttpFileService(httpClient: _sharedClient))
+        ..concurrentFetches = _concurrentFetches;
+
+  /// One platform client for both caches, so they share an HTTP/2 connection
+  /// and Android builds a single Cronet engine.
+  static final http.Client _sharedClient = _client();
 
   /// Platform-native HTTP/2 client. Falls back to the dart:io client on
   /// platforms without a native adapter — and if native init ever throws, so a

@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
 import '../theme/mallow_theme.dart';
+import 'sheet_overscroll_dismiss.dart';
 
 /// The top safe-area inset in logical pixels, read directly from the platform
 /// view. [MediaQuery] can report 0 when a [Scaffold] or route has already
@@ -48,6 +49,8 @@ double maxSheetHeight(BuildContext context) =>
 /// Reads `viewPadding` — not `padding` — for the safe-area component: the
 /// keyboard zeroes `padding.bottom`, but `viewPadding.bottom` always reports the
 /// physical home-indicator inset, so the safe area survives keyboard transitions.
+/// `padding` still counts when it is the larger of the two, which happens only
+/// while the now-casting bar is up: that bar sits above every route.
 ///
 /// Pass `includeKeyboard: false` when the sheet already shifts its scrollable
 /// region up by `viewInsets.bottom` elsewhere (the two-part keyboard sheets):
@@ -61,14 +64,19 @@ double sheetBottomInset(
   bool includeKeyboard = true,
 }) {
   final media = MediaQuery.of(context);
+  // `padding.bottom` exceeds `viewPadding.bottom` only when something drawn
+  // above the routes claims the screen's bottom edge — the now-casting bar,
+  // via `CastBarMediaQueryInset`. Sheets live inside the Navigator, so the bar
+  // paints over them; clearing it keeps their buttons tappable.
+  final safeArea = math.max(media.viewPadding.bottom, media.padding.bottom);
   final base = includeKeyboard
-      ? math.max(media.viewInsets.bottom, media.viewPadding.bottom)
+      ? math.max(media.viewInsets.bottom, safeArea)
       // The caller has already lifted the content by `viewInsets.bottom`, and
       // that lift clears the home indicator too — so only the part of the safe
       // area the keyboard doesn't already cover is still owed. Without the
       // subtraction the buttons float a home-indicator's height too high while
       // the keyboard is open.
-      : math.max(0, media.viewPadding.bottom - media.viewInsets.bottom);
+      : math.max(0, safeArea - media.viewInsets.bottom);
   return base + gap;
 }
 
@@ -323,13 +331,48 @@ Future<T?> showMallowSheet<T>({
   ShapeBorder? shape,
   bool isDismissible = true,
   bool enableDrag = true,
-}) {
-  return showModalBottomSheet<T>(
+}) => Navigator.of(context).push(
+  mallowSheetRoute<T>(
     context: context,
+    builder: builder,
     isScrollControlled: isScrollControlled,
+    backgroundColor: backgroundColor,
+    shape: shape,
+    isDismissible: isDismissible,
+    enableDrag: enableDrag,
+  ),
+);
+
+/// The route [showMallowSheet] pushes, for callers that must keep a handle on
+/// it, e.g. to remove exactly this sheet with `navigator.removeRoute(route)`
+/// when the request it serves is cancelled. It is a [PopupRoute], so the page
+/// beneath stays current. Built the way [showModalBottomSheet] builds its
+/// route, with the same design-system scrim, timing, height cap, entrance tap
+/// guard and pull-to-dismiss ([SheetOverscrollDismiss]) as every other sheet.
+ModalBottomSheetRoute<T> mallowSheetRoute<T>({
+  required BuildContext context,
+  required WidgetBuilder builder,
+  bool isScrollControlled = false,
+  Color? backgroundColor = Colors.transparent,
+  ShapeBorder? shape,
+  bool isDismissible = true,
+  bool enableDrag = true,
+}) {
+  final navigator = Navigator.of(context);
+  final localizations = MaterialLocalizations.of(context);
+  return ModalBottomSheetRoute<T>(
+    capturedThemes: InheritedTheme.capture(
+      from: context,
+      to: navigator.context,
+    ),
+    isScrollControlled: isScrollControlled,
+    barrierLabel: localizations.scrimLabel,
+    barrierOnTapHint: localizations.scrimOnTapHint(
+      localizations.bottomSheetLabel,
+    ),
     // Use the design-system scrim (dark ~0x99) instead of Flutter's default
     // Colors.black54. Resolved from the caller's context so it adapts to theme.
-    barrierColor: context.mallowColors.scrim,
+    modalBarrierColor: context.mallowColors.scrim,
     backgroundColor: backgroundColor,
     shape: shape,
     isDismissible: isDismissible,
@@ -360,7 +403,13 @@ Future<T?> showMallowSheet<T>({
         // close the sheet, which is the behaviour those sheets have today.
         child: GestureDetector(
           onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
-          child: builder(context),
+          // The route's own drag moves the sheet from any patch that doesn't
+          // scroll; this extends pull-to-dismiss onto the sheet's scrollables
+          // once they sit at their top, so a sheet can be pulled down from
+          // anywhere in it.
+          child: enableDrag
+              ? SheetOverscrollDismiss(child: builder(context))
+              : builder(context),
         ),
       ),
     ),

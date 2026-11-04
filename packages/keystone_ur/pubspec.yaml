@@ -1,0 +1,18 @@
+name: keystone_ur
+description: >-
+  Pure-Dart Uniform Resource (UR, BCR-2020-005) codec and Keystone registry
+  types (sol-sign-request, eth-sign-request, crypto-multi-accounts, ...) for
+  the Keystone air-gapped hardware wallet's animated-QR protocol.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  cbor: ^6.5.1
+  crypto: ^3.0.0
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.24.0

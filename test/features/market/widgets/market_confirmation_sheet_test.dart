@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_api/mallow_api.dart';
+import 'package:mallow_wallet/core/data/mallow_tokens.dart';
 import 'package:mallow_wallet/core/config/remote_config.dart';
 import 'package:mallow_wallet/core/network/solana_rpc_service.dart';
 import 'package:mallow_wallet/core/services/preferences_service.dart';
@@ -18,6 +19,8 @@ import 'package:mallow_wallet/shared/widgets/mallow_checkbox.dart';
 import 'package:mallow_wallet/shared/widgets/mallow_svg_icon.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../refund_transaction_fixture.dart';
 
 class MockMarketBloc extends MockBloc<MarketEvent, MarketState>
     implements MarketBloc {}
@@ -115,6 +118,8 @@ void main() {
       rawAmount: testTotalCostSol * 1e9,
     ),
     int? simulatedPayerLamportsDelta,
+    int? tokenAccountRentLamports,
+    String transactionBase64 = testTransactionBase64,
     int? mallowFeeLamports,
     SettleProceeds? settleProceeds,
     bool disablePrimarySplit = false,
@@ -122,7 +127,7 @@ void main() {
   }) {
     return TxFlowReady<MarketPrepData, MarketSuccessData>(
       MarketPrepData(
-        transactionsBase64: [testTransactionBase64],
+        transactionsBase64: [transactionBase64],
         mintAccount: testMintAccount,
         actionType: actionType,
         flow: flow,
@@ -131,12 +136,272 @@ void main() {
         isSimulating: isSimulating,
         simulationResult: simulationResult,
         simulatedPayerLamportsDelta: simulatedPayerLamportsDelta,
+        tokenAccountRentLamports: tokenAccountRentLamports,
         mallowFeeLamports: mallowFeeLamports,
         settleProceeds: settleProceeds,
         disablePrimarySplit: disablePrimarySplit,
         showDirectProceedsOption: showDirectProceedsOption,
       ),
     );
+  }
+
+  testWidgets(
+    'deposit recovery shows simulated SOL returned instead of a purchase cost',
+    (tester) async {
+      tester.view.physicalSize = const Size(800, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      when(() => mockBloc.state).thenReturn(
+        readyToSignState(
+          actionType: 'recover-bid-refund-deposit',
+          flow: AppFlow.auctionRefundWithdraw,
+          totalCost: MarketPrice.zero(),
+          simulatedPayerLamportsDelta: 1995000,
+        ),
+      );
+      await tester.pumpWidget(
+        buildTestWidget(
+          actionType: 'recover-bid-refund-deposit',
+          totalCost: MarketPrice.zero(),
+        ),
+      );
+      expect(find.text('Recover Deposit'), findsNWidgets(2));
+      expect(find.text('Rent reclaimed'), findsOneWidget);
+      expect(find.text("You'll receive"), findsOneWidget);
+      expect(find.text('Total cost'), findsNothing);
+      expect(find.text('Offer Amount'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'native buy requires only price and gas reserve and displays price plus network fee',
+    (tester) async {
+      const price = MarketPrice(rawAmount: 10000000);
+      tester.view.physicalSize = const Size(800, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      whenListen(
+        mockTokenBalanceBloc,
+        const Stream<TokenBalanceState>.empty(),
+        initialState: TokenBalanceState.loaded(
+          tokens: [TokenBalance.nativeSol(lamports: 11000000)],
+          totalUsdValue: 0,
+          address: 'BUYER',
+        ),
+      );
+      when(() => mockBloc.state).thenReturn(readyToSignState(totalCost: price));
+      await tester.pumpWidget(
+        buildTestWidget(totalCost: price, estimatedFeeLamports: 1000000),
+      );
+      expect(find.text('Total cost'), findsOneWidget);
+      expect(find.text('0.01 SOL'), findsOneWidget);
+      expect(find.text('0.011 SOL'), findsOneWidget);
+      expect(find.text('Creator account rent'), findsNothing);
+      await tester.tap(find.text('Buy Now'));
+      await tester.pump();
+      verify(() => mockBloc.add(const MarketEvent.confirmAndSign())).called(1);
+    },
+  );
+
+  testWidgets(
+    'release SOL refund shows the bidder destination and only requires gas from the payer',
+    (tester) async {
+      const amount = MarketPrice(rawAmount: 2000000000);
+      tester.view.physicalSize = const Size(800, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      whenListen(
+        mockTokenBalanceBloc,
+        const Stream<TokenBalanceState>.empty(),
+        initialState: TokenBalanceState.loaded(
+          tokens: [TokenBalance.nativeSol(lamports: 1000000)],
+          totalUsdValue: 0,
+          address: 'PAYER',
+        ),
+      );
+      when(() => mockBloc.state).thenReturn(
+        readyToSignState(
+          actionType: 'release-sol-bid-refund',
+          flow: AppFlow.auctionRefundWithdraw,
+          totalCost: amount,
+        ),
+      );
+      await tester.pumpWidget(
+        buildTestWidget(
+          actionType: 'release-sol-bid-refund',
+          mintAccount: 'ORIGINAL_BIDDER',
+          totalCost: amount,
+        ),
+      );
+      expect(find.text('Release SOL Refund'), findsOneWidget);
+      expect(find.text('Refund to bidder'), findsOneWidget);
+      expect(find.textContaining('ORIGINAL_BIDDER'), findsOneWidget);
+      expect(
+        find.textContaining('You pay only the transaction fee'),
+        findsOneWidget,
+      );
+      expect(find.text('Total returned'), findsNothing);
+      expect(find.text('Total cost'), findsNothing);
+      await tester.tap(find.text('Release Refund'));
+      await tester.pump();
+      verify(() => mockBloc.add(const MarketEvent.confirmAndSign())).called(1);
+    },
+  );
+
+  testWidgets(
+    'release token refund discloses sponsored account rent without charging the principal',
+    (tester) async {
+      const amount = MarketPrice(rawAmount: 2000000000, currencyMint: usdcMint);
+      tester.view.physicalSize = const Size(800, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      whenListen(
+        mockTokenBalanceBloc,
+        const Stream<TokenBalanceState>.empty(),
+        initialState: TokenBalanceState.loaded(
+          tokens: [TokenBalance.nativeSol(lamports: 1000000)],
+          totalUsdValue: 0,
+          address: 'PAYER',
+        ),
+      );
+      when(() => mockBloc.state).thenReturn(
+        readyToSignState(
+          actionType: 'release-bid-refund',
+          flow: AppFlow.auctionRefundWithdraw,
+          totalCost: amount,
+        ),
+      );
+      await tester.pumpWidget(
+        buildTestWidget(
+          actionType: 'release-bid-refund',
+          mintAccount: 'ORIGINAL_BIDDER',
+          totalCost: amount,
+        ),
+      );
+      expect(find.text('Release Token Refund'), findsOneWidget);
+      expect(find.text('Refund to bidder'), findsOneWidget);
+      expect(find.textContaining('ORIGINAL_BIDDER'), findsOneWidget);
+      expect(
+        find.textContaining('rent for any new token account'),
+        findsOneWidget,
+      );
+      expect(find.text('Total returned'), findsNothing);
+      expect(find.text('Total cost'), findsNothing);
+      await tester.tap(find.text('Release Refund'));
+      await tester.pump();
+      verify(() => mockBloc.add(const MarketEvent.confirmAndSign())).called(1);
+    },
+  );
+
+  for (final action in ['withdraw-bid-refund', 'release-bid-refund']) {
+    for (final rent in [1488440, 3000000]) {
+      testWidgets('$action shows simulated new token account rent $rent', (
+        tester,
+      ) async {
+        tester.view.physicalSize = const Size(800, 1200);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        const amount = MarketPrice(rawAmount: 2000000, currencyMint: usdcMint);
+        when(() => mockBloc.state).thenReturn(
+          readyToSignState(
+            actionType: action,
+            flow: AppFlow.auctionRefundWithdraw,
+            totalCost: amount,
+            simulationResult: const SimulationResult(success: true),
+            simulatedPayerLamportsDelta: -rent - 10000 - 15000,
+            tokenAccountRentLamports: rent,
+            transactionBase64: refundTransactionFixture(
+              payerAddress: usdcMint,
+              accountAddress: testMintAccount,
+              rent: rent,
+              token2022: rent == 3000000,
+            ),
+          ),
+        );
+        await tester.pumpWidget(
+          buildTestWidget(actionType: action, totalCost: amount),
+        );
+        if (action == 'withdraw-bid-refund') {
+          await tester.tap(find.text('Fee details'));
+          await tester.pumpAndSettle();
+          expect(find.text('Total returned'), findsOneWidget);
+          expect(find.text('+2 USDC'), findsOneWidget);
+        } else {
+          expect(find.text('Refund to bidder'), findsOneWidget);
+          expect(find.text('2 USDC'), findsOneWidget);
+        }
+        expect(find.text('Token account rent (new account)'), findsOneWidget);
+        expect(
+          find.text(rent == 1488440 ? '-0.001488 SOL' : '-0.003 SOL'),
+          findsOneWidget,
+        );
+        expect(find.text('-0.000005 SOL'), findsOneWidget);
+      });
+    }
+    for (final delta in [null, -testFeeLamports, -20000, 1000000]) {
+      testWidgets(
+        '$action omits token account rent without an extra debit ($delta)',
+        (tester) async {
+          tester.view.physicalSize = const Size(800, 1200);
+          tester.view.devicePixelRatio = 1;
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          const amount = MarketPrice(
+            rawAmount: 2000000,
+            currencyMint: usdcMint,
+          );
+          when(() => mockBloc.state).thenReturn(
+            readyToSignState(
+              actionType: action,
+              flow: AppFlow.auctionRefundWithdraw,
+              totalCost: amount,
+              simulationResult: const SimulationResult(success: true),
+              simulatedPayerLamportsDelta: delta,
+              tokenAccountRentLamports: 0,
+              transactionBase64: refundTransactionFixture(
+                payerAddress: usdcMint,
+                accountAddress: testMintAccount,
+              ),
+            ),
+          );
+          await tester.pumpWidget(
+            buildTestWidget(actionType: action, totalCost: amount),
+          );
+          expect(find.text('Token account rent (new account)'), findsNothing);
+        },
+      );
+    }
+  }
+
+  for (final action in ['withdraw-bid-refund', 'release-bid-refund']) {
+    testWidgets('$action does not quote rent from a failed simulation', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(800, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      const amount = MarketPrice(rawAmount: 2000000, currencyMint: usdcMint);
+      when(() => mockBloc.state).thenReturn(
+        readyToSignState(
+          actionType: action,
+          flow: AppFlow.auctionRefundWithdraw,
+          totalCost: amount,
+          simulationResult: const SimulationResult(success: false),
+          simulatedPayerLamportsDelta: -1513440,
+          tokenAccountRentLamports: 1488440,
+        ),
+      );
+      await tester.pumpWidget(
+        buildTestWidget(actionType: action, totalCost: amount),
+      );
+      expect(find.text('Token account rent (new account)'), findsNothing);
+    });
   }
 
   group('MarketConfirmationSheet', () {
@@ -756,6 +1021,99 @@ void main() {
       });
     });
 
+    for (final action in ['settle-auction', 'accept-offer']) {
+      for (final knownSplit in [true, false]) {
+        testWidgets(
+          '$action labels a protocol-only residual without creator rent (known=$knownSplit)',
+          (tester) async {
+            when(() => mockBloc.state).thenReturn(
+              readyToSignState(
+                actionType: action,
+                settleProceeds: SettleProceeds(
+                  grossBidRaw: 10_000_000,
+                  currencyMint: null,
+                  marketFeeRaw: 250_000,
+                  hasOtherCreatorPayouts: knownSplit ? false : null,
+                  royaltiesToOthersRaw: 6_000,
+                  sellerEarningsRaw: 9_744_000,
+                ),
+              ),
+            );
+            await tester.pumpWidget(buildTestWidget(actionType: action));
+            expect(find.text("You'll receive"), findsOneWidget);
+            expect(find.textContaining('0.009744 SOL'), findsOneWidget);
+            expect(
+              find.text(knownSplit ? 'Protocol fees' : 'Other deductions'),
+              findsOneWidget,
+            );
+            expect(find.textContaining('0.000006 SOL'), findsOneWidget);
+            expect(find.textContaining('Creator royalties'), findsNothing);
+            expect(find.textContaining('New creator wallets'), findsNothing);
+          },
+        );
+      }
+
+      testWidgets('$action qualifies native estimates before confirmation', (
+        tester,
+      ) async {
+        when(() => mockBloc.state).thenReturn(
+          readyToSignState(
+            actionType: action,
+            settleProceeds: const SettleProceeds(
+              grossBidRaw: 10_000_000,
+              currencyMint: null,
+              marketFeeRaw: 250_000,
+              royaltiesToOthersRaw: 1_000_000,
+              hasOtherCreatorPayouts: true,
+              sellerEarningsRaw: 8_750_000,
+              isEstimate: true,
+            ),
+          ),
+        );
+        await tester.pumpWidget(buildTestWidget(actionType: action));
+        expect(find.text('Estimated proceeds'), findsOneWidget);
+        expect(find.text("You'll receive"), findsNothing);
+        expect(find.text('Creator royalties'), findsOneWidget);
+        expect(find.text('Royalties, rent and fees'), findsNothing);
+        expect(
+          find.text(
+            'New creator wallets may need rent, paid from your proceeds.',
+          ),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('$action explains rent in the measured creator payout', (
+        tester,
+      ) async {
+        when(() => mockBloc.state).thenReturn(
+          readyToSignState(
+            actionType: action,
+            settleProceeds: const SettleProceeds(
+              grossBidRaw: 10_000_000,
+              currencyMint: null,
+              marketFeeRaw: 250_000,
+              royaltiesToOthersRaw: 1_781_760,
+              hasOtherCreatorPayouts: true,
+              sellerEarningsRaw: 7_968_240,
+            ),
+          ),
+        );
+        await tester.pumpWidget(buildTestWidget(actionType: action));
+        expect(find.text("You'll receive"), findsOneWidget);
+        expect(find.text('Estimated proceeds'), findsNothing);
+        expect(find.text('Royalties, rent and fees'), findsOneWidget);
+        expect(find.text('Creator royalties'), findsNothing);
+        expect(find.textContaining('0.00178176 SOL'), findsOneWidget);
+        expect(
+          find.text(
+            'New creator wallets may need rent, paid from your proceeds.',
+          ),
+          findsOneWidget,
+        );
+      });
+    }
+
     group('renders correctly for settle-auction', () {
       // Seller settling a 2 SOL winning bid: 0.1 SOL mallow fee + 0.2 SOL
       // royalties to OTHER creators leaves the seller 1.7 SOL. Amounts are
@@ -765,6 +1123,7 @@ void main() {
         currencyMint: null, // SOL
         marketFeeRaw: 100_000_000,
         royaltiesToOthersRaw: 200_000_000,
+        hasOtherCreatorPayouts: true,
         sellerEarningsRaw: 1_700_000_000,
       );
 
@@ -786,7 +1145,7 @@ void main() {
         // Disclosure itemises the deductions — "mallow fee", not "Market fee".
         expect(find.text('Winning bid'), findsOneWidget);
         expect(find.text('mallow fee'), findsOneWidget);
-        expect(find.text('Creator royalties'), findsOneWidget);
+        expect(find.text('Royalties, rent and fees'), findsOneWidget);
         expect(find.text('Network fee'), findsOneWidget);
       });
 
@@ -803,6 +1162,7 @@ void main() {
           currencyMint: smoresMint,
           marketFeeRaw: 20_000, // 0.02
           royaltiesToOthersRaw: 50_000, // 0.05
+          hasOtherCreatorPayouts: true,
           sellerEarningsRaw: 930_000, // 0.93
         );
         when(() => mockBloc.state).thenReturn(
@@ -818,6 +1178,9 @@ void main() {
         expect(find.textContaining('0.02 SMORES'), findsOneWidget);
         expect(find.textContaining('0.05 SMORES'), findsOneWidget);
         expect(find.textContaining('1 SMORES'), findsOneWidget);
+        expect(find.text('Creator royalties'), findsOneWidget);
+        expect(find.text('Royalties, rent and fees'), findsNothing);
+        expect(find.textContaining('New creator wallets'), findsNothing);
       });
 
       testWidgets('omits the Royalties line when none go to other creators', (
@@ -843,6 +1206,8 @@ void main() {
 
         expect(find.text("You'll receive"), findsOneWidget);
         expect(find.text('Creator royalties'), findsNothing);
+        expect(find.text('Royalties, rent and fees'), findsNothing);
+        expect(find.textContaining('New creator wallets'), findsNothing);
       });
 
       testWidgets(
@@ -929,6 +1294,7 @@ void main() {
         currencyMint: null, // SOL
         marketFeeRaw: 75_000_000,
         royaltiesToOthersRaw: 150_000_000,
+        hasOtherCreatorPayouts: true,
         sellerEarningsRaw: 1_275_000_000,
       );
 
@@ -952,7 +1318,7 @@ void main() {
         expect(find.text('Offer amount'), findsOneWidget);
         expect(find.text('Winning bid'), findsNothing);
         expect(find.text('mallow fee'), findsOneWidget);
-        expect(find.text('Creator royalties'), findsOneWidget);
+        expect(find.text('Royalties, rent and fees'), findsOneWidget);
         expect(find.text('Network fee'), findsOneWidget);
       });
 
@@ -991,7 +1357,7 @@ void main() {
 
       testWidgets(
         'keeps the toggle visible (disabled) while a re-prepare is in flight '
-        '(R4) — TxFlowPreparing carries no prep, but the last gate + value are '
+        '— TxFlowPreparing carries no prep, but the last gate + value are '
         'cached so the control the user tapped never vanishes mid-round-trip',
         (tester) async {
           // Start at a resolved accept-offer ready with the toggle shown.
@@ -1066,6 +1432,8 @@ void main() {
 
         expect(find.text("You'll receive"), findsOneWidget);
         expect(find.text('Creator royalties'), findsNothing);
+        expect(find.text('Royalties, rent and fees'), findsNothing);
+        expect(find.textContaining('New creator wallets'), findsNothing);
       });
 
       testWidgets(

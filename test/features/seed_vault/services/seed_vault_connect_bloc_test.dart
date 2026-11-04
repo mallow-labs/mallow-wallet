@@ -326,6 +326,7 @@ void main() {
           any(),
           derivationIndex: any(named: 'derivationIndex'),
           derivationScheme: any(named: 'derivationScheme'),
+          accountName: any(named: 'accountName'),
         ),
       ).thenAnswer((_) async => wallet);
     }
@@ -361,6 +362,7 @@ void main() {
           captureAny(),
           derivationIndex: captureAny(named: 'derivationIndex'),
           derivationScheme: captureAny(named: 'derivationScheme'),
+          accountName: captureAny(named: 'accountName'),
         ),
       ).captured;
       expect(captured, [
@@ -368,11 +370,70 @@ void main() {
         'Solana',
         0,
         SolanaDerivationScheme.standard,
+        null,
       ]);
       verify(
         () => seedVault.markAsUserWallet(authToken: 7, accountId: 1),
       ).called(1);
     });
+
+    test('passes the name the user gave the card in the picker', () async {
+      stubOneAccount();
+      final bloc = build();
+      addTearDown(bloc.close);
+      bloc.add(const SeedVaultStarted());
+      final loaded =
+          await bloc.stream.firstWhere((s) => s is SeedVaultAccountsLoaded)
+              as SeedVaultAccountsLoaded;
+      bloc
+        ..add(const SeedVaultRenameAccount(0, '  Seeker main  '))
+        ..add(SeedVaultToggleWallet(loaded.accounts.single.wallets.single.key));
+      final named = await bloc.stream.firstWhere(
+        (s) => s is SeedVaultAccountsLoaded && s.selectedKeys.isNotEmpty,
+      );
+      expect((named as SeedVaultAccountsLoaded).customNames, {
+        0: 'Seeker main',
+      });
+
+      bloc.add(const SeedVaultImportRequested());
+      await bloc.stream.firstWhere((s) => s is SeedVaultImported);
+
+      verify(
+        () => repo.addSeedVaultWallet(
+          addrStandard0,
+          'Solana',
+          derivationIndex: 0,
+          derivationScheme: SolanaDerivationScheme.standard,
+          accountName: 'Seeker main',
+        ),
+      ).called(1);
+    });
+
+    blocTest<SeedVaultConnectBloc, SeedVaultConnectState>(
+      'ignores a name for an account that already exists',
+      setUp: () {
+        when(repo.getAccountViews).thenAnswer(
+          (_) async => const [
+            Account(
+              id: 'acct-sv',
+              name: 'My Seeker',
+              kind: AccountKind.seedVault,
+              derivationIndex: 0,
+            ),
+          ],
+        );
+        stubOneAccount();
+      },
+      build: build,
+      act: (bloc) async {
+        bloc.add(const SeedVaultStarted());
+        await bloc.stream.firstWhere((s) => s is SeedVaultAccountsLoaded);
+        bloc.add(const SeedVaultRenameAccount(0, 'Renamed'));
+      },
+      verify: (bloc) {
+        expect((bloc.state as SeedVaultAccountsLoaded).customNames, isEmpty);
+      },
+    );
 
     test('switches the session to the imported wallet when no Profile covers '
         'it', () async {

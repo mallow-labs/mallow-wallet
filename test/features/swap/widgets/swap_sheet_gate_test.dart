@@ -14,7 +14,7 @@ class MockRemoteConfigService extends Mock implements RemoteConfigService {}
 
 class MockSessionManager extends Mock implements SessionManager {}
 
-/// Phase 4b — the `solana:token-swap` entry gate.
+/// The `solana:token-swap` entry gate.
 ///
 /// Gated inside [showSwapSheet] rather than at its three callers, so a fourth
 /// caller inherits it instead of quietly shipping an ungated path.

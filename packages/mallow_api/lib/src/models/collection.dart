@@ -40,7 +40,7 @@ sealed class CollectionDetailNft with _$CollectionDetailNft {
   const factory CollectionDetailNft({
     required String mintAccount,
     String? imageUrl,
-    TokenStandard? tokenStandard,
+    @JsonKey(unknownEnumValue: JsonKey.nullForUndefinedEnumValue) TokenStandard? tokenStandard,
     CollectionRoyalties? royalties,
 
     /// Off-chain JSON metadata URL for the collection NFT (arweave / IPFS

@@ -146,7 +146,7 @@ class _EmailOtpSheetState extends State<_EmailOtpSheet> {
             bottom: sheetBottomInset(context, includeKeyboard: false),
           ),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,

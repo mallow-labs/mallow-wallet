@@ -44,7 +44,7 @@ unconfigured build can still do.
 | `ETH_RPC_URL` | Ethereum mainnet JSON-RPC for money movement — balance, nonce, `estimateGas`, broadcast, receipts. | Optional. Defaults to a public keyless node. | Any Ethereum mainnet RPC: Alchemy, Infura, publicnode, your own. |
 | `EVM_SIMULATION_URL` | The EVM transfer **safety gate**: an `eth_simulateV1` call that blocks signing if anything but the intended asset would move. | **Required for EVM transfers.** No default, and it fails **closed** — unset, transfers error rather than proceed unsimulated. | Any endpoint implementing `eth_simulateV1` (Alchemy's node API does; a plain node may not). |
 | `EVM_GAS_API_URL` | The Edit Gas Fee sheet's Low / Market / High tiers — one `GET <base>/suggestedGasFees` returns ready-made tiers with wait-time estimates. | Optional. No default. Unset, the Edit affordance is hidden and the send is priced from the node's own fee data. | An Infura account with the Gas API enabled, or any endpoint serving the same route. |
-| `TEZOS_RPC_URL` | Tezos node RPC for the send flow. | Optional. Defaults to TzKT's public mainnet node. | Any Tezos node that permits the `run_operation` simulation POST — some public nodes return 401 on it, which surfaces as a failure at the confirm step. |
+| `TEZOS_RPC_URL` | Tezos node RPC for the send flow and for websites' Tezos operations (in-app browser and WalletConnect): counter, simulation and broadcast. | Optional. Defaults to TzKT's public mainnet node. | Any Tezos node that permits the `run_operation` simulation POST — some public nodes return 401 on it, which surfaces as a failure at the confirm step or in the website's review. |
 
 → [backend.md → The Solana RPC requirement, in detail](backend.md#the-solana-rpc-requirement-in-detail)
 and [→ The EVM simulation gate](backend.md#the-evm-simulation-gate).
@@ -59,6 +59,7 @@ your cache in front of it.
 |---|---|---|---|
 | `IMAGE_CDN_BASE_URL` | An image-resizing CDN serving `/{size}x{size}/{fit}/{encoded-source}` and `/original/{encoded-source}`. | Optional. Unset, images load from their own origin at full size. Nothing breaks — the in-memory decode is still capped — but every thumbnail pulls the whole asset. | You host it, or run a resizer that implements those two routes (Cloudflare Images, imgproxy, thumbor). |
 | `ASSET_CDN_BASE_URL` | Rewards-store metadata under `/store`, plus the `/status.json` and `/notification-v2.json` operator feeds behind the maintenance and broadcast banners. | Optional. Unset, the store has no metadata and the banners never show. Both already fail safe. | Any static host you control. |
+| `PROGRAM_LABELS_URL` | Full URL of a JSON list naming well-known Solana programs and their instructions, `{"version": 1, "programs": [{"address", "name", "instructions"?: [{"discriminator", "name"}]}]}`. The signing review shows each name with a verified mark under "Program calls", with the program's short address beneath it as a copy chip. A call's instruction is the entry whose `discriminator` (lower-case hex, up to 16 bytes, `""` matches anything) is the longest prefix of its data, unless the program logged its own name. The app compiles in names for core programs (System, Token, Token-2022, Metaplex and a few others) and their instructions: those always win, a list entry that gives a compiled-in program name to another address is dropped, and a list instruction cannot rename a compiled-in one. Fetched at launch, at most once a day. | Optional. Unset, program calls show the compiled-in names and otherwise their addresses alone, and only compiled-in instructions and those the programs log are named. | Any static host you control. Names must be plain ASCII (letters, digits, space, `.-_()/&+':`), at most 40 characters; instruction names letters and digits only, at most 64 (logged instruction names must pass the same check); the app drops any other entry. |
 | `IPFS_UPLOAD_URL` | Where the mint flow uploads media and metadata JSON. | Optional, but minting needs it. **No default, deliberately** — a compiled-in pinner would have every unconfigured build writing into somebody else's storage. Unset, the mint flow reports the missing variable. | Your own pinning service. It carries no key of its own; it authenticates with the `CLIENT_ID_*` header, so list its host in `FIRST_PARTY_HOSTS`. |
 | `IPFS_GATEWAY_URL` | The gateway direct IPFS fetches go to, and the **first** rung of the video and download fallback ladders (then `ipfs.io`, then `dweb.link`). Not a cache key: the resize and `/original/` paths embed the canonical `ipfs://<cid>` form, which names the bytes and no host. | Optional. Defaults to `ipfs.io`, which collapses the first two rungs into one. | A gateway that reliably holds your pinned CIDs. The production build points this at a first-party **tiered** gateway — its own pins answered first, a full IPFS node behind the same host as the fallback — so a CID this deployment never pinned still resolves instead of 404ing. That value lives in the private build `.env`, not here. |
 | `ARWEAVE_GATEWAY_URL` | The mirror tried when the asset's own Arweave gateway refuses the fetch. | Optional. Defaults to `arweave.net` itself, making the mirror step a no-op rather than a second host to trust. | Any Arweave gateway. |
@@ -87,6 +88,15 @@ your cache in front of it.
 
 → [backend.md → Which hosts receive your credentials](backend.md#which-hosts-receive-your-credentials).
 
+## Website connections
+
+| Variable | Controls | Required? | Where a value comes from |
+|---|---|---|---|
+| `WALLETCONNECT_PROJECT_ID` | WalletConnect v2, the second way a website can ask this wallet to connect and sign (the in-app browser is the first). | Optional. Unset, WalletConnect is off: its entry points are hidden, a `wc:` link only shows a notice that WalletConnect is not available, and no relay connection is ever opened. | A project in the Reown (WalletConnect) dashboard, <https://cloud.reown.com>, created as a *wallet* project, with this build's bundle and package ids listed on it. Not a secret. |
+
+→ [backend.md → Dependencies](backend.md#dependencies) and
+[security.md → Website requests (WalletConnect)](security.md#website-requests-walletconnect).
+
 ## Telemetry
 
 | Variable | Controls | Required? | Where a value comes from |
@@ -104,8 +114,9 @@ your cache in front of it.
 | `SHOW_NFT_COMMERCE` | In-app NFT commerce — buy, bid, offer, sell/list, mint, raffle entry. Set `false` and the marketplace is view-only; wallet functions and every cancel/settle/claim path stay. | Optional. Defaults to `true`; the iOS App Store build sets `false` (App Store Guideline 3.1.1). | A build-time choice. |
 | `SHOW_SWAP` | Token swap, and liquid staking — the same aggregator swap in both directions. Set `false` and the swap sheet and its three entry points go, and the stake sheet becomes native-only. Sends, transfers, burns, native staking and the marketplace are untouched. | Optional. Defaults to `true`; the iOS App Store build sets `false` (App Store Guideline 3.1.5(ii): an exchange must be offered by the exchange itself). | A build-time choice. |
 | `E2E_DISABLE_GL` | Swaps the onboarding 3D carousel for a non-GL fallback. | Optional, off by default. Set only by automated device tests — `flutter_angle` hard-crashes on headless software-GL emulators. | A build-time choice. Do not set it in a shipping build. |
+| `BUILD_LABEL` | A label shown after the version on the About and Report a bug screens, and attached to bug and content reports, so a tester's report names the commit it came from — e.g. `preview dev@1a2b3c4d`. | Optional. Empty by default, and on every release build. | Set by CI for a build of a named branch, as a literal `--dart-define`, because a store version number cannot carry it. Never put it in `.env`: that file is compiled into every build, release builds included. |
 
-The last four are the ones `tool/lint/check_env_documented.sh` exempts from
-`.env.example`. They are set by a developer, by the test harness, or by one
-platform's release lane — never by a deployment — so an `.env.example` entry
-would tell a fork to configure something that is none of their business.
+The last five are the ones `tool/lint/check_env_documented.sh` exempts from
+`.env.example`. They are set by a developer, by the test harness, by one
+platform's release lane, or per build by CI — never by a deployment — so an
+`.env.example` entry would tell a fork to configure something that is none of their business.

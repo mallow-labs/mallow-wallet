@@ -9,6 +9,7 @@ String tokenStandardLabel(TokenStandard ts) => switch (ts) {
   TokenStandard.core || TokenStandard.coreCollection => 'Metaplex Core',
   TokenStandard.pnft => 'Metaplex Programmable',
   TokenStandard.cnft => 'Metaplex Compressed',
+  TokenStandard.cnftV2 => 'Metaplex Compressed V2',
   TokenStandard.objkt => 'FA2',
   TokenStandard.native => 'Ethereum',
   TokenStandard.erc20 => 'ERC-20',

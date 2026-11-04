@@ -23,7 +23,7 @@ void main() {
   const watchOnlyAddress = '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM';
   // Authorities that are not in the session at all (delegate scenario).
   const outsiderAddress = '4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T';
-  const otherOutsiderAddress = '7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2';
+  const otherOutsiderAddress = '5bV6jUfhDHCQVA1WfKBUnXUsboJgoKgkzkKcxr3joew5';
 
   // The watch-only prompt body shipped as the default (artwork-holder copy).
   const defaultWatchOnlyMessage =

@@ -76,4 +76,39 @@ void main() {
     expect(find.text('First'), findsNothing);
     expect(find.text('Second'), findsOneWidget);
   });
+
+  testWidgets('an action runs once, dismisses, and never pins the bar', (
+    tester,
+  ) async {
+    var undone = 0;
+    await pumpHost(
+      tester,
+      onReady: (context) => AppSnackBar.show(
+        context,
+        'Tab closed',
+        actionLabel: 'Undo',
+        onAction: () => undone++,
+      ),
+    );
+    await tester.tap(find.text('Undo'));
+    await tester.pumpAndSettle();
+    expect(undone, 1);
+    expect(find.text('Tab closed'), findsNothing);
+
+    // Untouched, it still times out like any other message.
+    await pumpHost(
+      tester,
+      onReady: (context) => AppSnackBar.show(
+        context,
+        'Tab closed',
+        actionLabel: 'Undo',
+        onAction: () => undone++,
+      ),
+    );
+    expect(find.text('Tab closed'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    expect(find.text('Tab closed'), findsNothing);
+    expect(undone, 1);
+  });
 }

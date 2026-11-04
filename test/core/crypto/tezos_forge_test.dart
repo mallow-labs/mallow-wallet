@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -82,7 +84,95 @@ TezosTransaction _xtz() => TezosTransaction(
   storageLimit: BigInt.from(300),
 );
 
+/// Builds wallet content objects from the fixture's node JSON, the same way the
+/// browser adapter does for a site-supplied operation.
+TezosOperationContent _content(Map<String, dynamic> json) {
+  BigInt n(String key) => BigInt.parse(json[key] as String);
+  final source = json['source'] as String;
+  return switch (json['kind']) {
+    'reveal' => TezosReveal(
+      source: source,
+      publicKey: json['public_key'] as String,
+      fee: n('fee'),
+      counter: n('counter'),
+      gasLimit: n('gas_limit'),
+      storageLimit: n('storage_limit'),
+    ),
+    'delegation' => TezosDelegation(
+      source: source,
+      delegate: json['delegate'] as String?,
+      fee: n('fee'),
+      counter: n('counter'),
+      gasLimit: n('gas_limit'),
+      storageLimit: n('storage_limit'),
+    ),
+    'transaction' => TezosTransaction(
+      source: source,
+      destination: json['destination'] as String,
+      amount: n('amount'),
+      fee: n('fee'),
+      counter: n('counter'),
+      gasLimit: n('gas_limit'),
+      storageLimit: n('storage_limit'),
+      parameters: switch (json['parameters']) {
+        final Map<String, dynamic> p => TezosTransactionParameters(
+          entrypoint: p['entrypoint'] as String,
+          value: MichelineJson(p['value'] as Object),
+        ),
+        _ => null,
+      },
+    ),
+    _ => throw ArgumentError(json['kind']),
+  };
+}
+
 void main() {
+  group('Reference vectors for site-supplied operations', () {
+    // Each vector was forged independently by Taquito's local forger and by a
+    // mainnet node; see the fixture's `_source`. They cover what a website can
+    // send: annotations, prims with 3+ args, nested and empty sequences, bytes,
+    // negative and large ints, delegation, staking entrypoints, and the
+    // `default` + `Unit` canonical form.
+    final fixture =
+        jsonDecode(
+              File(
+                'test/core/crypto/fixtures/tezos_forge_vectors.json',
+              ).readAsStringSync(),
+            )
+            as Map<String, dynamic>;
+    final branch = fixture['branch'] as String;
+    final vectors = (fixture['vectors'] as Map).cast<String, dynamic>();
+    for (final MapEntry(:key, :value) in vectors.entries) {
+      test(key, () {
+        final contents = [
+          for (final c in (value as Map)['contents'] as List)
+            _content((c as Map).cast<String, dynamic>()),
+        ];
+        expect(forgeOperationGroup(branch, contents), value['hex']);
+      });
+    }
+
+    test('default + Unit is sent and simulated without parameters', () {
+      final json = _content(
+        ((vectors['defaultUnit'] as Map)['contents'] as List).single
+            as Map<String, dynamic>,
+      ).toJson();
+      expect(json.containsKey('parameters'), isFalse);
+      // Only the exact Unit bytes are dropped; an annotated Unit is kept.
+      final annotated = _content(
+        ((vectors['annotatedDefaultUnit'] as Map)['contents'] as List).single
+            as Map<String, dynamic>,
+      ).toJson();
+      expect(annotated['parameters'], {
+        'entrypoint': 'default',
+        'value': {
+          'prim': 'Unit',
+          'annots': ['%x'],
+        },
+      });
+    });
+  });
+
   group('Zarith encoders', () {
     test('natural (unsigned) matches known LEB128-style values', () {
       expect(forgeZarithNat(BigInt.zero), [0x00]);

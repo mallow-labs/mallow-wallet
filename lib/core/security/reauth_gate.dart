@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import '../../di.dart';
 import '../../shared/widgets/confirm_sheet.dart';
 import '../../shared/widgets/pin_prompt_sheet.dart';
+import '../models/account.dart';
 import '../observability/app_logger.dart';
 import 'biometric_auth.dart';
 import 'secure_storage.dart';
@@ -60,6 +61,22 @@ Future<bool> requireReauth(BuildContext context) async {
   if (!hasPin) return false;
   if (!context.mounted) return false;
   return await PinPromptSheet.show(context) == true;
+}
+
+/// [requireReauth] in front of a removal of wallets of [types], when any of
+/// them keeps its key in this app's vault ([WalletType.storesKeyOnDevice]).
+///
+/// The Settings hub gates only Security & Privacy; the wallet and account
+/// editors sit outside it. Without this, anyone holding an unlocked phone
+/// could delete a seed phrase or imported key with two taps. Wallets whose key
+/// lives elsewhere (watch-only, Ledger, Seed Vault, Keystone) lose nothing
+/// unrecoverable, so they pass without a prompt.
+Future<bool> requireReauthForRemoval(
+  BuildContext context,
+  Iterable<WalletType> types,
+) async {
+  if (!types.any((t) => t.storesKeyOnDevice)) return true;
+  return requireReauth(context);
 }
 
 /// Whether [result] is a biometric failure the user can fix in device

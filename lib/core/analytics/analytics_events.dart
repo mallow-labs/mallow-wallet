@@ -41,6 +41,14 @@ abstract final class AnalyticsEvent {
   static const burnCompleted = 'Burn Completed';
   static const burnFailed = 'Burn Failed';
 
+  // The on-chain ledger: exactly one event per transaction the wallet signed
+  // and sent — or signed and handed to a website — whatever the flow. Emitted
+  // from the signing primitives, never from screens, so a new flow is covered
+  // without touching analytics. The `* Completed` events above are the
+  // per-flow funnel; this is the event to count transactions and active
+  // wallets on. Emit it only through [recordSubmittedTransaction].
+  static const transactionSubmitted = 'Transaction Submitted';
+
   // Marketplace / Mint
   static const mintCompleted = 'Mint Completed';
   static const mintFailed = 'Mint Failed';
@@ -97,8 +105,14 @@ abstract final class AnalyticsProp {
   static const surface = 'surface';
   static const campaign = 'campaign';
   static const referrer = 'referrer';
-  // Wallet address rides as a raw property (device is the identity).
+  // The signing wallet. Sent only on `Transaction Submitted`, where the
+  // signature already names it to anyone with an explorer. Device stays the
+  // identity (`distinct_id`).
   static const walletAddress = 'wallet_address';
+  // `Transaction Submitted` dimensions: `confirmation` is a [TxConfirmation]
+  // wire value, `replacement` a speed-up / cancel role (EVM only).
+  static const confirmation = 'confirmation';
+  static const replacement = 'replacement';
 
   // Context props stamped on every event by the service.
   static const platform = 'platform';
@@ -126,6 +140,22 @@ enum TxType {
   placeBid('place_bid');
 
   const TxType(this.wire);
+  final String wire;
+}
+
+/// How far the wallet saw a `Transaction Submitted` transaction go.
+enum TxConfirmation {
+  /// The wallet broadcast it and watched it execute successfully.
+  confirmed('confirmed'),
+
+  /// The wallet broadcast it, but did not see it included: the flow does not
+  /// wait (EVM, browser sends) or the wait ran out. It may still land, or fail.
+  pending('pending'),
+
+  /// Signed and returned to a website, which broadcasts it itself.
+  dapp('dapp');
+
+  const TxConfirmation(this.wire);
   final String wire;
 }
 

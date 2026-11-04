@@ -8,7 +8,7 @@ part 'listing_data.g.dart';
 /// Response of `GET /v0/listingData/{mint}`
 /// (`listingData`).
 ///
-/// The route also returns the full `nftPreview` render, but only the two
+/// The route also returns the full `nftPreview` render, but only the
 /// facts the listing-eligibility gate reads are modelled here — everything
 /// else about the artwork already comes from `/v1/artwork/byMint`.
 @freezed
@@ -29,6 +29,8 @@ sealed class ListingData with _$ListingData {
 @freezed
 sealed class ListingDataNftPreview with _$ListingDataNftPreview {
   const factory ListingDataNftPreview({
+    String? tokenStandard,
+
     /// mallow user for the artwork's `overrideCreator ?? updateAuth`.
     /// Absent when no mallow account owns that address.
     @JsonKey(fromJson: apiUserRefFromAny, toJson: apiUserRefToAny) ApiUserRef? creator,

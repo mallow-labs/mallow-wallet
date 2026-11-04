@@ -56,6 +56,11 @@ abstract class LedgerConnectEvent with _$LedgerConnectEvent {
   /// Toggle every selectable wallet in the path card at [index] (header
   /// "select all").
   const factory LedgerConnectEvent.toggleAccount(int index) = _ToggleAccount;
+
+  /// Name the not-yet-imported account at derivation [index]. A blank [name]
+  /// clears it back to the default `Account NN`.
+  const factory LedgerConnectEvent.renameAccount(int index, String name) =
+      _RenameAccount;
   const factory LedgerConnectEvent.importAccounts() = _ImportAccounts;
 }
 
@@ -84,6 +89,9 @@ abstract class LedgerConnectState with _$LedgerConnectState {
     // Next global account number when the picker opened; the live `Account NN`
     // preview numbers selected cards ascending from here.
     @Default(1) int baseCounter,
+    // Names the user typed in the picker, keyed by derivation index. Applied
+    // when the account is created on import; see [previewAccountNames].
+    @Default({}) Map<int, String> customNames,
   }) = LedgerAccountsLoaded;
   const factory LedgerConnectState.importing() = _Importing;
   const factory LedgerConnectState.imported(List<WalletInfo> wallets) =
@@ -115,6 +123,7 @@ class LedgerConnectBloc extends Bloc<LedgerConnectEvent, LedgerConnectState> {
     on<_ShowMore>(_onShowMore);
     on<_ToggleWallet>(_onToggleWallet);
     on<_ToggleAccount>(_onToggleAccount);
+    on<_RenameAccount>(_onRenameAccount);
     on<_ImportAccounts>(_onImportAccounts);
   }
 
@@ -144,6 +153,9 @@ class LedgerConnectBloc extends Bloc<LedgerConnectEvent, LedgerConnectState> {
   /// "Show more" and the legacy toggle don't drop existing selections; pruned
   /// to the visible keys whenever the cards are rebuilt.
   final _selectedByKey = <String, PickerWallet>{};
+
+  /// Names the user typed in the picker, keyed by derivation index.
+  Map<int, String> _customNames = const {};
   LedgerDevice? _lastDevice;
   List<PickerAccount> _lastAccounts = const [];
 
@@ -379,6 +391,22 @@ class LedgerConnectBloc extends Bloc<LedgerConnectEvent, LedgerConnectState> {
     _emitAccountsLoaded(emit);
   }
 
+  void _onRenameAccount(
+    _RenameAccount event,
+    Emitter<LedgerConnectState> emit,
+  ) {
+    if (state is! LedgerAccountsLoaded) return;
+    final names = renamePickerAccount(
+      accounts: _lastAccounts,
+      customNames: _customNames,
+      index: event.index,
+      name: event.name,
+    );
+    if (names == null) return;
+    _customNames = names;
+    _emitAccountsLoaded(emit);
+  }
+
   /// Re-emit the loaded state with the current visible accounts and selection.
   void _emitAccountsLoaded(Emitter<LedgerConnectState> emit) {
     final device = _lastDevice;
@@ -391,6 +419,7 @@ class LedgerConnectBloc extends Bloc<LedgerConnectEvent, LedgerConnectState> {
         selectedKeys: _selectedKeys,
         chain: _activeChain,
         baseCounter: _baseAccountNumber,
+        customNames: _customNames,
       ),
     );
   }
@@ -664,11 +693,13 @@ class LedgerConnectBloc extends Bloc<LedgerConnectEvent, LedgerConnectState> {
           derivationScheme: scheme,
           chain: selected.chain,
           ledgerDeviceId: device?.id,
+          accountName: _customNames[selected.accountIndex],
         );
         wallets.add(wallet);
       }
 
       _selectedByKey.clear();
+      _customNames = const {};
 
       // Switch the session to the imported account so the drawer/home header
       // shows its name (e.g. "Account 05") instead of the wallet's chain-label
@@ -690,13 +721,16 @@ class LedgerConnectBloc extends Bloc<LedgerConnectEvent, LedgerConnectState> {
       emit(const LedgerConnectState.error('One or more wallets already exist'));
       _trackImportFailed(FailureReason.unknown);
     } on GraphSyncException {
-      // Importing an address a view-only wallet already holds supersedes that
-      // wallet, and pruning it from the recovery graph is the commit point of
-      // its removal. Named here so the user reads the reason instead of the
-      // raw keystore error AppFailure.from would put in the message.
+      // Either superseding a view-only wallet at an address could not prune
+      // it from the recovery graph (nothing added), or a wallet's row landed
+      // and the graph write after it failed — so the copy claims neither; a
+      // retry of the second case is refused as a duplicate. Named here so the
+      // user reads the reason instead of the raw keystore error
+      // AppFailure.from would put in the message.
       emit(
         const LedgerConnectState.error(
-          'Could not update recovery data. Please try again.',
+          'Could not update recovery data. Check your wallet list '
+          'before trying again.',
         ),
       );
       _trackImportFailed(FailureReason.unknown);

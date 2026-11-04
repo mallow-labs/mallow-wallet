@@ -24,6 +24,21 @@ ADB="$ANDROID_SDK_ROOT/platform-tools/adb"
 EMULATOR="$ANDROID_SDK_ROOT/emulator/emulator"
 AVD="${E2E_AVD:-e2e_pixel}"
 DEVICE="${E2E_DEVICE:-emulator-5554}"
+# Emulators only. Teardown of `flutter test integration_test/` force-stops and
+# UNINSTALLS the app, and `--uninstall` runs `adb uninstall` up front: either one
+# on a real phone deletes its wallet keys for good (allowBackup=false, nothing
+# to restore from). So a physical serial is refused, not just discouraged.
+if [[ ! "$DEVICE" =~ ^emulator-[0-9]+$ ]]; then
+  echo "!! E2E_DEVICE=$DEVICE is not an emulator serial (emulator-<port>)." >&2
+  echo "!! The E2E runners uninstall the app, which would wipe a real device's" >&2
+  echo "!! wallets. Point them at an emulator." >&2
+  exit 1
+fi
+# Pins every bare `adb` call below to $DEVICE. Without it, adb picks whichever
+# device it sees: `wait-for-device` returns at once on a plugged-in phone,
+# `getprop sys.boot_completed` reads the phone's "1" before the emulator has
+# registered, and `adb uninstall` then lands on the phone.
+export ANDROID_SERIAL="$DEVICE"
 # EXPORTED, because mock_backend.py reads MOCK_PORT from the environment and
 # falls back to its own 8091 default. Unexported, changing the default here
 # moved the harness (and the --dart-define URLs) to the new port while the
@@ -81,8 +96,10 @@ e2e::boot_emulator() {
   # message, on a lock whose owner exited hours ago.
   "$ADB" start-server >/dev/null 2>&1 9>&- || true
 
-  if "$ADB" devices | grep -q "emulator-.*device$"; then
-    echo "==> Emulator ready: $("$ADB" devices | grep emulator | head -1)"
+  # $DEVICE itself, not any emulator: a different one already running would
+  # pass a looser match and leave `flutter test -d $DEVICE` with nothing.
+  if "$ADB" devices | grep -qE "^${DEVICE}[[:space:]]+device$"; then
+    echo "==> Emulator ready: $DEVICE"
     return
   fi
   echo "==> Booting emulator $AVD (headless), log: $EMULATOR_LOG"
@@ -91,7 +108,10 @@ e2e::boot_emulator() {
   # 9>&- for the same reason as the adb server above, and it matters more here:
   # the emulator is deliberately LEFT RUNNING for the next run to reuse, so an
   # inherited lock fd is never released by anything short of a reboot.
-  nohup "$EMULATOR" -avd "$AVD" -no-window -no-audio -no-boot-anim \
+  # -port makes the serial come up as $DEVICE (emulator-<port>), so the
+  # ANDROID_SERIAL pin above waits for this emulator rather than some other one.
+  nohup "$EMULATOR" -avd "$AVD" -port "${DEVICE#emulator-}" \
+    -no-window -no-audio -no-boot-anim \
     -gpu swiftshader_indirect -no-snapshot -memory 4096 -cores 4 -accel on \
     >"$EMULATOR_LOG" 2>&1 9>&- &
   "$ADB" wait-for-device
@@ -103,7 +123,7 @@ e2e::boot_emulator() {
   [[ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]] || {
     echo "!! emulator failed to boot within timeout"; tail -40 "$EMULATOR_LOG"; exit 1;
   }
-  echo "==> Emulator ready: $("$ADB" devices | grep emulator | head -1)"
+  echo "==> Emulator ready: $DEVICE"
 }
 
 # Always a FRESH mock: a stale one from an aborted run still holds $MOCK_PORT

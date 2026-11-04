@@ -6,7 +6,10 @@ part 'auth_token.g.dart';
 /// Request body for POST /v0/authToken
 @freezed
 abstract class AuthTokenRequest with _$AuthTokenRequest {
-  const factory AuthTokenRequest({required String address}) = _AuthTokenRequest;
+  const factory AuthTokenRequest({
+    required String address,
+    @JsonKey(includeIfNull: false) String? format,
+  }) = _AuthTokenRequest;
 
   factory AuthTokenRequest.fromJson(Map<String, dynamic> json) => _$AuthTokenRequestFromJson(json);
 }
@@ -18,6 +21,7 @@ abstract class AuthTokenVerifyRequest with _$AuthTokenVerifyRequest {
     required String address,
     required String message,
     required String signature,
+    @JsonKey(includeIfNull: false) String? format,
   }) = _AuthTokenVerifyRequest;
 
   factory AuthTokenVerifyRequest.fromJson(Map<String, dynamic> json) =>

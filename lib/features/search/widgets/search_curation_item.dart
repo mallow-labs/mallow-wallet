@@ -62,6 +62,7 @@ class SearchCollectionItem extends StatelessWidget {
                   fontStyle: FontStyle.italic,
                   color: colors.textPrimary,
                 ),
+                maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
               if (collection.curatorUsername != null ||
@@ -147,6 +148,7 @@ class SearchCurationItem extends StatelessWidget {
                   fontStyle: FontStyle.italic,
                   color: colors.textPrimary,
                 ),
+                maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
               if (curation.ownerUsername != null ||

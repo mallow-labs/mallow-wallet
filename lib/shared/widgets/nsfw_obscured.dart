@@ -35,14 +35,26 @@ const double _compactWidthBreakpoint = 200;
 class NsfwObscured extends StatefulWidget {
   const NsfwObscured({
     required this.nsfw,
-    required this.child,
+    required Widget this.child,
     super.key,
     this.contentId,
     this.borderRadius,
-  });
+  }) : builder = null;
+
+  /// Builds the media with the overlay's state, for media a blur cannot cover:
+  /// a native platform view (a web view) composites outside Flutter's
+  /// backdrop filter, so it must not be built at all while `obscured` is true.
+  const NsfwObscured.builder({
+    required this.nsfw,
+    required Widget Function(BuildContext context, bool obscured) this.builder,
+    super.key,
+    this.contentId,
+    this.borderRadius,
+  }) : child = null;
 
   final bool nsfw;
-  final Widget child;
+  final Widget? child;
+  final Widget Function(BuildContext context, bool obscured)? builder;
 
   /// Stable identity of the artwork behind the overlay (e.g. its image URL or
   /// mint account). Hosting grids build tiles via a keyless
@@ -120,12 +132,13 @@ class _NsfwObscuredState extends State<NsfwObscured> {
 
   @override
   Widget build(BuildContext context) {
-    if (!widget.nsfw) return widget.child;
-    final blurred = !_ensurePrefs().showNsfw && !_revealed;
+    final blurred = widget.nsfw && !_ensurePrefs().showNsfw && !_revealed;
+    final child = widget.child ?? widget.builder!(context, blurred);
+    if (!widget.nsfw) return child;
     return Stack(
       fit: StackFit.passthrough,
       children: [
-        widget.child,
+        child,
         if (blurred)
           Positioned.fill(
             child: _NsfwOverlay(

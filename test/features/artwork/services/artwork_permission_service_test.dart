@@ -172,6 +172,106 @@ void main() {
     );
   }
 
+  group('Bubblegum v2 permissions', () {
+    test('unresolved flags block list, transfer, burn and trade', () async {
+      final p = await checkWith(
+        DigitalAsset.fromJson({
+          'id': mint,
+          'interface': 'MplBubblegumV2',
+          'compression': {'compressed': true},
+          'ownership': {'owner': me},
+        }),
+      );
+      expect(p.tokenStandard, TokenStandard.cnftV2);
+      expect(p.canList, isFalse);
+      expect(p.canTransfer, isFalse);
+      expect(p.canBurn, isFalse);
+      expect(p.canTrade, isFalse);
+    });
+    DigitalAsset leaf({
+      int flags = 0,
+      bool nonTransferable = false,
+      bool grouped = false,
+    }) => DigitalAsset.fromJson({
+      'id': mint,
+      'interface': 'MplBubblegumV2',
+      'compression': {'compressed': true, 'flags': flags},
+      'ownership': {'owner': me, 'non_transferable': nonTransferable},
+      if (grouped)
+        'grouping': [
+          {'group_key': 'collection', 'group_value': collectionMint},
+        ],
+    });
+    test(
+      'eligible owner can list, transfer, burn and viewers can trade',
+      () async {
+        final p = await checkWith(leaf());
+        expect(p.canList, isTrue);
+        expect(p.canTransfer, isTrue);
+        expect(p.canBurn, isTrue);
+        expect(p.canTrade, isTrue);
+      },
+    );
+    for (final flags in [1, 2, 4, 7]) {
+      test('flags $flags block transfer, burn and trading', () async {
+        final p = await checkWith(leaf(flags: flags));
+        expect(p.canList, isFalse);
+        expect(p.canTransfer, isFalse);
+        expect(p.canBurn, isFalse);
+        expect(p.canTrade, isFalse);
+      });
+    }
+    test('ownership non_transferable blocks transfer and burn', () async {
+      final p = await checkWith(leaf(nonTransferable: true));
+      expect(p.canTransfer, isFalse);
+      expect(p.canBurn, isFalse);
+      expect(p.canList, isFalse);
+      expect(p.canTrade, isFalse);
+    });
+    test(
+      'collection fetched once; every permanent plugin blocks trading',
+      () async {
+        for (final plugin in [
+          null,
+          'permanent_freeze_delegate',
+          'permanent_transfer_delegate',
+          'permanent_burn_delegate',
+        ]) {
+          final parent = DigitalAsset.fromJson({
+            'id': collectionMint,
+            'interface': 'MplCoreCollection',
+            'plugins': {
+              if (plugin != null)
+                plugin: {
+                  'data': {'frozen': false},
+                },
+            },
+          });
+          final p = await checkWith(leaf(grouped: true), collection: parent);
+          expect(p.canList, plugin == null);
+          expect(p.canTrade, plugin == null);
+          expect(p.canTransfer, isTrue);
+          expect(p.canBurn, isTrue);
+          verify(mockDas.getAsset(collectionMint)).called(1);
+        }
+      },
+    );
+    test('collection failure fails trading closed', () async {
+      when(
+        mockDas.getAsset(collectionMint),
+      ).thenThrow(Exception('unavailable'));
+      final p = await checkWith(leaf(grouped: true));
+      expect(p.canList, isFalse);
+      expect(p.canTrade, isFalse);
+    });
+    test('viewer can make offers without owning an eligible leaf', () async {
+      when(mockWallet.getAddress()).thenAnswer((_) async => other);
+      final p = await checkWith(leaf());
+      expect(p.canList, isFalse);
+      expect(p.canTrade, isTrue);
+    });
+  });
+
   group('canBurn', () {
     test('NFT owner with supply==0 can burn', () async {
       final p = await checkWith(asset());
@@ -757,6 +857,25 @@ void main() {
   // session so an artwork held (or authored) by a non-active session wallet
   // still surfaces its owner actions (the detail screen / edit screen then
   // auto-switches the signer). Delegate arms stay active-only.
+  test('mutable v2 leaf hides Edit even for its update authority', () async {
+    final p = await checkWith(
+      DigitalAsset.fromJson({
+        'id': mint,
+        'interface': 'MplBubblegumV2',
+        'mutable': true,
+        'compression': {'compressed': true, 'flags': 0},
+        'ownership': {'owner': me},
+        'authorities': [
+          {
+            'address': me,
+            'scopes': ['full'],
+          },
+        ],
+      }),
+    );
+    expect(p.canEdit, isFalse);
+  });
+
   group('session widening — owner spans session wallets', () {
     test('non-active owner is gated off without the session set', () async {
       final p = await checkWith(asset(owner: other));

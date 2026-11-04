@@ -15,6 +15,17 @@ import '../services/cast_bloc.dart';
 import '../services/cast_service.dart';
 import 'cast_animated_artwork.dart';
 
+/// Every size on the receiver below is authored for a stage this many logical
+/// pixels tall — what a Chromecast lays its receiver page out at on a TV — and
+/// multiplied by [_receiverScale] on anything taller.
+///
+/// A fixed pixel size looked right on that TV and tiny on a monitor reporting
+/// two or three times the height: the bar shrank to a sliver and the QR became
+/// too small to scan. Scaling the bar, the gutters and the type together keeps
+/// the layout identical in proportion on every screen. The HTML receiver
+/// applies the same rule through its `--ui-scale` variable.
+const double _kReferenceHeight = 720;
+
 const double _kBarHeight = 110;
 
 /// Gutter between the artwork and the stage edges in fit-to-screen and tile
@@ -22,18 +33,21 @@ const double _kBarHeight = 110;
 /// of the bottom bar. Fill-screen is deliberately edge-to-edge — cropping to
 /// cover is the whole point of that mode — and tile takes it vertically only,
 /// because its peek slides are *meant* to run off the left and right edges.
-///
-/// Fixed rather than proportional for the same reason [_kBarHeight] is: the
-/// receiver spans a macOS preview window to a 4K TV and a scaling gutter read
-/// differently on each.
 const double _kMediaPadding = 48;
+
+/// Layout scale for a stage of [size]. Never below 1: a small preview window
+/// keeps the sizes the bar was designed at rather than shrinking past legible.
+double _receiverScale(Size size) {
+  final scale = size.shortestSide / _kReferenceHeight;
+  return scale.isFinite && scale > 1 ? scale : 1;
+}
 
 /// Renders a single [CastQueueItem] with an optional QR + caption overlay.
 ///
 /// Self-contained: takes everything it needs as constructor args so it can
 /// run inside the main app (macOS local), inside a secondary FlutterEngine
-/// mounted on an external UIScreen (iOS AirPlay, Phase 5), or be mirrored
-/// 1:1 by the HTML cast receiver (Chromecast, Phase 4).
+/// mounted on an external UIScreen (iOS AirPlay), or be mirrored
+/// 1:1 by the HTML cast receiver (Chromecast).
 class CastReceiverView extends StatelessWidget {
   const CastReceiverView({
     required this.item,
@@ -51,19 +65,24 @@ class CastReceiverView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final media = _MediaArea(item: item, overlay: overlay);
     // Cast receiver renders on TV black background — intentional literal.
     // Subsequent black/white usages in this file inherit the same rationale.
     return ColoredBox(
       color: Colors.black,
-      child: _showBar
-          ? Column(
-              children: [
-                Expanded(child: media),
-                _BottomBar(overlay: overlay),
-              ],
-            )
-          : media,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final scale = _receiverScale(constraints.biggest);
+          final media = _MediaArea(item: item, overlay: overlay, scale: scale);
+          return _showBar
+              ? Column(
+                  children: [
+                    Expanded(child: media),
+                    _BottomBar(overlay: overlay, scale: scale),
+                  ],
+                )
+              : media;
+        },
+      ),
     );
   }
 }
@@ -110,10 +129,15 @@ class LocalCastReceiverOverlay extends StatelessWidget {
 /// Image area above the bottom bar. Picks a renderer based on
 /// [CastDisplayType] so fit/fill/tile is consistent with the HTML receiver.
 class _MediaArea extends StatelessWidget {
-  const _MediaArea({required this.item, required this.overlay});
+  const _MediaArea({
+    required this.item,
+    required this.overlay,
+    required this.scale,
+  });
 
   final CastQueueItem item;
   final CastOverlayConfig overlay;
+  final double scale;
 
   @override
   Widget build(BuildContext context) {
@@ -121,9 +145,10 @@ class _MediaArea extends StatelessWidget {
     // letterbox in fit-to-screen, shows through carousel gaps in tile, and
     // sits behind the cover-fit artwork in fill-screen (invisible until the
     // image loads — at which point shimmer hands off to the cover image).
+    final gutter = _kMediaPadding * scale;
     final foreground = switch (overlay.displayType) {
       CastDisplayType.fitToScreen => Padding(
-        padding: const EdgeInsets.all(_kMediaPadding),
+        padding: EdgeInsets.all(gutter),
         child: Center(
           child: CastAnimatedArtwork(item: item, fit: BoxFit.contain),
         ),
@@ -132,11 +157,12 @@ class _MediaArea extends StatelessWidget {
       CastDisplayType.tile => Padding(
         // Vertical only — see [_kMediaPadding]. The carousel clips to this
         // box, so an inset here is also what keeps the peeks off the bar.
-        padding: const EdgeInsets.symmetric(vertical: _kMediaPadding),
+        padding: EdgeInsets.symmetric(vertical: gutter),
         child: _TileCarousel(
           prevUrl: overlay.prevImageUrl,
           currUrl: item.imageUrl,
           nextUrl: overlay.nextImageUrl,
+          scale: scale,
         ),
       ),
     };
@@ -230,9 +256,10 @@ class _BlurredBackgroundState extends State<_BlurredBackground> {
 /// Fully opaque black bar pinned to the bottom: caption on the left,
 /// QR card on the right, both vertically centred.
 class _BottomBar extends StatelessWidget {
-  const _BottomBar({required this.overlay});
+  const _BottomBar({required this.overlay, required this.scale});
 
   final CastOverlayConfig overlay;
+  final double scale;
 
   @override
   Widget build(BuildContext context) {
@@ -241,14 +268,16 @@ class _BottomBar extends StatelessWidget {
         (overlay.title != null || overlay.subtitle != null);
     final hasQr = overlay.showQr && overlay.qrUrl != null;
     return Container(
-      // Fixed height — the receiver renders on screens that range from a
-      // macOS preview window to a 4K TV, and a scaling bar was producing
-      // visibly different layouts across them. 110 fits the 84px QR with
-      // 12px vertical padding and still leaves room for two-line captions
-      // at the type sizes below; every one of those numbers moves together.
-      height: _kBarHeight,
+      // 110 fits the 84px QR with 12px vertical padding and still leaves room
+      // for two-line captions at the type sizes below. Every one of those
+      // numbers is multiplied by the same [scale], so the bar keeps its
+      // proportions on any screen; scaling one without the others overflows.
+      height: _kBarHeight * scale,
       color: Colors.black,
-      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
+      padding: EdgeInsets.symmetric(
+        horizontal: 32 * scale,
+        vertical: 12 * scale,
+      ),
       // 🛑 The bar is a fixed-height surface, so it cannot also honour the
       // phone's accessibility text scale: two lines of 24px title plus a 14px
       // subtitle need 80 of the 86px available at 1.0, and the hosts clamp
@@ -266,13 +295,14 @@ class _BottomBar extends StatelessWidget {
                 child: _Caption(
                   title: overlay.title,
                   subtitle: overlay.subtitle,
+                  scale: scale,
                 ),
               )
             else
               const Spacer(),
             if (hasQr) ...[
-              const SizedBox(width: 24),
-              _QrCard(url: overlay.qrUrl!),
+              SizedBox(width: 24 * scale),
+              _QrCard(url: overlay.qrUrl!, scale: scale),
             ],
           ],
         ),
@@ -282,10 +312,11 @@ class _BottomBar extends StatelessWidget {
 }
 
 class _Caption extends StatelessWidget {
-  const _Caption({this.title, this.subtitle});
+  const _Caption({required this.scale, this.title, this.subtitle});
 
   final String? title;
   final String? subtitle;
+  final double scale;
 
   @override
   Widget build(BuildContext context) {
@@ -303,7 +334,7 @@ class _Caption extends StatelessWidget {
             style: MallowTheme.editorialHero.copyWith(
               color: Colors.white,
               fontWeight: FontWeight.w500,
-              fontSize: 24,
+              fontSize: 24 * scale,
               height: 1.2,
             ),
             maxLines: 2,
@@ -311,12 +342,12 @@ class _Caption extends StatelessWidget {
           ),
         if (subtitle != null && subtitle!.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.only(top: 4),
+            padding: EdgeInsets.only(top: 4 * scale),
             child: Text(
               subtitle!,
               style: TextStyle(
                 color: Colors.white.withValues(alpha: 0.85),
-                fontSize: 14,
+                fontSize: 14 * scale,
                 height: 1.3,
               ),
               maxLines: 1,
@@ -329,9 +360,10 @@ class _Caption extends StatelessWidget {
 }
 
 class _QrCard extends StatelessWidget {
-  const _QrCard({required this.url});
+  const _QrCard({required this.url, required this.scale});
 
   final String url;
+  final double scale;
 
   static const double _size = 84;
   // Logo pad is sized so the icon (1.26:1 aspect, letterboxed vertically by
@@ -344,8 +376,8 @@ class _QrCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: _size,
-      height: _size,
+      width: _size * scale,
+      height: _size * scale,
       child: Stack(
         alignment: Alignment.center,
         children: [
@@ -370,10 +402,10 @@ class _QrCard extends StatelessWidget {
           // QR modules — the bar behind is also black, so it visually
           // continues the bar color.
           Container(
-            width: _logoSize,
-            height: _logoSize,
+            width: _logoSize * scale,
+            height: _logoSize * scale,
             color: Colors.black,
-            padding: const EdgeInsets.all(_logoPadding),
+            padding: EdgeInsets.all(_logoPadding * scale),
             child: SvgPicture.asset(
               'assets/icons/mallow_icon.svg',
               colorFilter: const ColorFilter.mode(
@@ -396,16 +428,29 @@ class _QrCard extends StatelessWidget {
 /// side of the centred current artwork. Detects forward / backward chains
 /// from the URL triple changes and animates the transform with
 /// [Curves.easeOutCubic] over [_duration]; non-adjacent jumps snap.
+///
+/// Each slide's artwork is aligned toward the centred one: right-aligned in
+/// its slot left of centre, left-aligned right of it, centred in the middle.
+/// The slots are a fixed fraction of the width, and contain-fitted art is
+/// usually narrower than its slot — a square artwork on a 16:9 screen fills
+/// barely two-thirds of it. Centred in that slot, the art sat entirely inside
+/// the part of the slot that is off screen, and the peeks showed nothing but
+/// blurred background. The alignment moves on the same curve as the row, so
+/// a slide glides from edge-aligned to centred as it takes the middle.
 class _TileCarousel extends StatefulWidget {
   const _TileCarousel({
     required this.prevUrl,
     required this.currUrl,
     required this.nextUrl,
+    required this.scale,
   });
 
   final String? prevUrl;
   final String currUrl;
   final String? nextUrl;
+
+  /// See [_receiverScale]; multiplies the gap between slides.
+  final double scale;
 
   @override
   State<_TileCarousel> createState() => _TileCarouselState();
@@ -531,42 +576,21 @@ class _TileCarouselState extends State<_TileCarousel>
         builder: (context, constraints) {
           final w = constraints.maxWidth;
           final h = constraints.maxHeight;
+          final gap = _gap * widget.scale;
           final sw = w * _slideWidthFraction;
-          final step = sw + _gap;
+          final step = sw + gap;
           final startTx = w / 2 - _startIndex * step - sw / 2;
           final endTx = w / 2 - _endIndex * step - sw / 2;
-          final rowWidth = _slides.length * sw + (_slides.length - 1) * _gap;
-
-          // The slide Row (and its images) doesn't depend on the
-          // animation value — only its horizontal offset does. Build it once
-          // and pass it as the cached `child` so each frame rebuilds only the
-          // Positioned wrapper, not every slide.
+          final rowWidth = _slides.length * sw + (_slides.length - 1) * gap;
           final keys = _slideKeys();
-          final row = Row(
-            children: [
-              for (var i = 0; i < _slides.length; i++) ...[
-                SizedBox(
-                  key: keys[i],
-                  width: sw,
-                  // Full height of the padded box: the gutter is now
-                  // [_kMediaPadding] on the media area, so a second inset
-                  // here would double it.
-                  height: h,
-                  child: _SlideContent(
-                    url: _slides[i],
-                    isCurrent: _slides[i] == widget.currUrl,
-                  ),
-                ),
-                if (i < _slides.length - 1) const SizedBox(width: _gap),
-              ],
-            ],
-          );
 
           return AnimatedBuilder(
             animation: _ac,
-            builder: (context, child) {
+            builder: (context, _) {
               final t = Curves.easeOutCubic.transform(_ac.value);
               final tx = startTx + (endTx - startTx) * t;
+              // Fractional slot index sitting at the centre on this frame.
+              final centre = _startIndex + (_endIndex - _startIndex) * t;
               return Stack(
                 children: [
                   Positioned(
@@ -574,12 +598,33 @@ class _TileCarouselState extends State<_TileCarousel>
                     top: 0,
                     height: h,
                     width: rowWidth,
-                    child: child!,
+                    child: Row(
+                      children: [
+                        for (var i = 0; i < _slides.length; i++) ...[
+                          SizedBox(
+                            key: keys[i],
+                            width: sw,
+                            // Full height of the padded box: the gutter is
+                            // [_kMediaPadding] on the media area, so a second
+                            // inset here would double it.
+                            height: h,
+                            child: _SlideContent(
+                              url: _slides[i],
+                              isCurrent: _slides[i] == widget.currUrl,
+                              alignment: Alignment(
+                                -(i - centre).clamp(-1.0, 1.0),
+                                0,
+                              ),
+                            ),
+                          ),
+                          if (i < _slides.length - 1) SizedBox(width: gap),
+                        ],
+                      ],
+                    ),
                   ),
                 ],
               );
             },
-            child: row,
           );
         },
       ),
@@ -588,7 +633,11 @@ class _TileCarouselState extends State<_TileCarousel>
 }
 
 class _SlideContent extends StatefulWidget {
-  const _SlideContent({required this.url, required this.isCurrent});
+  const _SlideContent({
+    required this.url,
+    required this.isCurrent,
+    required this.alignment,
+  });
 
   /// Raw source URL — [CastProgressiveArtwork] resolves the poster and the
   /// full-resolution original from it.
@@ -600,6 +649,10 @@ class _SlideContent extends StatefulWidget {
   /// originals per slide advance is bandwidth the carousel doesn't need. The
   /// HTML receiver draws the same line (`fullUrlByPoster`).
   final bool isCurrent;
+
+  /// Where the contain-fitted artwork sits inside its slot. See
+  /// [_TileCarousel] for why the peeks lean toward the centre.
+  final Alignment alignment;
 
   @override
   State<_SlideContent> createState() => _SlideContentState();
@@ -653,6 +706,7 @@ class _SlideContentState extends State<_SlideContent> {
     return CastProgressiveArtwork(
       imageUrl: u,
       fit: BoxFit.contain,
+      alignment: widget.alignment,
       fullUrl: _fullUrl,
     );
   }

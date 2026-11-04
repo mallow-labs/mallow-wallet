@@ -4,8 +4,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../../core/data/mallow_tokens.dart';
-import '../../../core/services/token_price_service.dart';
-import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/utils/balance_check.dart';
 import '../../../shared/utils/price_format.dart';
@@ -15,6 +13,7 @@ import '../../../shared/widgets/mallow_button.dart';
 import '../../../shared/widgets/mallow_pill_field.dart';
 import '../../../shared/widgets/mallow_sheet.dart';
 import '../../../shared/widgets/sheet_drag_handle.dart';
+import '../../../shared/widgets/usd_estimate.dart';
 import '../../portfolio/services/token_balance_bloc.dart';
 import '../models/market_price.dart';
 
@@ -163,11 +162,15 @@ class _SetPriceSheetState extends State<SetPriceSheet> {
   @override
   Widget build(BuildContext context) {
     final colors = context.mallowColors;
-    final priceService = sl<TokenPriceService>();
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
       child: Container(
-        padding: const EdgeInsets.all(MallowTheme.spacing20),
+        padding: const EdgeInsets.fromLTRB(
+          MallowTheme.spacing20,
+          0,
+          MallowTheme.spacing20,
+          MallowTheme.spacing20,
+        ),
         decoration: BoxDecoration(
           color: colors.bgSurface,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
@@ -214,24 +217,11 @@ class _SetPriceSheetState extends State<SetPriceSheet> {
                 size: 20,
                 enlargeChainGlyph: true,
               ),
-              suffix: ValueListenableBuilder<Map<String, double>>(
-                valueListenable: priceService.prices,
-                builder: (context, _, _) {
-                  final amount = _displayAmount;
-                  final usd = amount == null
-                      ? null
-                      : priceService.usdValueOfRaw(
-                          _token.displayToRaw(amount),
-                          _token.mint,
-                        );
-                  if (usd == null) return const SizedBox.shrink();
-                  return Text(
-                    '~\$${usd.toStringAsFixed(2)}',
-                    style: MallowTheme.uiCaption.copyWith(
-                      color: colors.textSecondary,
-                    ),
-                  );
-                },
+              suffix: UsdEstimate(
+                rawAmount: _displayAmount == null
+                    ? null
+                    : _token.displayToRaw(_displayAmount!),
+                mint: _token.mint,
               ),
             ),
             BlocBuilder<TokenBalanceBloc, TokenBalanceState>(

@@ -1,0 +1,590 @@
+{
+  "_source": "Generated with @taquito/local-forging 25.0.0 and confirmed byte-for-byte against a Tezos mainnet node (protocol PsUshuai) via /helpers/forge/operations. annotatedDefaultUnit is node-only: Taquito drops any Unit on default, the protocol drops only the exact bytes 030b. Regenerate only by re-confirming against a node; never edit a hex to match code.",
+  "branch": "BMXTnznPZDFf3TbpmdXptcTqcEuTHiCTgjxZaWif3YgVVPpp4Nq",
+  "vectors": {
+    "micheline": {
+      "contents": [
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12345",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "transaction",
+          "amount": "0",
+          "destination": "KT1EctCuorV2NfVb1XTQgvzJ88MQtWP8cMMv",
+          "parameters": {
+            "entrypoint": "mint",
+            "value": [
+              {
+                "prim": "Pair",
+                "args": [
+                  {
+                    "int": "-5"
+                  },
+                  {
+                    "bytes": "deadbeef"
+                  },
+                  {
+                    "string": "hello"
+                  }
+                ]
+              },
+              {
+                "prim": "Unit",
+                "annots": [
+                  "%u"
+                ]
+              },
+              {
+                "prim": "Some",
+                "args": [
+                  {
+                    "int": "-1000000"
+                  }
+                ],
+                "annots": [
+                  "@x"
+                ]
+              },
+              {
+                "prim": "Pair",
+                "args": [
+                  {
+                    "int": "0"
+                  },
+                  {
+                    "int": "64"
+                  }
+                ],
+                "annots": [
+                  "%a",
+                  "%b"
+                ]
+              },
+              {
+                "prim": "Pair",
+                "args": [
+                  {
+                    "int": "1"
+                  },
+                  {
+                    "int": "2"
+                  },
+                  {
+                    "int": "3"
+                  },
+                  {
+                    "int": "4"
+                  }
+                ],
+                "annots": [
+                  ":t"
+                ]
+              },
+              [
+                [
+                  {
+                    "int": "1"
+                  }
+                ],
+                []
+              ],
+              {
+                "bytes": ""
+              },
+              {
+                "string": ""
+              },
+              {
+                "int": "-1180591620717411303424"
+              },
+              {
+                "int": "-64"
+              },
+              {
+                "int": "63"
+              },
+              {
+                "prim": "Left",
+                "args": [
+                  {
+                    "prim": "True"
+                  }
+                ]
+              },
+              {
+                "prim": "Right",
+                "args": [
+                  {
+                    "prim": "False"
+                  }
+                ]
+              },
+              {
+                "prim": "None"
+              },
+              [
+                {
+                  "prim": "Elt",
+                  "args": [
+                    {
+                      "string": "k"
+                    },
+                    {
+                      "bytes": "00ff"
+                    }
+                  ]
+                }
+              ],
+              [
+                {
+                  "prim": "DROP"
+                },
+                {
+                  "prim": "PUSH",
+                  "args": [
+                    {
+                      "prim": "nat"
+                    },
+                    {
+                      "int": "1"
+                    }
+                  ]
+                },
+                {
+                  "prim": "IF_LEFT",
+                  "args": [
+                    [],
+                    [
+                      {
+                        "prim": "FAILWITH"
+                      }
+                    ]
+                  ]
+                }
+              ]
+            ]
+          }
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209b960e852810200014237213a07fff34d24c914013d87484efcc5875c00ffff046d696e74000000c102000000bc09070000001500450a00000004deadbeef010000000568656c6c6f00000000040b000000022575060900c0897a000000024078080700000080010000000525612025620907000000080001000200030004000000023a74020000000c0200000002000102000000000a00000000010000000000c08080808080808080800200c001003f0505030a050803030306020000000f070401000000016b0a0000000200ff02000000160320074303620001072e020000000002000000020327"
+    },
+    "delegationSet": {
+      "contents": [
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12345",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "delegation",
+          "delegate": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL"
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86e005b86ad5d98e94ed73ea969f37fc157c57dea257cd209b960e8528102ff005b86ad5d98e94ed73ea969f37fc157c57dea257c"
+    },
+    "delegationTz2": {
+      "contents": [
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12345",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "delegation",
+          "delegate": "tz28bJkN3QYiZmPUG5by6YDPaxpsiYEU2khT"
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86e005b86ad5d98e94ed73ea969f37fc157c57dea257cd209b960e8528102ff01030a11181f262d343b424950575e656c737a8188"
+    },
+    "delegationTz3": {
+      "contents": [
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12345",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "delegation",
+          "delegate": "tz3Lc7hgwGgFxPqmgLgE6VfmQKiPVNLSh4NE"
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86e005b86ad5d98e94ed73ea969f37fc157c57dea257cd209b960e8528102ff02030a11181f262d343b424950575e656c737a8188"
+    },
+    "delegationRemove": {
+      "contents": [
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12345",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "delegation"
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86e005b86ad5d98e94ed73ea969f37fc157c57dea257cd209b960e852810200"
+    },
+    "stake": {
+      "contents": [
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12345",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "transaction",
+          "amount": "1000000",
+          "destination": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "parameters": {
+            "entrypoint": "stake",
+            "value": {
+              "prim": "Unit"
+            }
+          }
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209b960e8528102c0843d00005b86ad5d98e94ed73ea969f37fc157c57dea257cff0600000002030b"
+    },
+    "unstake": {
+      "contents": [
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12345",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "transaction",
+          "amount": "500000",
+          "destination": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "parameters": {
+            "entrypoint": "unstake",
+            "value": {
+              "prim": "Unit"
+            }
+          }
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209b960e8528102a0c21e00005b86ad5d98e94ed73ea969f37fc157c57dea257cff0700000002030b"
+    },
+    "finalizeUnstake": {
+      "contents": [
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12345",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "transaction",
+          "amount": "0",
+          "destination": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "parameters": {
+            "entrypoint": "finalize_unstake",
+            "value": {
+              "prim": "Unit"
+            }
+          }
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209b960e85281020000005b86ad5d98e94ed73ea969f37fc157c57dea257cff0800000002030b"
+    },
+    "setDelegateParameters": {
+      "contents": [
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12345",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "transaction",
+          "amount": "0",
+          "destination": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "parameters": {
+            "entrypoint": "set_delegate_parameters",
+            "value": {
+              "prim": "Pair",
+              "args": [
+                {
+                  "int": "4000000"
+                },
+                {
+                  "prim": "Pair",
+                  "args": [
+                    {
+                      "int": "1000000"
+                    },
+                    {
+                      "prim": "Unit"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209b960e85281020000005b86ad5d98e94ed73ea969f37fc157c57dea257cff090000000f07070080a4e80307070080897a030b"
+    },
+    "builtinEntrypoints": {
+      "contents": [
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12345",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "transaction",
+          "amount": "0",
+          "destination": "KT1EctCuorV2NfVb1XTQgvzJ88MQtWP8cMMv",
+          "parameters": {
+            "entrypoint": "root",
+            "value": {
+              "prim": "Unit"
+            }
+          }
+        },
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12346",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "transaction",
+          "amount": "0",
+          "destination": "KT1EctCuorV2NfVb1XTQgvzJ88MQtWP8cMMv",
+          "parameters": {
+            "entrypoint": "do",
+            "value": {
+              "prim": "Unit"
+            }
+          }
+        },
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12347",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "transaction",
+          "amount": "0",
+          "destination": "KT1EctCuorV2NfVb1XTQgvzJ88MQtWP8cMMv",
+          "parameters": {
+            "entrypoint": "set_delegate",
+            "value": {
+              "prim": "Unit"
+            }
+          }
+        },
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12348",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "transaction",
+          "amount": "0",
+          "destination": "KT1EctCuorV2NfVb1XTQgvzJ88MQtWP8cMMv",
+          "parameters": {
+            "entrypoint": "remove_delegate",
+            "value": {
+              "prim": "Unit"
+            }
+          }
+        },
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12349",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "transaction",
+          "amount": "0",
+          "destination": "KT1EctCuorV2NfVb1XTQgvzJ88MQtWP8cMMv",
+          "parameters": {
+            "entrypoint": "deposit",
+            "value": {
+              "prim": "Unit"
+            }
+          }
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209b960e852810200014237213a07fff34d24c914013d87484efcc5875c00ff0100000002030b6c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209ba60e852810200014237213a07fff34d24c914013d87484efcc5875c00ff0200000002030b6c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209bb60e852810200014237213a07fff34d24c914013d87484efcc5875c00ff0300000002030b6c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209bc60e852810200014237213a07fff34d24c914013d87484efcc5875c00ff0400000002030b6c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209bd60e852810200014237213a07fff34d24c914013d87484efcc5875c00ff0500000002030b"
+    },
+    "defaultUnit": {
+      "contents": [
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12345",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "transaction",
+          "amount": "1",
+          "destination": "KT1EctCuorV2NfVb1XTQgvzJ88MQtWP8cMMv",
+          "parameters": {
+            "entrypoint": "default",
+            "value": {
+              "prim": "Unit"
+            }
+          }
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209b960e852810201014237213a07fff34d24c914013d87484efcc5875c0000"
+    },
+    "defaultInt": {
+      "contents": [
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12345",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "transaction",
+          "amount": "0",
+          "destination": "KT1EctCuorV2NfVb1XTQgvzJ88MQtWP8cMMv",
+          "parameters": {
+            "entrypoint": "default",
+            "value": {
+              "int": "5"
+            }
+          }
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209b960e852810200014237213a07fff34d24c914013d87484efcc5875c00ff00000000020005"
+    },
+    "tz2tz3Destinations": {
+      "contents": [
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12345",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "transaction",
+          "amount": "7",
+          "destination": "tz28bJkN3QYiZmPUG5by6YDPaxpsiYEU2khT"
+        },
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12346",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "transaction",
+          "amount": "8",
+          "destination": "tz3Lc7hgwGgFxPqmgLgE6VfmQKiPVNLSh4NE"
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209b960e8528102070001030a11181f262d343b424950575e656c737a8188006c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209ba60e8528102080002030a11181f262d343b424950575e656c737a818800"
+    },
+    "bigScalars": {
+      "contents": [
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "9223372036854775807",
+          "counter": "9223372036854775807",
+          "gas_limit": "1040000",
+          "storage_limit": "60000",
+          "kind": "transaction",
+          "amount": "9223372036854775807",
+          "destination": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL"
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86c005b86ad5d98e94ed73ea969f37fc157c57dea257cffffffffffffffff7fffffffffffffffff7f80bd3fe0d403ffffffffffffffff7f00005b86ad5d98e94ed73ea969f37fc157c57dea257c00"
+    },
+    "revealDelegateTransfer": {
+      "contents": [
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "374",
+          "counter": "12345",
+          "gas_limit": "1100",
+          "storage_limit": "0",
+          "kind": "reveal",
+          "public_key": "edpkuRXPQpuQyDemXE59dyYA1Eu5T94waiiL5PjcWDSkkw86ZvxR2j"
+        },
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12346",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "delegation",
+          "delegate": "tz3Lc7hgwGgFxPqmgLgE6VfmQKiPVNLSh4NE"
+        },
+        {
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12347",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "kind": "transaction",
+          "amount": "0",
+          "destination": "KT1EctCuorV2NfVb1XTQgvzJ88MQtWP8cMMv",
+          "parameters": {
+            "entrypoint": "transfer",
+            "value": [
+              {
+                "prim": "Pair",
+                "args": [
+                  {
+                    "string": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL"
+                  },
+                  []
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86b005b86ad5d98e94ed73ea969f37fc157c57dea257cf602b960cc08000066dc7517defa76d4355280505068b59172a568cacbd46c1f5f91a247c29426bc006e005b86ad5d98e94ed73ea969f37fc157c57dea257cd209ba60e8528102ff02030a11181f262d343b424950575e656c737a81886c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209bb60e852810200014237213a07fff34d24c914013d87484efcc5875c00ffff087472616e7366657200000035020000003007070100000024747a315479795837553672367442317553533461556e664b5839726a3379394e4345564c0200000000"
+    },
+    "annotatedDefaultUnit": {
+      "contents": [
+        {
+          "kind": "transaction",
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12345",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "amount": "0",
+          "destination": "KT1EctCuorV2NfVb1XTQgvzJ88MQtWP8cMMv",
+          "parameters": {
+            "entrypoint": "default",
+            "value": {
+              "prim": "Unit",
+              "annots": [
+                "%x"
+              ]
+            }
+          }
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209b960e852810200014237213a07fff34d24c914013d87484efcc5875c00ff0000000008040b000000022578"
+    },
+    "defaultUnitEmptyArgs": {
+      "contents": [
+        {
+          "kind": "transaction",
+          "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+          "fee": "1234",
+          "counter": "12345",
+          "gas_limit": "10600",
+          "storage_limit": "257",
+          "amount": "0",
+          "destination": "KT1EctCuorV2NfVb1XTQgvzJ88MQtWP8cMMv",
+          "parameters": {
+            "entrypoint": "default",
+            "value": {
+              "prim": "Unit",
+              "args": [],
+              "annots": []
+            }
+          }
+        }
+      ],
+      "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86c005b86ad5d98e94ed73ea969f37fc157c57dea257cd209b960e852810200014237213a07fff34d24c914013d87484efcc5875c0000"
+    }
+  }
+}

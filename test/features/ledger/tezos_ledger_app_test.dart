@@ -96,19 +96,22 @@ void main() {
       expect(await op.read(ack), isEmpty);
     });
 
-    test('final packet reads the 64-byte signature, ignoring the SW', () async {
-      final sig = List<int>.generate(64, (i) => i + 1);
-      // Device returns signature followed by the 0x9000 status word.
-      final reader = ByteDataReader()
-        ..add(Uint8List.fromList([...sig, 0x90, 0x00]));
-      final op = TezosSignOperation(
-        p1: TezosApdu.p1Message | TezosApdu.p1Last,
-        payload: Uint8List(0),
-        expectSignature: true,
-      );
+    test(
+      'final packet reads the 64-byte signature and verifies the SW',
+      () async {
+        final sig = List<int>.generate(64, (i) => i + 1);
+        // Device returns signature followed by the 0x9000 status word.
+        final reader = ByteDataReader()
+          ..add(Uint8List.fromList([...sig, 0x90, 0x00]));
+        final op = TezosSignOperation(
+          p1: TezosApdu.p1Message | TezosApdu.p1Last,
+          payload: Uint8List(0),
+          expectSignature: true,
+        );
 
-      expect(await op.read(reader), sig);
-    });
+        expect(await op.read(reader), sig);
+      },
+    );
 
     test('final packet throws on a rejection status word', () async {
       // 0x6985 = user rejected on device.
@@ -142,6 +145,41 @@ void main() {
       expect(() => op.read(reader), throwsA(isA<LedgerDeviceException>()));
     });
   });
+
+  test(
+    'Given an error after signature bytes, the device response is refused',
+    () async {
+      final op = TezosSignOperation(
+        p1: 0x81,
+        payload: Uint8List(0),
+        expectSignature: true,
+      );
+      final reader = ByteDataReader()
+        ..add(Uint8List.fromList([...List<int>.filled(64, 1), 0x69, 0x85]));
+      await expectLater(
+        op.read(reader),
+        throwsA(
+          isA<LedgerDeviceException>().having(
+            (e) => e.errorCode,
+            'code',
+            0x6985,
+          ),
+        ),
+      );
+    },
+  );
+  test(
+    'Given an oversized signature reply, extra bytes are never silently discarded',
+    () async {
+      final op = TezosSignOperation(
+        p1: 0x81,
+        payload: Uint8List(0),
+        expectSignature: true,
+      );
+      final reader = ByteDataReader()..add(Uint8List(67));
+      await expectLater(op.read(reader), throwsA(isA<LedgerDeviceException>()));
+    },
+  );
 
   group('MultiChainDerivation.tezosAddressFromPublicKey', () {
     // The Ledger device returns the same 32-byte Ed25519 key (after tag

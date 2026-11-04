@@ -8,6 +8,7 @@ import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/widgets/mallow_header.dart';
 import '../../../shared/widgets/menu_row.dart';
 import '../../seed_vault/widgets/seed_vault_entry.dart';
+import 'hardware_wallet_chooser_screen.dart';
 
 import '../../../core/models/account.dart';
 
@@ -71,9 +72,7 @@ class AddWalletScreen extends StatelessWidget {
                   MenuRow(
                     icon: 'assets/icons/settings.svg',
                     label: 'Connect hardware wallet',
-                    onTap: () {
-                      context.push(AppRoutes.ledgerScan);
-                    },
+                    onTap: () => openHardwareWalletImport(context),
                   ),
                   // Renders nothing unless this device actually has Seed Vault,
                   // so a plain Android phone and iOS show no Seed Vault surface

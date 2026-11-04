@@ -1,9 +1,13 @@
 import 'package:flutter/foundation.dart';
 import 'package:injectable/injectable.dart';
 
+import '../../../core/analytics/analytics_events.dart';
+import '../../../core/analytics/transaction_ledger.dart';
+import '../../../core/config/remote_config.dart';
 import '../../../core/crypto/tezos_forge.dart';
 import '../../../core/crypto/wallet_manager.dart';
 import '../../../core/network/tezos_rpc_service.dart';
+import '../../../shared/utils/chain.dart';
 import '../../../shared/utils/tezos_address.dart';
 
 /// The FA token standard a `KT1…` contract implements, which decides the shape
@@ -267,10 +271,7 @@ class TezosTransferService {
     // The operation is already injected and a timeout does not undo it, so
     // this is indeterminate rather than failed — hence a distinct exception
     // the surface renders without a retry affordance.
-    if (!await _rpc.waitForConfirmation(opHash)) {
-      throw TezosOperationUnconfirmedException(opHash);
-    }
-    return opHash;
+    return _awaitInclusion(opHash, source, AppFlow.nativeSend);
   }
 
   /// Forge → sign → inject an FA1.2 / FA2 token transfer, returning the
@@ -303,9 +304,37 @@ class TezosTransferService {
     final signed = await _walletManager.signTezosOperation(walletId, forgedHex);
     onBroadcasting?.call();
     final opHash = await _rpc.injectOperation(signed.signedOperationHex);
-    if (!await _rpc.waitForConfirmation(opHash)) {
+    return _awaitInclusion(opHash, source, AppFlow.tokenSend);
+  }
+
+  /// Wait for [opHash] to be included, reporting it to the analytics
+  /// transaction ledger either way: an inclusion timeout leaves an injected
+  /// operation that may still land. Throws
+  /// [TezosOperationUnconfirmedException] on that timeout.
+  Future<String> _awaitInclusion(
+    String opHash,
+    String source,
+    AppFlow flow,
+  ) async {
+    void record(TxConfirmation confirmation) => recordSubmittedTransaction(
+      chain: Chain.tezos,
+      flow: flow,
+      signature: opHash,
+      walletAddress: () => source,
+      confirmation: confirmation,
+    );
+    final bool included;
+    try {
+      included = await _rpc.waitForConfirmation(opHash);
+    } catch (_) {
+      record(TxConfirmation.pending);
+      rethrow;
+    }
+    if (!included) {
+      record(TxConfirmation.pending);
       throw TezosOperationUnconfirmedException(opHash);
     }
+    record(TxConfirmation.confirmed);
     return opHash;
   }
 

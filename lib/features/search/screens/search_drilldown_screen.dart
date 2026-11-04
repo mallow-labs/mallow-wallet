@@ -19,22 +19,23 @@ import '../../profile/widgets/profile_filters_sheet.dart';
 import '../models/search_models.dart';
 import '../services/search_bloc.dart';
 
-/// Opens the drilldown screen for [filterType].
+/// Opens the drilldown screen for [target].
 ///
-/// Pushed on the caller's navigator — the one hosting the search sheet — so the
-/// sheet stays alive underneath and back returns to the search landing page
-/// with its recent searches intact.
-void openSearchDrilldown(BuildContext context, SearchFilterType filterType) {
+/// Pushed on the caller's navigator — the one hosting the search sheet, or the
+/// artwork page's — so the caller stays alive underneath and back returns to it
+/// as it was left (the search landing page keeps its recent searches intact).
+void openSearchDrilldown(BuildContext context, ArtworkDrilldownTarget target) {
   Navigator.of(context).push(
     MaterialPageRoute<void>(
-      builder: (_) => SearchDrilldownScreen(filterType: filterType),
+      builder: (_) => SearchDrilldownScreen(target: target),
     ),
   );
 }
 
-/// A full-screen artwork drilldown pushed from the search landing page: the
+/// A full-screen artwork drilldown pushed from the search landing page — the
 /// listing-type, browse and category buttons whose results are artworks (see
-/// [SearchFilterType.isArtworkBrowse]).
+/// [SearchFilterType.isArtworkBrowse]) — or from the category and tag chips on
+/// the artwork page.
 ///
 /// Laid out like [PortfolioGroupScreen] minus the parts a filter has no
 /// identity for: a back / label header bar with no kebab, then the filter /
@@ -42,24 +43,23 @@ void openSearchDrilldown(BuildContext context, SearchFilterType filterType) {
 /// fetch, paging and filter/sort knobs are the sheet's, without the sheet's
 /// state being disturbed while drilled in.
 class SearchDrilldownScreen extends StatelessWidget {
-  const SearchDrilldownScreen({required this.filterType, super.key});
+  const SearchDrilldownScreen({required this.target, super.key});
 
-  final SearchFilterType filterType;
+  final ArtworkDrilldownTarget target;
 
   @override
   Widget build(BuildContext context) {
     return BlocProvider(
-      create: (_) =>
-          sl<SearchBloc>()..add(SearchEvent.filterSelected(filterType)),
-      child: _DrilldownView(filterType: filterType),
+      create: (_) => sl<SearchBloc>()..add(SearchEvent.drilldownOpened(target)),
+      child: _DrilldownView(target: target),
     );
   }
 }
 
 class _DrilldownView extends StatelessWidget {
-  const _DrilldownView({required this.filterType});
+  const _DrilldownView({required this.target});
 
-  final SearchFilterType filterType;
+  final ArtworkDrilldownTarget target;
 
   @override
   Widget build(BuildContext context) {
@@ -141,8 +141,11 @@ class _DrilldownView extends StatelessWidget {
             ),
             Expanded(
               child: Text(
-                filterType.label,
+                target.label,
                 textAlign: TextAlign.center,
+                // A tag is free text, so it can outrun the bar.
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: MallowTheme.uiCaption.copyWith(
                   color: colors.textPrimary,
                 ),
@@ -273,9 +276,9 @@ class _DrilldownBar extends StatelessWidget {
       initial: state.filter,
       // The drilldown pins one facet and would override anything picked in
       // it — hide it rather than offer a control with no effect.
-      showListingTypeSection: !state.filterType.pinsListingType,
-      showSupplyTypeSection: !state.filterType.pinsSupplyType,
-      showCategoriesSection: !state.filterType.pinsCategory,
+      showListingTypeSection: !state.target.pinsListingType,
+      showSupplyTypeSection: !state.target.pinsSupplyType,
+      showCategoriesSection: !state.target.pinsCategory,
     );
     if (result == null) return;
     bloc.add(SearchEvent.setDrilldownFilter(result));

@@ -14,8 +14,8 @@ import 'tezos_apdu.dart';
 /// requires a [LedgerConnection] obtained from [LedgerInterface.connect].
 ///
 /// [getPublicKey]/[getAccounts] derive `tz1` addresses for display; [signMessage]
-/// signs a Micheline-packed off-chain message for backend wallet-ownership
-/// verification (the device hashes and signs internally).
+/// signs a Micheline-packed off-chain message; [signOperation] adds the
+/// operation watermark to locally forged bytes. The device hashes and signs.
 class TezosLedgerApp {
   const TezosLedgerApp();
 
@@ -58,10 +58,39 @@ class TezosLedgerApp {
     LedgerConnection connection, {
     required Uint8List message,
     int account = 0,
+    void Function()? ensureActive,
+  }) =>
+      _signPayload(connection, message,
+          account: account, ensureActive: ensureActive);
+
+  /// Signs the operation watermark (0x03) followed by the locally forged
+  /// operation group. The device hashes these bytes; callers must not hash.
+  Future<Uint8List> signOperation(
+    LedgerConnection connection, {
+    required Uint8List operation,
+    int account = 0,
+    void Function()? ensureActive,
+  }) {
+    if (operation.length <= 32) {
+      throw ArgumentError(
+          'An operation needs a branch and at least one content');
+    }
+    return _signPayload(connection, Uint8List.fromList([3, ...operation]),
+        account: account, ensureActive: ensureActive);
+  }
+
+  Future<Uint8List> _signPayload(
+    LedgerConnection connection,
+    Uint8List payload, {
+    required int account,
+    void Function()? ensureActive,
   }) async {
+    // Snapshot before any device wait so the reviewed bytes cannot change.
+    final message = Uint8List.fromList(payload).asUnmodifiableView();
     const maxChunkSize = 230;
 
     // Packet 0: derivation path (P1=0x00) — device acks, no signing yet.
+    ensureActive?.call();
     await connection.sendOperation(
       TezosSignOperation(
         p1: TezosApdu.p1First,
@@ -73,6 +102,7 @@ class TezosLedgerApp {
     // Packets 1..n: message chunks. The final chunk ORs in the 0x80 last flag
     // and is the one that prompts the user and returns the signature.
     if (message.isEmpty) {
+      ensureActive?.call();
       return connection.sendOperation(
         TezosSignOperation(
           p1: TezosApdu.p1Message | TezosApdu.p1Last,
@@ -86,6 +116,7 @@ class TezosLedgerApp {
     for (var offset = 0; offset < message.length; offset += maxChunkSize) {
       final end = math.min(offset + maxChunkSize, message.length);
       final isLast = end >= message.length;
+      ensureActive?.call();
       final result = await connection.sendOperation(
         TezosSignOperation(
           p1: TezosApdu.p1Message | (isLast ? TezosApdu.p1Last : 0),
@@ -93,6 +124,7 @@ class TezosLedgerApp {
           expectSignature: isLast,
         ),
       );
+      ensureActive?.call();
       if (isLast) signature = result;
     }
     return signature;

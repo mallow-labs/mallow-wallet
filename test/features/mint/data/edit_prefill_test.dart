@@ -31,6 +31,67 @@ void main() {
     service = EditNftPrefillService(mockDas, mockArtworkRepo);
   });
 
+  for (final parentAvailable in [true, false]) {
+    test(
+      'v2 inherited prefill resolves royalties, parent available $parentAvailable',
+      () async {
+        when(mockDas.getAsset('leaf')).thenAnswer(
+          (_) async => DigitalAsset.fromJson({
+            'id': 'leaf',
+            'interface': 'MplBubblegumV2',
+            'compression': {'compressed': true, 'flags': 0},
+            'royalty': {'basis_points': 65535},
+            'creators': [
+              {'address': 'proofCreator', 'share': 100, 'verified': true},
+            ],
+            'grouping': [
+              {'group_key': 'collection', 'group_value': collectionMint},
+            ],
+          }),
+        );
+        if (parentAvailable) {
+          when(mockDas.getAsset(collectionMint)).thenAnswer(
+            (_) async => DigitalAsset.fromJson({
+              'id': collectionMint,
+              'interface': 'MplCoreCollection',
+              'authorities': [
+                {
+                  'address': creatorAddress,
+                  'scopes': ['full'],
+                },
+              ],
+              'plugins': {
+                'royalties': {
+                  'data': {
+                    'basis_points': 750,
+                    'creators': [
+                      {'address': creatorAddress, 'percentage': 100},
+                    ],
+                  },
+                },
+              },
+            }),
+          );
+        } else {
+          when(
+            mockDas.getAsset(collectionMint),
+          ).thenThrow(StateError('unavailable'));
+        }
+        when(
+          mockArtworkRepo.getArtworkDetail('leaf'),
+        ).thenThrow(StateError('not indexed'));
+        final prefill = await service.load('leaf');
+        expect(prefill.sellerFeeBasisPoints, parentAvailable ? 750 : 0);
+        expect(
+          prefill.creators.map((c) => c.address),
+          parentAvailable ? [creatorAddress] : isEmpty,
+        );
+        if (parentAvailable) expect(prefill.creators.single.verified, isTrue);
+        verify(mockDas.getAsset(collectionMint)).called(1);
+      },
+    );
+  }
+
   test(
     'core collection royalties come from the mpl-core royalties plugin — '
     'collections are not in the artwork index, so the render fallback '

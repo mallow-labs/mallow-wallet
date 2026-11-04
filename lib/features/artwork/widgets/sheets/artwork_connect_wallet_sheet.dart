@@ -10,8 +10,8 @@ import '../../services/artwork_bloc.dart';
 import 'artwork_sheet_frame.dart';
 
 /// Bottom sheet shown when no wallet is connected. The CTA label is chosen
-/// upstream to match the action the connected wallet would unlock — see the
-/// "Connect-Wallet Variants" table in `docs/artwork_state.md`.
+/// upstream, in `resolveArtworkActionState`, to match the action the connected wallet
+/// would unlock.
 class ArtworkConnectWalletSheet extends StatefulWidget {
   const ArtworkConnectWalletSheet({
     required this.label,

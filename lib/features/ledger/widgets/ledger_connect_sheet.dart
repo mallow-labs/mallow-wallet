@@ -61,6 +61,17 @@ class _LedgerConnectSheetState extends State<LedgerConnectSheet> {
     super.initState();
     _state = _auth.currentState;
     _sub = _auth.sessionState.listen(_onState);
+    unawaited(
+      widget.completer.future.then((_) {
+        if (!_completed && mounted) {
+          _completed = true;
+          final route = ModalRoute.of(context);
+          if (route != null && route.isActive) {
+            route.navigator?.removeRoute(route);
+          }
+        }
+      }),
+    );
 
     if (_auth.isConnected) {
       // Defer pop until the sheet is mounted; popping in initState pops
@@ -128,7 +139,7 @@ class _LedgerConnectSheetState extends State<LedgerConnectSheet> {
       child: Padding(
         padding: EdgeInsets.only(bottom: sheetBottomInset(context)),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+          padding: const EdgeInsets.symmetric(horizontal: 24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [

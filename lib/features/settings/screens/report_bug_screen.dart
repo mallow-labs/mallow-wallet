@@ -10,6 +10,8 @@ import 'package:intl/intl.dart';
 import 'package:mallow_api/mallow_api.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
+import '../../../core/config/app_version.dart';
+import '../../../core/config/environment.dart';
 import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/widgets/app_snack_bar.dart';
@@ -93,6 +95,10 @@ class _ReportBugScreenState extends State<ReportBugScreen> {
         'os': Platform.operatingSystemVersion,
         'appVersion': '${packageInfo.version}+${packageInfo.buildNumber}',
         'device': device,
+        // Not folded into appVersion: the backend caps that at 50 chars, and a
+        // branch name has no length limit.
+        if (Config.buildLabel.isNotEmpty)
+          'metadata': {'buildLabel': Config.buildLabel},
       });
 
       if (!mounted) return;
@@ -176,7 +182,7 @@ class _ReportBugScreenState extends State<ReportBugScreen> {
                       return Text(
                         info == null
                             ? ''
-                            : 'Version ${info.version} (${info.buildNumber})',
+                            : 'Version ${displayAppVersion(info)}',
                         style: MallowTheme.uiCaption.copyWith(
                           color: colors.textSecondary,
                         ),

@@ -100,6 +100,25 @@ void main() {
     expect(await completer.future, isTrue);
   });
 
+  // Keystone shares the consent arm: the QR exchange runs in its own sheet
+  // once the caller signs. Before the arm was exhaustive, a Keystone wallet
+  // fell into the Ledger branch and was asked to switch on Bluetooth.
+  testWidgets('a Keystone wallet is asked about Keystone, not Ledger', (
+    tester,
+  ) async {
+    final completer = await pump(tester, WalletType.keystone);
+
+    expect(find.textContaining('Keystone'), findsWidgets);
+    expect(find.textContaining('Ledger'), findsNothing);
+    expect(find.textContaining('Bluetooth'), findsNothing);
+    verifyNever(() => ledgerAuth.startScan());
+    expect(completer.isCompleted, isFalse);
+
+    await tester.tap(find.text('Continue with Keystone'));
+    await tester.pumpAndSettle();
+    expect(await completer.future, isTrue);
+  });
+
   testWidgets('a dismissed Seed Vault sheet declines', (tester) async {
     final completer = await pump(tester, WalletType.seedVault);
 

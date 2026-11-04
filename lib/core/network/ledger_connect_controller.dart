@@ -29,8 +29,17 @@ class LedgerConnectController {
   /// Called when a Ledger sign call is about to run but the device is not
   /// connected. Returns `true` if the user successfully connected,
   /// `false` if the sheet was dismissed or connection failed.
-  Future<bool> requestConnection(String address) {
+  Future<bool> requestConnection(String address, {Future<void>? cancelled}) {
     final request = LedgerConnectRequest(address: address);
+    if (cancelled != null) {
+      unawaited(
+        cancelled.then((_) {
+          if (!request.completer.isCompleted) {
+            request.completer.complete(false);
+          }
+        }),
+      );
+    }
     debugPrint(
       '[LedgerConnect] requestConnection($address) — '
       'hasListener=${_requestController.hasListener}',

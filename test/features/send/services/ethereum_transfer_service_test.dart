@@ -2,6 +2,8 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_api/mallow_api.dart';
+import 'package:mallow_wallet/core/analytics/analytics_events.dart'
+    show AnalyticsProp;
 import 'package:mallow_wallet/core/crypto/wallet_manager.dart';
 import 'package:mallow_wallet/core/network/ethereum_rpc_service.dart';
 import 'package:mallow_wallet/core/services/pending_evm_tx_tracker.dart';
@@ -15,6 +17,7 @@ import 'package:mockito/mockito.dart';
 import 'package:wallet/wallet.dart' show EthereumAddress;
 import 'package:web3dart/web3dart.dart';
 
+import '../../../support/recording_analytics.dart';
 import 'ethereum_transfer_service_test.mocks.dart';
 
 import 'package:mallow_wallet/shared/utils/chain.dart';
@@ -464,6 +467,24 @@ void main() {
     // execute signed the prepared caps verbatim, a base-fee spike between review
     // and broadcast would leave the tx stuck. With no user override, execute must
     // re-fetch the live fee market and sign the *fresh* caps.
+    // Every EVM transfer reaches the analytics transaction ledger through the
+    // shared funnel, at broadcast: the send pipeline may stop waiting for
+    // inclusion, and the transaction is on the wire either way.
+    test('reports the broadcast to the transaction ledger', () async {
+      final analytics = await RecordingAnalytics.install();
+      addTearDown(RecordingAnalytics.uninstall);
+
+      await service.execute(prepared());
+      await pumpEventQueue();
+
+      final event = analytics.submitted.single;
+      expect(event[AnalyticsProp.flow], 'ethereum:native-send');
+      expect(event[AnalyticsProp.signature], '0xhash');
+      expect(event[AnalyticsProp.walletAddress], _owner);
+      expect(event[AnalyticsProp.confirmation], 'pending');
+      expect(event.containsKey(AnalyticsProp.replacement), isFalse);
+    });
+
     test('re-fetches fresh fee caps when no fee override is given', () async {
       final hash = await service.execute(prepared());
 
@@ -510,7 +531,7 @@ void main() {
       );
     });
 
-    // WHY (FINDING 1, defense-in-depth): a fee override whose gas limit is below
+    // WHY (defense-in-depth): a fee override whose gas limit is below
     // the prepared estimate — e.g. a stale ~25 200-gas limit resolved onto a
     // heavier transfer — must be floored at the estimate before signing, or the
     // tx mines an out-of-gas revert with the fee still charged. The estimate's
@@ -532,7 +553,7 @@ void main() {
       verifyNever(rpc.getFeeData());
     });
 
-    // WHY (FINDING 1, funds loss): when fees are refreshed the pre-sign
+    // WHY (funds loss): when fees are refreshed the pre-sign
     // estimateGas is not merely a revert check — its result reconciles the gas
     // limit. If the recipient's storage state changed since review (a token slot
     // went zero→nonzero, ~34k→~49k gas), the prepared pad (~41k) is now too low;
@@ -570,7 +591,7 @@ void main() {
       expect(signed.maxGas, 58800);
     });
 
-    // WHY (FINDING 2, funds loss): the node reserves value + gasLimit×maxFeePerGas
+    // WHY (funds loss): the node reserves value + gasLimit×maxFeePerGas
     // at inclusion, so a Max native send whose gas limit or fee cap rose since it
     // was computed exceeds the balance and is rejected "insufficient funds for
     // gas * price + value" — but only AFTER biometric auth. execute must re-read
@@ -630,7 +651,7 @@ void main() {
     );
   });
 
-  // WHY (FINDING 1, silent tx loss): the send pipeline's "Done" early exit pops
+  // WHY (silent tx loss): the send pipeline's "Done" early exit pops
   // the send sheet, disposing the bloc that is the *only* surface a broadcast
   // failure can reach. It is therefore gated on [onBroadcastRegistered], and the
   // ordering below is that gate's contract: the signal may not fire until the
@@ -783,7 +804,7 @@ void main() {
   });
 
   group('maxNativeSendable (fallback reserve)', () {
-    // WHY (FINDING 2): the fallback reserve (used when the Edit-Gas fee market is
+    // WHY: the fallback reserve (used when the Edit-Gas fee market is
     // unavailable, the same case where execute() refreshes getFeeData and signs
     // no override) reserves the padded native gas limit at the node fee cap — so
     // the Max amount plus what execute() signs never exceeds the balance, and the

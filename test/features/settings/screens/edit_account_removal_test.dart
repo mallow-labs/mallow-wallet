@@ -2,12 +2,14 @@ import 'dart:async';
 
 import 'package:bloc_test/bloc_test.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mallow_wallet/core/crypto/wallet_manager.dart';
 import 'package:mallow_wallet/core/models/account.dart';
 import 'package:mallow_wallet/core/network/auth_service.dart';
 import 'package:mallow_wallet/core/router/auth_state_notifier.dart';
+import 'package:mallow_wallet/core/security/secure_storage.dart';
 import 'package:mallow_wallet/core/services/avatar_pool_service.dart';
 import 'package:mallow_wallet/core/services/wallet_repository.dart';
 import 'package:mallow_wallet/core/session/session_manager.dart';
@@ -34,6 +36,8 @@ class _MockAuth extends Mock implements AuthService {}
 class _MockWalletManager extends Mock implements WalletManager {}
 
 class _MockAuthNotifier extends Mock implements AuthStateNotifier {}
+
+class _MockStorage extends Mock implements SecureWalletStorage {}
 
 class _MockAccountWalletBloc
     extends MockBloc<AccountWalletEvent, AccountWalletState>
@@ -168,6 +172,7 @@ void main() {
   late _MockWalletManager walletManager;
   late _MockAuthNotifier authNotifier;
   late _MockAccountWalletBloc accountWalletBloc;
+  late _MockStorage storage;
 
   setUp(() {
     repo = _MockRepo();
@@ -179,6 +184,7 @@ void main() {
     walletManager = _MockWalletManager();
     authNotifier = _MockAuthNotifier();
     accountWalletBloc = _MockAccountWalletBloc();
+    storage = _MockStorage();
 
     for (final register in <void Function()>[
       () => sl.registerSingleton<WalletRepository>(repo),
@@ -190,6 +196,7 @@ void main() {
       () => sl.registerSingleton<WalletManager>(walletManager),
       () => sl.registerSingleton<AuthStateNotifier>(authNotifier),
       () => sl.registerSingleton<AccountWalletBloc>(accountWalletBloc),
+      () => sl.registerSingleton<SecureWalletStorage>(storage),
     ]) {
       register();
     }
@@ -232,6 +239,10 @@ void main() {
       () => walletManager.notifyWalletDataChanged(),
     ).thenAnswer((_) async {});
     when(() => authNotifier.onLogout()).thenAnswer((_) async {});
+    // No app lock configured, so the removal gate passes without a prompt.
+    when(
+      () => storage.loadAuthFactors(),
+    ).thenAnswer((_) async => (hasPin: false, biometricEnabled: false));
   });
 
   tearDown(() {
@@ -244,6 +255,7 @@ void main() {
     sl.unregister<WalletManager>();
     sl.unregister<AuthStateNotifier>();
     sl.unregister<AccountWalletBloc>();
+    sl.unregister<SecureWalletStorage>();
   });
 
   Future<void> pumpScreen(WidgetTester tester) async {
@@ -466,5 +478,38 @@ void main() {
     // Let the error snack bar's own timer expire before the test ends.
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
+  });
+
+  testWidgets('a failed re-authentication removes nothing', (tester) async {
+    when(
+      () => storage.loadAuthFactors(),
+    ).thenThrow(PlatformException(code: 'read_failed'));
+
+    await pumpScreen(tester);
+    await openRemoveSheet(tester);
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+
+    verify(() => storage.loadAuthFactors()).called(1);
+    verifyNever(() => repo.removeAccount(any()));
+    expect(find.text('Edit Account'), findsOneWidget);
+  });
+
+  testWidgets('an all-Ledger account is removed without a prompt: no key of '
+      'its is stored here', (tester) async {
+    when(
+      () => repo.getAccountViews(),
+    ).thenAnswer((_) async => [ledgerAccount, otherAccount]);
+    when(
+      () => storage.loadAuthFactors(),
+    ).thenThrow(PlatformException(code: 'read_failed'));
+
+    await pumpScreen(tester);
+    await openRemoveSheet(tester);
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+
+    verifyNever(() => storage.loadAuthFactors());
+    verify(() => repo.removeAccount('acct-1')).called(1);
   });
 }

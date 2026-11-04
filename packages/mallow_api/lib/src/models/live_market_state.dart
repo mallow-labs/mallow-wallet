@@ -20,6 +20,9 @@ sealed class AuctionLiveState with _$AuctionLiveState {
     DateTime? startsAt,
     DateTime? endsAt,
     @Default(false) bool isSettled,
+
+    /// True after a terminal refund, including an auction with no bids.
+    @Default(false) bool refunded,
   }) = _AuctionLiveState;
 
   factory AuctionLiveState.fromJson(Map<String, dynamic> json) => _$AuctionLiveStateFromJson(json);

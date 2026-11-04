@@ -9,7 +9,9 @@ import 'package:mallow_api/mallow_api.dart'
 
 import '../../../core/result/result.dart';
 import '../../../core/session/session_manager.dart';
+import '../../../shared/utils/chain.dart';
 import '../data/offers_inbox_repository.dart';
+import '../models/bid_refund_balance.dart';
 
 part 'offers_inbox_bloc.freezed.dart';
 
@@ -21,7 +23,8 @@ sealed class OffersInboxEvent with _$OffersInboxEvent {
 
   /// Pull-to-refresh / post-action refetch from page 0 (keeps the current
   /// sort and the already-rendered rows until the new page lands).
-  const factory OffersInboxEvent.refresh() = OffersInboxRefresh;
+  const factory OffersInboxEvent.refresh({@Default(true) bool refreshRefunds}) =
+      OffersInboxRefresh;
 
   /// Append the next page.
   const factory OffersInboxEvent.loadMore() = OffersInboxLoadMore;
@@ -37,10 +40,13 @@ sealed class OffersInboxState with _$OffersInboxState {
   const factory OffersInboxState.initial() = OffersInboxInitial;
 
   /// Loaded — [items] is the flat, recency- (or amount-) ordered feed the
-  /// screen groups by artwork. [items] is null only while the very first page
-  /// (or a sort change) is in flight.
+  /// screen groups by artwork. [items] is null while the very first page
+  /// is in flight.
   const factory OffersInboxState.loaded({
     List<OffersInboxItem>? items,
+    @Default([]) List<BidRefundBalance> bidRefunds,
+    String? bidRefundError,
+    String? inboxError,
     @Default(OffersInboxSort.latest) OffersInboxSort sort,
     @Default(false) bool isLoadingMore,
     @Default(false) bool hasMore,
@@ -92,34 +98,90 @@ class OffersInboxBloc extends Bloc<OffersInboxEvent, OffersInboxState> {
   /// across the whole merged unpaged set, so it comes off the first page and
   /// is not accumulated as further pages land.
   int _hiddenByBlockCount = 0;
+  List<BidRefundBalance> _bidRefunds = [];
+  String? _bidRefundError;
+  String? _inboxError;
+  int _firstPageGeneration = 0;
+  int _refundGeneration = 0;
 
   bool get _hasMore => _cursor != null;
 
   OffersInboxLoaded _buildLoaded() => OffersInboxLoaded(
     items: List.unmodifiable(_items),
+    bidRefunds: List.unmodifiable(_bidRefunds),
+    bidRefundError: _bidRefundError,
+    inboxError: _inboxError,
     sort: _sort,
     hasMore: _hasMore,
     hiddenByBlockCount: _hiddenByBlockCount,
   );
 
-  Future<void> _fetchFirstPage(Emitter<OffersInboxState> emit) async {
-    final result = await Result.guard(() async {
-      final owners = _session.apiOwnerAddresses;
-      final page = await _repository.getInbox(owners: owners, sort: _sort);
-      _items = _resolveEndedAuctions(page.result);
-      _cursor = page.nextPage;
-      _hiddenByBlockCount = page.hiddenByBlockCount;
-    });
+  OffersInboxState _settledState() => _inboxError != null && _bidRefunds.isEmpty
+      ? OffersInboxState.error(message: _inboxError!)
+      : _buildLoaded();
 
-    if (result.isFailure) {
+  Future<void> _fetchBidRefunds(
+    Emitter<OffersInboxState> emit,
+    int generation,
+  ) async {
+    final refunds = await Result.guard(
+      () => _repository.getBidRefunds(
+        _session.sessionWallets
+            .where((wallet) => wallet.chainEnum == Chain.solana)
+            .map((wallet) => wallet.address),
+      ),
+    );
+    if (generation != _refundGeneration || emit.isDone) return;
+    // Keep a known claim reachable through a temporary read failure.
+    _bidRefunds = refunds.valueOrNull ?? _bidRefunds;
+    _bidRefundError = refunds.errorOrNull?.message;
+    final current = state;
+    if (_inboxError != null) {
+      emit(_settledState());
+    } else if (current is OffersInboxLoaded) {
       emit(
-        OffersInboxState.error(
-          message: result.errorOrNull?.message ?? 'Failed to load offers',
+        current.copyWith(
+          bidRefunds: List.unmodifiable(_bidRefunds),
+          bidRefundError: _bidRefundError,
         ),
       );
-      return;
     }
-    emit(_buildLoaded());
+  }
+
+  Future<void> _fetchFirstPage(
+    Emitter<OffersInboxState> emit, {
+    bool refreshRefunds = true,
+  }) async {
+    final generation = ++_firstPageGeneration;
+    final sort = _sort;
+    _inboxError = null;
+    // Refunds are independent of feed ordering. Start both reads together and
+    // render the inbox as soon as it lands, even if a refund scan is slow.
+    final refunds = refreshRefunds
+        ? _fetchBidRefunds(emit, ++_refundGeneration)
+        : Future<void>.value();
+    final inbox = () async {
+      final result = await Result.guard(
+        () => _repository.getInbox(
+          owners: _session.apiOwnerAddresses,
+          sort: sort,
+        ),
+      );
+      if (generation != _firstPageGeneration || emit.isDone) return;
+      final page = result.valueOrNull;
+      if (page == null) {
+        _items = [];
+        _cursor = null;
+        _hiddenByBlockCount = 0;
+        _inboxError = result.errorOrNull?.message ?? 'Failed to load offers';
+      } else {
+        _items = _resolveEndedAuctions(page.result);
+        _cursor = page.nextPage;
+        _hiddenByBlockCount = page.hiddenByBlockCount;
+      }
+      emit(_settledState());
+    }();
+    await Future.wait([inbox, refunds]);
   }
 
   /// Re-derive auction liveness from `endsAt` instead of trusting the
@@ -164,7 +226,7 @@ class OffersInboxBloc extends Bloc<OffersInboxEvent, OffersInboxState> {
     if (current is OffersInboxLoaded) {
       emit(current.copyWith(isRefreshing: true));
     }
-    await _fetchFirstPage(emit);
+    await _fetchFirstPage(emit, refreshRefunds: event.refreshRefunds);
   }
 
   Future<void> _onSetSort(
@@ -173,12 +235,9 @@ class OffersInboxBloc extends Bloc<OffersInboxEvent, OffersInboxState> {
   ) async {
     if (event.sort == _sort) return;
     _sort = event.sort;
-    _items = [];
-    _cursor = 0;
-    // Clear rows (items defaults to null) so the screen shows the first-page
-    // spinner under the new sort.
-    emit(OffersInboxLoaded(sort: _sort));
-    await _fetchFirstPage(emit);
+    // Keep refund cards mounted so their destination fields survive sorting.
+    emit(_buildLoaded().copyWith(isRefreshing: true));
+    await _fetchFirstPage(emit, refreshRefunds: false);
   }
 
   Future<void> _onLoadMore(
@@ -188,7 +247,8 @@ class OffersInboxBloc extends Bloc<OffersInboxEvent, OffersInboxState> {
     final current = state;
     if (current is! OffersInboxLoaded || current.isLoadingMore) return;
     final page = _cursor;
-    if (page == null) return;
+    if (page == null || current.isRefreshing || _inboxError != null) return;
+    final generation = _firstPageGeneration;
 
     emit(current.copyWith(isLoadingMore: true));
 
@@ -199,15 +259,20 @@ class OffersInboxBloc extends Bloc<OffersInboxEvent, OffersInboxState> {
         sort: _sort,
         page: page,
       );
+      if (generation != _firstPageGeneration) return;
       _items = [..._items, ..._resolveEndedAuctions(next.result)];
       _cursor = next.nextPage;
     });
 
+    if (generation != _firstPageGeneration || emit.isDone) return;
     if (result.isFailure) {
       debugPrint(
         '[OffersInboxBloc] loadMore failed: ${result.errorOrNull?.message}',
       );
-      emit(current.copyWith(isLoadingMore: false));
+      final now = state;
+      if (now is OffersInboxLoaded) {
+        emit(now.copyWith(isLoadingMore: false));
+      }
       return;
     }
     emit(_buildLoaded());

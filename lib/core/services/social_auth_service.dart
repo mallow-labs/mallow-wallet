@@ -534,7 +534,10 @@ class SocialAuthService {
     try {
       await Web3AuthFlutter.logout();
     } catch (e) {
-      AppLogger.warn(_tag, 'logout failed (session may persist): $e');
+      AppLogger.warn(
+        _tag,
+        'logout failed (session may persist): ${e.runtimeType}',
+      );
     }
   }
 

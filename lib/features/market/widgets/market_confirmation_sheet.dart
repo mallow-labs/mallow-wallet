@@ -11,6 +11,8 @@ import '../../../shared/widgets/mallow_checkbox.dart';
 import '../../../shared/widgets/transaction_confirmation_sheet_base.dart';
 import '../../../shared/widgets/tx_cost_summary.dart';
 import '../../portfolio/services/token_balance_bloc.dart';
+import '../../sale/services/proceeds_calculator.dart'
+    show kCreatorWalletRentNotice;
 import '../services/market_bloc.dart';
 
 /// Action types that transfer payment from the user — gated on balance.
@@ -233,13 +235,19 @@ class MarketConfirmationSheet extends StatelessWidget {
       ),
       bodyBuilder: (context, state) {
         // Net SOL change for the payer once the tx executes — populated by
-        // the bloc for actions that reclaim rent (burn). Already includes
-        // the deducted tx fee.
+        // the bloc for rent reclaim and edition buys. Already
+        // includes the deducted tx fee.
         final prep = state is TxFlowReady<MarketPrepData, MarketSuccessData>
             ? state.data
             : null;
         final payerNetLamports = prep?.simulatedPayerLamportsDelta;
         final isSimulating = prep?.isSimulating ?? false;
+        final tokenAccountRentLamports =
+            !isSimulating &&
+                prep?.simulationResult?.success == true &&
+                (prep?.tokenAccountRentLamports ?? 0) > 0
+            ? prep!.tokenAccountRentLamports
+            : null;
         // Tx not built yet (sheet opened immediately on tap): shimmer the
         // headline + fee instead of rendering placeholder zeros.
         final isPreparing =
@@ -270,8 +278,41 @@ class MarketConfirmationSheet extends StatelessWidget {
               isSimulating: isSimulating,
               isPreparing: isPreparing,
             ),
-          if (actionType == 'burn') ...[
-            _buildBurnBreakdown(
+          if (actionType == 'release-sol-bid-refund' ||
+              actionType == 'release-bid-refund') ...[
+            Text(
+              'This refund goes to bidder $mintAccount. ${actionType == 'release-sol-bid-refund' ? 'You pay only the transaction fee.' : 'You pay the transaction fee and rent for any new token account. That rent belongs to the bidder.'} Recover the account deposit after the refund is released.',
+              style: MallowTheme.uiCaption.copyWith(
+                color: context.mallowColors.textSecondary,
+              ),
+            ),
+            const SizedBox(height: MallowTheme.spacingMd),
+            TxCostSummary(
+              lines: [
+                TxCostLine.tokenAmount(
+                  label: 'Refund to bidder',
+                  rawAmount: totalCost.rawAmount,
+                  currencyMint: totalCost.currencyMint,
+                ),
+                if (isPreparing)
+                  TxCostLine.shimmer(label: 'Network Fee')
+                else
+                  TxCostLine.lamports(
+                    label: 'Network Fee',
+                    lamports: estimatedFeeLamports,
+                    sign: '-',
+                  ),
+                if (tokenAccountRentLamports != null)
+                  TxCostLine.lamports(
+                    label: 'Token account rent (new account)',
+                    lamports: tokenAccountRentLamports,
+                    sign: '-',
+                  ),
+              ],
+            ),
+          ] else if (actionType == 'burn' ||
+              actionType == 'recover-bid-refund-deposit') ...[
+            _buildRentReclaimBreakdown(
               context,
               estimatedFeeLamports: estimatedFeeLamports,
               payerNetLamports: payerNetLamports,
@@ -280,7 +321,7 @@ class MarketConfirmationSheet extends StatelessWidget {
             ),
             // Webapp parity (BurnModal): burning a collection only
             // burns the Collection NFT — minted member NFTs survive.
-            if (isCollection) ...[
+            if (actionType == 'burn' && isCollection) ...[
               const SizedBox(height: MallowTheme.spacingMd),
               Text(
                 'Burning a collection does not burn the NFTs minted '
@@ -380,6 +421,7 @@ class MarketConfirmationSheet extends StatelessWidget {
               copy,
               actionType,
               isPreparing: isPreparing,
+              tokenAccountRentLamports: tokenAccountRentLamports,
             ),
         ];
       },
@@ -490,6 +532,34 @@ class _ActionCopy {
       totalLabel: "You'll receive",
       sumsFeeIntoTotal: false,
     ),
+    'withdraw-bid-refund': _ActionCopy(
+      title: 'Withdraw Bid Refund',
+      amountLabel: 'Refund Amount',
+      confirmLabel: 'Withdraw Refund',
+      totalLabel: 'Total returned',
+      sumsFeeIntoTotal: false,
+    ),
+    'release-sol-bid-refund': _ActionCopy(
+      title: 'Release SOL Refund',
+      amountLabel: 'Refund to bidder',
+      confirmLabel: 'Release Refund',
+      totalLabel: 'Refund to bidder',
+      sumsFeeIntoTotal: false,
+    ),
+    'release-bid-refund': _ActionCopy(
+      title: 'Release Token Refund',
+      amountLabel: 'Refund to bidder',
+      confirmLabel: 'Release Refund',
+      totalLabel: 'Refund to bidder',
+      sumsFeeIntoTotal: false,
+    ),
+    'recover-bid-refund-deposit': _ActionCopy(
+      title: 'Recover Deposit',
+      amountLabel: 'Account deposit',
+      confirmLabel: 'Recover Deposit',
+      totalLabel: 'Deposit returned',
+      sumsFeeIntoTotal: false,
+    ),
     'cancel-offer': _ActionCopy(
       title: 'Cancel Offer',
       amountLabel: 'Offer Amount',
@@ -537,9 +607,7 @@ class _ActionCopy {
       _byType[actionType] ?? _byType['offer']!;
 }
 
-/// Burn-specific breakdown: a fee row plus, when simulation has produced
-/// a payer-balance delta, a "you'll receive" line summarising the SOL
-/// reclaimed from the closed metadata / token / edition accounts.
+/// A fee row and simulated SOL returned when an action closes accounts.
 ///
 /// [payerNetLamports] is the *signed* net change (post − pre) the bloc
 /// derives from the simulation; the fee is already deducted from that
@@ -556,7 +624,7 @@ class _ActionCopy {
 /// only happens if the asset has no rent left to reclaim), fall back
 /// to the same fee-only layout to avoid showing a misleading negative
 /// "you'll receive" figure.
-TxCostSummary _buildBurnBreakdown(
+TxCostSummary _buildRentReclaimBreakdown(
   BuildContext context, {
   required int estimatedFeeLamports,
   required int? payerNetLamports,
@@ -617,6 +685,7 @@ Widget _buildPriceBreakdown(
   int estimatedFeeLamports,
   _ActionCopy copy,
   String actionType, {
+  int? tokenAccountRentLamports,
   // True when the tx is still being prepared (the sheet was opened immediately
   // on tap, before `TxFlowReady`): the headline + network-fee values aren't
   // known yet, so render them as loading skeletons.
@@ -632,6 +701,7 @@ Widget _buildPriceBreakdown(
   // different currency from the SOL rent — so the headline shows just the
   // refunded token amount and the rent stays in its own "+" disclosure line.
   final isCancelOffer = actionType == 'cancel-offer';
+  final isRefund = isCancelOffer || actionType == 'withdraw-bid-refund';
 
   final double headlineAmount;
   if (isCancelOffer) {
@@ -656,8 +726,8 @@ Widget _buildPriceBreakdown(
               label: copy.totalLabel,
               rawAmount: headlineAmount,
               currencyMint: listingCurrency,
-              sign: isCancelOffer ? '+' : '',
-              valueColor: isCancelOffer
+              sign: isRefund ? '+' : '',
+              valueColor: isRefund
                   ? context.mallowColors.positive
                   : context.mallowColors.accent,
             ),
@@ -680,6 +750,12 @@ Widget _buildPriceBreakdown(
               TxCostLine.lamports(
                 label: 'Network Fee',
                 lamports: estimatedFeeLamports,
+                sign: '-',
+              ),
+            if (tokenAccountRentLamports != null)
+              TxCostLine.lamports(
+                label: 'Token account rent (new account)',
+                lamports: tokenAccountRentLamports,
                 sign: '-',
               ),
             // Making an offer opens an on-chain Offer PDA the buyer funds
@@ -802,12 +878,15 @@ Widget _buildEditionBreakdown(
 /// "Winning bid" for a settle, "Offer amount" for an accept) is split on-chain
 /// into the mallow fee, creator royalties, and the seller's proceeds; the
 /// headline shows what the seller nets and the disclosure itemises the
-/// deductions. The amounts are resolved from the tx simulation (fee bps can't
+/// deductions, including seller-funded creator wallet rent and protocol fees
+/// for native SOL.
+/// The amounts are resolved from the tx simulation (fee bps can't
 /// be re-derived reliably client-side), so they shimmer until
 /// [SettleProceeds.isResolved]. The network fee is the seller's gas, shown as a
 /// separate SOL deduction (it isn't folded into the payout-currency total,
-/// which may not be SOL). Royalties are listed only when some go to *other*
-/// creators — the seller's own cut is already in the headline.
+/// which may not be SOL). The arithmetic split determines whether another
+/// creator is paid; any residual without creator payouts is a protocol cost.
+/// The seller's own creator cut is already in the headline.
 Widget _buildSettleBreakdown(
   BuildContext context,
   SettleProceeds proceeds,
@@ -828,7 +907,9 @@ Widget _buildSettleBreakdown(
         lines: [
           if (resolved)
             TxCostLine.tokenAmountPrecise(
-              label: "You'll receive",
+              label: proceeds.isEstimate
+                  ? 'Estimated proceeds'
+                  : "You'll receive",
               rawAmount: proceeds.sellerEarningsRaw!.toDouble(),
               currencyMint: mint,
               sign: '+',
@@ -860,7 +941,13 @@ Widget _buildSettleBreakdown(
               TxCostLine.shimmer(label: 'mallow fee'),
             if (resolved && royaltiesToOthers > 0)
               TxCostLine.tokenAmountPrecise(
-                label: 'Creator royalties',
+                label: (mint ?? solMint) == solMint && !proceeds.isEstimate
+                    ? switch (proceeds.hasOtherCreatorPayouts) {
+                        true => 'Royalties, rent and fees',
+                        false => 'Protocol fees',
+                        null => 'Other deductions',
+                      }
+                    : 'Creator royalties',
                 rawAmount: royaltiesToOthers.toDouble(),
                 currencyMint: mint,
                 sign: '-',
@@ -876,6 +963,15 @@ Widget _buildSettleBreakdown(
           ],
         ),
       ),
+      if (proceeds.creatorRentMayApply) ...[
+        const SizedBox(height: MallowTheme.spacingSm),
+        Text(
+          kCreatorWalletRentNotice,
+          style: MallowTheme.uiCaption.copyWith(
+            color: context.mallowColors.textSecondary,
+          ),
+        ),
+      ],
     ],
   );
 }

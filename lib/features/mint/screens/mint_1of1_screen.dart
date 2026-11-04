@@ -105,7 +105,7 @@ class _Mint1Of1View extends StatelessWidget {
                       ],
                     ),
                   ),
-                  // TODO(phase 6): overlay gradient fade-mask behind the CTA
+                  // TODO: overlay gradient fade-mask behind the CTA
                   // to match the existing send/swap flow treatment.
                   const _MintFooter(),
                 ],

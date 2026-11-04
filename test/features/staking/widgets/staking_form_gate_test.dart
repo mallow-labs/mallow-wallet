@@ -33,7 +33,7 @@ class MockRemoteConfigService extends Mock implements RemoteConfigService {}
 
 class MockPriorityFeeService extends Mock implements PriorityFeeService {}
 
-/// Phase 4b — staking's four kill-switch cells.
+/// Staking's four kill-switch cells.
 ///
 /// `showStakeSheet` is a single entry hosting four distinct tx builders, so a
 /// gate at the sheet would be one switch for all four. The point of these

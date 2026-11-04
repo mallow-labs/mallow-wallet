@@ -31,6 +31,82 @@ class LedgerStalePairingException implements Exception {
       'Settings → Bluetooth and try again.';
 }
 
+/// Whether an Ethereum app reporting [version] hashes EIP-712 typed data on
+/// the device (1.9.19 and later), so it can show the fields when its Raw
+/// messages setting is on. An unparseable
+/// version is treated as new: the first typed-data command then tells us.
+@visibleForTesting
+bool ledgerEthereumHashesTypedData(String version) {
+  final parts = RegExp(r'^(\d+)\.(\d+)\.(\d+)').firstMatch(version.trim());
+  if (parts == null) return true;
+  final numbers = [for (var i = 1; i <= 3; i++) int.parse(parts.group(i)!)];
+  const minimum = [1, 9, 19];
+  for (var i = 0; i < 3; i++) {
+    if (numbers[i] != minimum[i]) return numbers[i] > minimum[i];
+  }
+  return true;
+}
+
+/// Signs typed data by streaming it to the device when [streamFirst], and
+/// by host-computed hashes otherwise or when the app answers the stream with
+/// 0x6D00 (instruction not supported). Any other failure, a rejection or a
+/// refusal for settings included, is final: the hashes path would show the
+/// user less, not more.
+@visibleForTesting
+Future<Uint8List> signLedgerTypedData({
+  required bool streamFirst,
+  required Future<Uint8List> Function() stream,
+  required Future<Uint8List> Function() hashes,
+}) async {
+  if (streamFirst) {
+    try {
+      return await stream();
+    } on LedgerDeviceException catch (e) {
+      if (e.errorCode != 0x6D00) rethrow;
+    }
+  }
+  return hashes();
+}
+
+class LedgerSigningCancelledException implements Exception {
+  const LedgerSigningCancelledException();
+}
+
+@visibleForTesting
+Future<T> raceLedgerOperationWithCancellation<T>({
+  required Future<T> operation,
+  required Future<void> cancelled,
+  required Future<void> Function() cancelOperation,
+}) {
+  final result = Completer<T>();
+  var cancellationStarted = false;
+  operation.then(
+    (value) {
+      if (!cancellationStarted && !result.isCompleted) result.complete(value);
+    },
+    onError: (Object error, StackTrace stackTrace) {
+      if (!cancellationStarted && !result.isCompleted) {
+        result.completeError(error, stackTrace);
+      }
+    },
+  );
+  cancelled.then((_) async {
+    if (result.isCompleted) return;
+    cancellationStarted = true;
+    try {
+      await cancelOperation();
+    } catch (_) {
+      // Cancellation still wins. The service keeps Ledger reconnect blocked
+      // when physical teardown cannot be confirmed.
+    } finally {
+      if (!result.isCompleted) {
+        result.completeError(const LedgerSigningCancelledException());
+      }
+    }
+  });
+  return result.future;
+}
+
 /// Connection state for the Ledger device.
 enum LedgerConnectionState {
   disconnected,
@@ -56,6 +132,10 @@ enum LedgerSigningState {
 class LedgerService {
   LedgerService();
 
+  @visibleForTesting
+  LedgerService.forConnection(LedgerConnection connection)
+    : _connection = connection;
+
   LedgerInterface? _ledger;
   LedgerConnection? _connection;
   LedgerDevice? _connectedDevice;
@@ -63,12 +143,17 @@ class LedgerService {
   StreamSubscription<LedgerDevice>? _bleScanSub;
   StreamSubscription<BleConnectionState>? _bleStateSub;
   LedgerSigningState _currentSigningState = LedgerSigningState.idle;
+  Object? _activeCancellableSigning;
+  Future<void>? _connectionReset;
+  bool _reconnectBlocked = false;
+  bool _isConnecting = false;
 
   final _solanaApp = const SolanaLedgerApp();
   final _ethereumApp = const EthereumLedgerApp();
   final _tezosApp = const TezosLedgerApp();
 
   static const _inactivityTimeout = Duration(minutes: 5);
+  static const _signingCancellationCleanupTimeout = Duration(seconds: 10);
 
   // ---------------------------------------------------------------------------
   // Streams
@@ -96,7 +181,8 @@ class LedgerService {
   Stream<void> get scanFinished => _scanFinishedController.stream;
 
   /// Whether a device is currently connected.
-  bool get isConnected => _connection != null && !_connection!.isDisconnected;
+  bool get isConnected =>
+      !_isConnecting && _connection != null && !_connection!.isDisconnected;
 
   /// The current signing state (for synchronous checks).
   LedgerSigningState get currentSigningState => _currentSigningState;
@@ -209,12 +295,19 @@ class LedgerService {
   /// If the connection fails due to stale pairing info ("Peer removed pairing
   /// information"), the device is unpaired and the connection is retried once.
   Future<void> connect(LedgerDevice device) async {
-    debugPrint(
-      '[Ledger] connect() start — device=${device.name} id=${device.id}',
-    );
-    _connectionStateController.add(LedgerConnectionState.connecting);
-
+    if (_activeCancellableSigning != null || _isConnecting) {
+      throw StateError(
+        'Cannot start a Ledger connection while another operation is in progress',
+      );
+    }
+    _isConnecting = true;
     try {
+      await _waitForConnectionReset();
+      debugPrint(
+        '[Ledger] connect() start — device=${device.name} id=${device.id}',
+      );
+      _connectionStateController.add(LedgerConnectionState.connecting);
+
       _ledger ??= LedgerInterface.ble(
         onPermissionRequest: _handlePermissionRequest,
         bleOptions: BluetoothOptions(
@@ -250,8 +343,6 @@ class LedgerService {
         '[Ledger] Connection established, isDisconnected=${_connection!.isDisconnected}',
       );
       _connectedDevice = device;
-      _connectionStateController.add(LedgerConnectionState.connected);
-      _resetInactivityTimer();
 
       // Listen for unexpected BLE disconnections (device powered off, out of range).
       await _bleStateSub?.cancel();
@@ -261,6 +352,9 @@ class LedgerService {
           disconnect();
         }
       });
+      _isConnecting = false;
+      _connectionStateController.add(LedgerConnectionState.connected);
+      _resetInactivityTimer();
       debugPrint('[Ledger] connect() complete');
     } catch (e, st) {
       debugPrint('[Ledger] connect() FAILED: $e');
@@ -281,6 +375,7 @@ class LedgerService {
         );
         _connectionStateController.add(LedgerConnectionState.connecting);
         try {
+          _isConnecting = false;
           return await connect(device);
         } catch (_) {
           // Fall through to error state if retry also fails.
@@ -289,18 +384,26 @@ class LedgerService {
 
       _connectionStateController.add(LedgerConnectionState.error);
       rethrow;
+    } finally {
+      _isConnecting = false;
     }
   }
 
   /// Disconnect from the current device.
   Future<void> disconnect() async {
     _inactivityTimer?.cancel();
-    await _bleStateSub?.cancel();
+    final connection = _connection;
+    final stateSubscription = _bleStateSub;
     _bleStateSub = null;
-    await _connection?.disconnect();
     _connection = null;
     _connectedDevice = null;
     _connectionStateController.add(LedgerConnectionState.disconnected);
+    if (connection == null) {
+      final reset = _connectionReset;
+      if (reset != null) await reset;
+      return;
+    }
+    await _startConnectionReset(connection, stateSubscription);
   }
 
   // ---------------------------------------------------------------------------
@@ -430,6 +533,77 @@ class LedgerService {
     }
   }
 
+  /// EIP-712 typed-data signature with the Ethereum app at the given
+  /// derivation [account]. Returns the 65-byte `r‖s‖v`.
+  ///
+  /// On Ethereum app 1.9.19 or later the device is sent [message] and hashes
+  /// it itself. With the app's Raw messages setting on, it shows each domain
+  /// and message field for the user to step through; with only Blind signing
+  /// on, it shows the domain and the message hash. With neither, it refuses
+  /// with 0x6A80 before showing anything. An older app (or one that answers
+  /// the first typed-data command with "instruction not supported") signs
+  /// [domainSeparator] and [messageHash] instead, shows those two hashes, and
+  /// needs Blind signing on. The caller recovers the signer either way, so a
+  /// device that hashed something else cannot pass.
+  ///
+  /// Fails loud if the Ethereum app isn't open. [cancelled] tears the
+  /// connection down mid-review, as for Solana signing.
+  Future<Uint8List> signEthereumTypedData({
+    required Eip712LedgerMessage message,
+    required Uint8List domainSeparator,
+    required Uint8List messageHash,
+    int account = 0,
+    Future<void>? cancelled,
+  }) async {
+    _ensureConnected();
+    _cancelInactivityTimer();
+
+    final app = await getOpenApp();
+    if (app.openApp != LedgerOpenApp.ethereum) {
+      _resetInactivityTimer();
+      throw Exception('Open the Ethereum app on your Ledger, then try again.');
+    }
+    final onDevice = ledgerEthereumHashesTypedData(app.version);
+
+    _emitSigningState(LedgerSigningState.waitingForConfirmation);
+    try {
+      final connection = _connection!;
+      final sig = await _runCancellableSigning(
+        connection: connection,
+        cancelled: cancelled,
+        operation: () => signLedgerTypedData(
+          streamFirst: onDevice,
+          stream: () => _ethereumApp.signTypedData(
+            connection,
+            message: message,
+            account: account,
+          ),
+          hashes: () => _ethereumApp.signTypedDataHashes(
+            connection,
+            domainSeparator: domainSeparator,
+            messageHash: messageHash,
+            account: account,
+          ),
+        ),
+      );
+      _emitSigningState(LedgerSigningState.confirmed);
+      return sig;
+    } on LedgerException catch (e) {
+      if (e is LedgerDeviceException &&
+          (e.errorCode == 0x6985 || e.errorCode == 0x6982)) {
+        _emitSigningState(LedgerSigningState.rejected);
+      } else {
+        _emitSigningState(LedgerSigningState.timeout);
+      }
+      rethrow;
+    } catch (_) {
+      _emitSigningState(LedgerSigningState.timeout);
+      rethrow;
+    } finally {
+      _resetInactivityTimer();
+    }
+  }
+
   /// Sign the RLP-serialized unsigned [rawTx] with the Ethereum app at the given
   /// derivation [account]. [rawTx] is the exact payload the device hashes and
   /// signs — the `0x02`-prefixed unsigned EIP-1559 serialization
@@ -505,41 +679,124 @@ class LedgerService {
   ///
   /// Requires the Tezos app to be open. Used to build the `edpk…` the backend
   /// needs to verify a Tezos ownership signature and re-derive the `tz1`.
-  Future<Uint8List> getTezosPublicKey({int account = 0}) async {
+  Future<Uint8List> getTezosPublicKey({
+    int account = 0,
+    Future<void>? cancelled,
+    void Function()? ensureActive,
+  }) async {
     _ensureConnected();
-    _resetInactivityTimer();
-    return _tezosApp.getPublicKey(_connection!, account: account);
+    final connection = _connection!;
+    _cancelInactivityTimer();
+    try {
+      return await _runCancellableSigning(
+        connection: connection,
+        cancelled: cancelled,
+        operation: () async {
+          ensureActive?.call();
+          await _requireTezosWalletApp();
+          _cancelInactivityTimer();
+          ensureActive?.call();
+          final key = await _tezosApp.getPublicKey(
+            connection,
+            account: account,
+          );
+          ensureActive?.call();
+          return key;
+        },
+      );
+    } finally {
+      _resetInactivityTimer();
+    }
   }
 
-  /// Sign a Micheline-packed off-chain [message] with the Tezos app at the given
-  /// derivation [account]. The device Blake2b-256-hashes and Ed25519-signs the
-  /// digest after on-screen confirmation.
-  ///
-  /// Emits [LedgerSigningState.waitingForConfirmation] while the user confirms,
-  /// then [confirmed] or [rejected]. Returns the raw 64-byte signature.
+  Future<void> _requireTezosWalletApp() async {
+    final name = (await getOpenApp()).name.trim().toLowerCase();
+    // The Baking app can sign some operations without an on-device prompt.
+    // Browser requests must use the Wallet app and its user confirmation.
+    if (name != 'tezos' && !name.startsWith('tezos wallet')) {
+      throw LedgerDeviceException(
+        message: 'Open the Tezos Wallet app on your Ledger.',
+        errorCode: 0x6e00,
+        connectionType: ConnectionType.ble,
+      );
+    }
+  }
+
+  /// Signs the packed message bytes on-device, without repacking or hashing.
   Future<Uint8List> signTezosMessage(
     Uint8List message, {
     int account = 0,
+    Future<void>? cancelled,
+    void Function()? ensureActive,
+  }) => _signTezos(
+    message,
+    account: account,
+    cancelled: cancelled,
+    ensureActive: ensureActive,
+    operation: false,
+  );
+
+  /// Adds the operation watermark on-device transport, then signs the forged
+  /// group after the device's review. Returned signatures are raw Ed25519.
+  Future<Uint8List> signTezosOperation(
+    Uint8List operation, {
+    int account = 0,
+    Future<void>? cancelled,
+    void Function()? ensureActive,
+  }) => _signTezos(
+    operation,
+    account: account,
+    cancelled: cancelled,
+    ensureActive: ensureActive,
+    operation: true,
+  );
+
+  Future<Uint8List> _signTezos(
+    Uint8List payload, {
+    required int account,
+    required bool operation,
+    Future<void>? cancelled,
+    void Function()? ensureActive,
   }) async {
     _ensureConnected();
     _cancelInactivityTimer();
     _emitSigningState(LedgerSigningState.waitingForConfirmation);
-
+    final bytes = Uint8List.fromList(payload).asUnmodifiableView();
     try {
-      final sig = await _tezosApp.signMessage(
-        _connection!,
-        message: message,
-        account: account,
+      final connection = _connection!;
+      final signature = await _runCancellableSigning(
+        connection: connection,
+        cancelled: cancelled,
+        operation: () async {
+          ensureActive?.call();
+          await _requireTezosWalletApp();
+          _cancelInactivityTimer();
+          ensureActive?.call();
+          return operation
+              ? _tezosApp.signOperation(
+                  connection,
+                  operation: bytes,
+                  account: account,
+                  ensureActive: ensureActive,
+                )
+              : _tezosApp.signMessage(
+                  connection,
+                  message: bytes,
+                  account: account,
+                  ensureActive: ensureActive,
+                );
+        },
       );
+      ensureActive?.call();
       _emitSigningState(LedgerSigningState.confirmed);
-      return sig;
-    } on LedgerException catch (e) {
-      if (e is LedgerDeviceException &&
-          (e.errorCode == 0x6985 || e.errorCode == 0x6982)) {
-        _emitSigningState(LedgerSigningState.rejected);
-      } else {
-        _emitSigningState(LedgerSigningState.timeout);
-      }
+      return signature;
+    } on LedgerException catch (error) {
+      _emitSigningState(
+        error is LedgerDeviceException &&
+                (error.errorCode == 0x6985 || error.errorCode == 0x6982)
+            ? LedgerSigningState.rejected
+            : LedgerSigningState.timeout,
+      );
       rethrow;
     } catch (_) {
       _emitSigningState(LedgerSigningState.timeout);
@@ -559,17 +816,23 @@ class LedgerService {
     Uint8List transaction, {
     int account = 0,
     SolanaDerivationScheme scheme = SolanaDerivationScheme.standard,
+    Future<void>? cancelled,
   }) async {
     _ensureConnected();
     _cancelInactivityTimer();
     _emitSigningState(LedgerSigningState.waitingForConfirmation);
 
     try {
-      final sig = await _solanaApp.signTransaction(
-        _connection!,
-        transaction: transaction,
-        account: account,
-        scheme: scheme,
+      final connection = _connection!;
+      final sig = await _runCancellableSigning(
+        connection: connection,
+        cancelled: cancelled,
+        operation: () => _solanaApp.signTransaction(
+          connection,
+          transaction: transaction,
+          account: account,
+          scheme: scheme,
+        ),
       );
       _emitSigningState(LedgerSigningState.confirmed);
       return sig;
@@ -647,6 +910,104 @@ class LedgerService {
   // Private
   // ---------------------------------------------------------------------------
 
+  Future<T> _runCancellableSigning<T>({
+    required LedgerConnection connection,
+    required Future<T> Function() operation,
+    Future<void>? cancelled,
+  }) async {
+    if (_activeCancellableSigning != null) {
+      throw StateError('A Ledger signing operation is already in progress');
+    }
+    final token = Object();
+    _activeCancellableSigning = token;
+    try {
+      final pending = operation();
+      if (cancelled == null) return await pending;
+      return await raceLedgerOperationWithCancellation(
+        operation: pending,
+        cancelled: cancelled,
+        cancelOperation: () => _cancelSigningConnection(token, connection),
+      );
+    } finally {
+      if (identical(_activeCancellableSigning, token)) {
+        _activeCancellableSigning = null;
+      }
+    }
+  }
+
+  Future<void> _cancelSigningConnection(
+    Object token,
+    LedgerConnection connection,
+  ) async {
+    if (!identical(_activeCancellableSigning, token)) {
+      return;
+    }
+    _inactivityTimer?.cancel();
+    Future<void> reset;
+    if (identical(_connection, connection)) {
+      final stateSubscription = _bleStateSub;
+      _bleStateSub = null;
+      _connection = null;
+      _connectedDevice = null;
+      _connectionStateController.add(LedgerConnectionState.disconnected);
+      reset = _startConnectionReset(connection, stateSubscription);
+    } else {
+      reset = _connectionReset ?? _startConnectionReset(connection, null);
+    }
+    await _awaitConnectionResetBounded(reset);
+  }
+
+  Future<void> _startConnectionReset(
+    LedgerConnection connection,
+    StreamSubscription<BleConnectionState>? stateSubscription,
+  ) {
+    _reconnectBlocked = true;
+    final reset = Future.wait<void>([
+      if (stateSubscription != null) Future.sync(stateSubscription.cancel),
+      Future.sync(connection.disconnect),
+    ]);
+    late final Future<void> trackedReset;
+    trackedReset = reset.then(
+      (_) {
+        _reconnectBlocked = false;
+        if (identical(_connectionReset, trackedReset)) {
+          _connectionReset = null;
+        }
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        _reconnectBlocked = true;
+        if (identical(_connectionReset, trackedReset)) {
+          _connectionReset = null;
+        }
+        Error.throwWithStackTrace(error, stackTrace);
+      },
+    );
+    _connectionReset = trackedReset;
+    return trackedReset;
+  }
+
+  Future<void> _awaitConnectionResetBounded(Future<void> reset) async {
+    try {
+      await reset.timeout(_signingCancellationCleanupTimeout);
+    } on TimeoutException {
+      // The browser request can finish, but reconnect stays fail-closed until
+      // the native disconnect settles. This prevents two physical APDUs from
+      // running concurrently on a connection whose response was abandoned.
+    }
+  }
+
+  Future<void> _waitForConnectionReset() async {
+    final reset = _connectionReset;
+    if (reset != null) {
+      try {
+        await _awaitConnectionResetBounded(reset);
+      } on TimeoutException {
+        throw const LedgerNotConnectedException();
+      }
+    }
+    if (_reconnectBlocked) throw const LedgerNotConnectedException();
+  }
+
   /// Requests Bluetooth permissions when the OS state requires it.
   ///
   /// Called by [LedgerInterface] before scanning or connecting.
@@ -699,6 +1060,10 @@ class LedgerService {
 
   void _resetInactivityTimer() {
     _inactivityTimer?.cancel();
+    if (!isConnected) {
+      _inactivityTimer = null;
+      return;
+    }
     _inactivityTimer = Timer(_inactivityTimeout, () {
       disconnect();
     });

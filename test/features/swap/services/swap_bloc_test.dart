@@ -7,12 +7,14 @@ import 'package:jupiter_aggregator/jupiter_aggregator.dart';
 import 'package:mallow_api/mallow_api.dart';
 import 'package:mallow_wallet/core/config/remote_config.dart';
 import 'package:mallow_wallet/core/crypto/wallet_manager.dart';
+import 'package:mallow_wallet/core/models/account.dart' show WalletType;
 import 'package:mallow_wallet/core/network/solana_rpc_service.dart';
 import 'package:mallow_wallet/core/security/transaction_auth_gate.dart';
 import 'package:mallow_wallet/core/services/ledger_service.dart';
 import 'package:mallow_wallet/core/services/preferences_service.dart';
 import 'package:mallow_wallet/core/services/priority_fee_service.dart';
 import 'package:mallow_wallet/core/services/token_price_service.dart';
+import 'package:mallow_wallet/core/services/transaction_executor.dart';
 import 'package:mallow_wallet/core/services/transaction_pipeline.dart';
 import 'package:mallow_wallet/features/portfolio/models/token_balance.dart';
 import 'package:mallow_wallet/features/swap/data/swap_repository.dart';
@@ -132,20 +134,33 @@ void main() {
     outUsdValue: 199.5,
   );
 
-  SwapBloc buildBloc() => SwapBloc(
-    mockRepository,
-    mockWalletManager,
-    authGate,
-    TransactionPipeline(
+  SwapBloc buildBloc() {
+    final pipeline = TransactionPipeline(
       mockWalletManager,
       MockSolanaRpcService(),
       authGate,
       mockApi,
       MockLedgerService(),
-    ),
-    mockPriceService,
-    mockPreferences,
-    priorityFee,
+    );
+    return SwapBloc(
+      mockRepository,
+      mockWalletManager,
+      authGate,
+      pipeline,
+      mockPriceService,
+      mockPreferences,
+      priorityFee,
+      TransactionExecutor(pipeline),
+    );
+  }
+
+  /// A classic quote for 1 SOL → 200 USDC, fee-free.
+  const testClassicQuote = ClassicSwapQuote(
+    quote: JupiterClassicQuote({
+      'inAmount': '1000000000',
+      'outAmount': '200000000',
+      'swapUsdValue': '200.5',
+    }),
   );
 
   setUp(() {
@@ -175,6 +190,9 @@ void main() {
     when(
       mockWalletManager.getAddress(),
     ).thenAnswer((_) async => testWalletAddress);
+    when(
+      mockWalletManager.walletTypeOf(any),
+    ).thenAnswer((_) async => WalletType.hd);
     // Default checkTx stub — resolves immediately so the background
     // indexer poll completes without delaying tests.
     when(mockApi.checkTx(any)).thenAnswer((_) async => <String, dynamic>{});
@@ -319,6 +337,77 @@ void main() {
         },
       );
 
+      // An Ultra order expires long before a Keystone's QR round trip ends,
+      // so a Keystone taker is quoted on the classic route instead.
+      blocTest<SwapBloc, SwapState>(
+        'quotes a Keystone taker on the classic route, never Ultra',
+        setUp: () {
+          when(
+            mockWalletManager.walletTypeOf(any),
+          ).thenAnswer((_) async => WalletType.keystone);
+          when(
+            mockPriceService.usdValueOfRaw(200000000, usdcToken.mint),
+          ).thenReturn(199.9);
+          when(
+            mockRepository.getClassicQuote(
+              inputMint: anyNamed('inputMint'),
+              outputMint: anyNamed('outputMint'),
+              amount: anyNamed('amount'),
+              slippageBps: anyNamed('slippageBps'),
+            ),
+          ).thenAnswer((_) async => testClassicQuote);
+        },
+        build: buildBloc,
+        seed: () => const SwapState(
+          sellToken: solToken,
+          buyToken: usdcToken,
+          amount: '1.0',
+          slippageBps: 75,
+        ),
+        act: (bloc) => bloc.add(const SwapEvent.getQuote()),
+        expect: () => [
+          const SwapState(
+            sellToken: solToken,
+            buyToken: usdcToken,
+            amount: '1.0',
+            slippageBps: 75,
+            flow: TxFlowPreparing<SwapQuoteData, SwapSuccessData>(),
+          ),
+          predicate<SwapState>((s) {
+            final quote = s.quoteData;
+            return quote != null &&
+                quote.order == null &&
+                quote.classicQuote == testClassicQuote &&
+                quote.canExecute &&
+                quote.outputAmount == 200.0 &&
+                quote.rate == 200.0 &&
+                quote.inUsdValue == 200.5 &&
+                quote.outUsdValue == 199.9 &&
+                quote.taker == testWalletAddress;
+          }, 'TxFlowReady carrying the classic quote + derived amounts'),
+        ],
+        verify: (_) {
+          verify(
+            mockRepository.getClassicQuote(
+              inputMint: solToken.mint,
+              outputMint: usdcToken.mint,
+              amount: 1000000000,
+              slippageBps: 75,
+            ),
+          ).called(1);
+          verifyNever(
+            mockRepository.getOrder(
+              inputMint: anyNamed('inputMint'),
+              outputMint: anyNamed('outputMint'),
+              amount: anyNamed('amount'),
+              taker: anyNamed('taker'),
+              slippageBps: anyNamed('slippageBps'),
+              priorityFeeLamports: anyNamed('priorityFeeLamports'),
+            ),
+          );
+        },
+      );
+
       blocTest<SwapBloc, SwapState>(
         'keeps showing the previous quote while a refresh is in flight',
         setUp: () {
@@ -344,7 +433,7 @@ void main() {
         // No intermediate TxFlowPreparing — only the refreshed ready state.
         expect: () => [
           predicate<SwapState>(
-            (s) => s.quoteData?.order.requestId == 'req-2',
+            (s) => s.quoteData?.order?.requestId == 'req-2',
             'ready state refreshed in place',
           ),
         ],
@@ -564,6 +653,206 @@ void main() {
         ],
       );
 
+      // An Ultra order lives for seconds and a Keystone signature is a QR
+      // round trip: signing would fail only after the user approved on the
+      // device. Keystone quotes take the classic route; this is the backstop
+      // for an Ultra order that reaches a Keystone anyway.
+      blocTest<SwapBloc, SwapState>(
+        'refuses to sign an Ultra order with a Keystone',
+        setUp: () => when(
+          mockWalletManager.walletTypeOf(any),
+        ).thenAnswer((_) async => WalletType.keystone),
+        build: buildBloc,
+        seed: () => _quoteReady(
+          sellToken: solToken,
+          buyToken: usdcToken,
+          amount: '1.0',
+          order: testOrder,
+        ),
+        act: (bloc) => bloc.add(const SwapEvent.execute()),
+        expect: () => [
+          const SwapState(
+            sellToken: solToken,
+            buyToken: usdcToken,
+            amount: '1.0',
+            flow: TxFlowSigning<SwapQuoteData, SwapSuccessData>(),
+          ),
+          _isFailure(contains('Keystone')),
+        ],
+        verify: (_) {
+          verifyNever(
+            mockWalletManager.signCompiledTx(
+              unsignedTx: anyNamed('unsignedTx'),
+              additionalSigners: anyNamed('additionalSigners'),
+            ),
+          );
+        },
+      );
+
+      group('classic route', () {
+        late MockSolanaRpcService mainnetRpc;
+
+        setUp(() {
+          mainnetRpc = MockSolanaRpcService();
+          when(mockRepository.rpcService).thenReturn(mainnetRpc);
+          when(
+            mockWalletManager.walletTypeOf(any),
+          ).thenAnswer((_) async => WalletType.keystone);
+          when(
+            mockWalletManager.activeSignerIsKeystone(),
+          ).thenAnswer((_) async => true);
+          when(
+            mockRepository.buildClassicSwapTx(
+              quote: anyNamed('quote'),
+              taker: anyNamed('taker'),
+              slippageBps: anyNamed('slippageBps'),
+              priorityFeeLamports: anyNamed('priorityFeeLamports'),
+            ),
+          ).thenAnswer((_) async => testSwapTransaction);
+          when(
+            mainnetRpc.getLatestBlockhash(),
+          ).thenAnswer((_) async => '11111111111111111111111111111111');
+          when(
+            mockWalletManager.signCompiledTx(
+              unsignedTx: anyNamed('unsignedTx'),
+              additionalSigners: anyNamed('additionalSigners'),
+            ),
+          ).thenAnswer(
+            (invocation) async =>
+                invocation.namedArguments[#unsignedTx] as SignedTx,
+          );
+          when(
+            mainnetRpc.sendTransaction(any),
+          ).thenAnswer((_) async => testSignature);
+          when(
+            mainnetRpc.awaitConfirmationOrThrow(
+              any,
+              rebroadcast: anyNamed('rebroadcast'),
+            ),
+          ).thenAnswer((_) async {});
+        });
+
+        SwapState classicReady({String taker = testWalletAddress}) => SwapState(
+          sellToken: solToken,
+          buyToken: usdcToken,
+          amount: '1.0',
+          slippageBps: 75,
+          priorityFeeLamports: 50000,
+          flow: TxFlowReady(
+            SwapQuoteData(
+              classicQuote: testClassicQuote,
+              outputAmount: 200.0,
+              rate: 200.0,
+              taker: taker,
+            ),
+          ),
+        );
+
+        blocTest<SwapBloc, SwapState>(
+          'builds the swap, then signs and broadcasts it on mainnet itself',
+          build: buildBloc,
+          seed: classicReady,
+          act: (bloc) => bloc.add(const SwapEvent.execute()),
+          expect: () => [
+            const SwapState(
+              sellToken: solToken,
+              buyToken: usdcToken,
+              amount: '1.0',
+              slippageBps: 75,
+              priorityFeeLamports: 50000,
+              flow: TxFlowSigning<SwapQuoteData, SwapSuccessData>(),
+            ),
+            const SwapState(
+              sellToken: solToken,
+              buyToken: usdcToken,
+              amount: '1.0',
+              slippageBps: 75,
+              priorityFeeLamports: 50000,
+              flow: TxFlowBroadcasting<SwapQuoteData, SwapSuccessData>(),
+            ),
+            predicate<SwapState>(
+              (s) => switch (s.flow) {
+                TxFlowSuccess(:final signature) => signature == testSignature,
+                _ => false,
+              },
+              'TxFlowSuccess with the broadcast signature',
+            ),
+          ],
+          verify: (_) {
+            verify(
+              mockRepository.buildClassicSwapTx(
+                quote: testClassicQuote,
+                taker: testWalletAddress,
+                slippageBps: 75,
+                priorityFeeLamports: 50000,
+              ),
+            ).called(1);
+            // The blockhash is refreshed right before signing — what lets a
+            // slow signer re-sign the same route instead of failing.
+            verify(mainnetRpc.getLatestBlockhash()).called(1);
+            verify(mainnetRpc.sendTransaction(any)).called(1);
+            verifyNever(
+              mockRepository.executeOrder(
+                signedTransaction: anyNamed('signedTransaction'),
+                requestId: anyNamed('requestId'),
+              ),
+            );
+          },
+        );
+
+        blocTest<SwapBloc, SwapState>(
+          'refuses a quote taken for another wallet before building anything',
+          build: buildBloc,
+          seed: () => classicReady(taker: otherWalletAddress),
+          act: (bloc) => bloc.add(const SwapEvent.execute()),
+          skip: 1,
+          expect: () => [_isFailure(contains('Wallet changed'))],
+          verify: (_) {
+            verifyNever(
+              mockRepository.buildClassicSwapTx(
+                quote: anyNamed('quote'),
+                taker: anyNamed('taker'),
+                slippageBps: anyNamed('slippageBps'),
+                priorityFeeLamports: anyNamed('priorityFeeLamports'),
+              ),
+            );
+            verifyNever(
+              mockWalletManager.signCompiledTx(
+                unsignedTx: anyNamed('unsignedTx'),
+                additionalSigners: anyNamed('additionalSigners'),
+              ),
+            );
+          },
+        );
+
+        blocTest<SwapBloc, SwapState>(
+          'classifies an auth-gate cancel as a cancelled failure, '
+          'without signing',
+          setUp: () => authGate = _CancelAuthGate(),
+          build: buildBloc,
+          seed: classicReady,
+          act: (bloc) => bloc.add(const SwapEvent.execute()),
+          skip: 1,
+          expect: () => [
+            predicate<SwapState>(
+              (s) => switch (s.flow) {
+                TxFlowFailure(:final failure) => failure.isCancelled,
+                _ => false,
+              },
+              'TxFlowFailure with isCancelled',
+            ),
+          ],
+          verify: (_) {
+            verifyNever(
+              mockWalletManager.signCompiledTx(
+                unsignedTx: anyNamed('unsignedTx'),
+                additionalSigners: anyNamed('additionalSigners'),
+              ),
+            );
+          },
+        );
+      });
+
       blocTest<SwapBloc, SwapState>(
         'classifies an auth-gate cancel as a cancelled failure, '
         'without signing',
@@ -760,7 +1049,7 @@ void main() {
           predicate<SwapState>(
             (s) =>
                 s.quoteData?.taker == otherWalletAddress &&
-                s.quoteData?.order.requestId == 'req-$otherWalletAddress',
+                s.quoteData?.order?.requestId == 'req-$otherWalletAddress',
             'a fresh quote carrying the new taker',
           ),
         ],
@@ -832,7 +1121,7 @@ void main() {
           ),
           predicate<SwapState>(
             (s) =>
-                s.quoteData?.order.requestId == 'req-new' &&
+                s.quoteData?.order?.requestId == 'req-new' &&
                 s.quoteData?.taker == otherWalletAddress,
             'only the new wallet\'s quote is surfaced',
           ),

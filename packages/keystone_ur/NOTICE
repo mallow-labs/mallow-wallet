@@ -1,0 +1,114 @@
+keystone_ur — third-party notices
+==================================
+
+Blockchain Commons bc-ur
+------------------------
+The Uniform Resource codec under lib/src/bc_ur/, and the UrEncoder and
+UrDecoder in lib/src/ur.dart, are a Dart port of the reference implementation
+at https://github.com/BlockchainCommons/bc-ur
+(commit 4479fb81b2350ae8bafa042a5572b9c64c2c32ca). test/bc_ur_test.dart ports
+its test suite (test/test.cpp), and test/vectors/bc_ur_vectors.dart reproduces
+that suite's vectors.
+
+  Copyright © 2020 by Blockchain Commons, LLC
+  Licensed under the BSD-2-Clause Plus Patent License (see LICENSE, part A).
+
+| Dart file                       | Ported from                                  |
+| ------------------------------- | -------------------------------------------- |
+| lib/src/bc_ur/bytewords.dart    | src/bytewords.cpp                            |
+| lib/src/bc_ur/crc32.dart        | src/crc32.c                                  |
+| lib/src/bc_ur/xoshiro256.dart   | src/xoshiro256.cpp                           |
+| lib/src/bc_ur/fountain_utils.dart | src/random-sampler.cpp, src/fountain-utils.cpp, src/fountain-utils.hpp |
+| lib/src/bc_ur/fountain_encoder.dart | src/fountain-encoder.cpp                 |
+| lib/src/bc_ur/fountain_decoder.dart | src/fountain-decoder.cpp                 |
+| lib/src/ur.dart (UrEncoder, UrDecoder) | src/ur-encoder.cpp, src/ur-decoder.cpp — rewritten around this package's API, with stricter input checks |
+| test/bc_ur_test.dart            | test/test.cpp                                |
+| test/vectors/bc_ur_vectors.dart | test/test.cpp (vectors only)                 |
+
+bc-ur's README additionally records crc32.c as BSD-3-Clause (2020 Wolf McNally
+for Blockchain Commons), while the file's own header says BSD-2-Clause Plus
+Patent. LICENSE reproduces both texts (parts A and C). The algorithm is the
+standard IEEE CRC-32.
+
+xoshiro256** 1.0 was written in 2018 by David Blackman and Sebastiano Vigna
+(vigna@acm.org) and dedicated to the public domain under CC0 1.0
+(http://creativecommons.org/publicdomain/zero/1.0/); bc-ur's seeding and
+helper methods around it are Blockchain Commons' work, under the licence above.
+
+The specifications implemented are BCR-2020-005 (Uniform Resources),
+BCR-2020-006 (registry of UR types), BCR-2020-007 (crypto-hdkey and
+crypto-keypath) and BCR-2020-012 (Bytewords), at
+https://github.com/BlockchainCommons/Research.
+
+Keystone
+--------
+The registry types in lib/src/registry/ are an independent implementation of
+the wire formats Keystone publishes (sol-sign-request, sol-signature,
+crypto-multi-accounts, eth-sign-request, eth-signature, and Keystone's use of
+crypto-hdkey and crypto-account), written to be byte-identical to Keystone's
+encoders. No Keystone code is included.
+
+test/vectors/keystone_vectors.dart reproduces test vectors from:
+
+  * keystone-sdk-rust (https://github.com/KeystoneHQ/keystone-sdk-rust),
+    crate ur-registry — Copyright (c) 2023 Keystone, MIT License (text 1
+    below);
+  * keystone-sdk-base (https://github.com/KeystoneHQ/keystone-sdk-base),
+    packages ur-registry-sol and ur-registry-eth (npm
+    @keystonehq/bc-ur-registry-sol and @keystonehq/bc-ur-registry-eth) — ISC
+    License (text 3 below);
+  * keystone3-firmware (https://github.com/KeystoneHQ/keystone3-firmware),
+    crate wallets — Copyright (c) YANSSIE HK LIMITED, MIT licence (text 2
+    below).
+
+The three texts follow, copied unchanged from each repository's licence file,
+except text 3: keystone-sdk-base ships no licence file and declares
+"license": "ISC" in each package's package.json without a copyright line, so
+its text is the standard ISC License from the SPDX licence list. Upstream
+states no copyright line to put in its template's place.
+
+1. keystone-sdk-rust — MIT License
+----------------------------------
+MIT License
+
+Copyright (c) 2023 Keystone
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+2. keystone3-firmware — MIT License
+-----------------------------------
+Copyright (c) Year YANSSIE HK LIMITED.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this 
+software and associated documentation files (the "Software"), to deal in the Software 
+without restriction, including without limitation the rights to use, copy, modify, 
+merge, publish, distribute, sublicense, and/or sell copies of the Software, and 
+to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in 
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, 
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR 
+PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, 
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, 
+ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Software: All Keystone associated files.
+License: MIT
+Licensor: YANSSIE HK LIMITED.
+
+3. keystone-sdk-base — ISC License
+----------------------------------
+ISC License
+
+(No copyright line is stated upstream. Both packages' package.json name the
+author as soralit.)
+
+Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.

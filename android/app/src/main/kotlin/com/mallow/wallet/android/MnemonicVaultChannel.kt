@@ -19,6 +19,22 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
+ * Cryptographically erase one vault entry.
+ *
+ * The alias goes first: if the preferences commit then fails, the remaining
+ * ciphertext is unreadable and a retry can still remove it. Every failure is
+ * propagated so the platform channel cannot report a successful deletion that
+ * did not reach durable storage.
+ */
+internal fun eraseVaultEntry(
+    eraseKeystoreAlias: () -> Unit,
+    eraseCiphertext: () -> Boolean,
+) {
+    eraseKeystoreAlias()
+    check(eraseCiphertext()) { "preferences commit failed" }
+}
+
+/**
  * Native AndroidKeystore handler for mnemonic/private-key storage.
  *
  * Each secret is encrypted with a hardware-backed AES-256-GCM key in
@@ -146,15 +162,24 @@ class MnemonicVaultChannel : FlutterPlugin, MethodCallHandler {
     // -------------------------------------------------------------------------
 
     private fun vaultDelete(key: String, result: Result) {
-        prefs().edit()
-            .remove(KEY_PREFIX_IV + key)
-            .remove(KEY_PREFIX_CT + key)
-            .apply()
         try {
-            val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).also { it.load(null) }
-            if (ks.containsAlias(keystoreAlias(key))) ks.deleteEntry(keystoreAlias(key))
-        } catch (_: Exception) {}
-        result.success(null)
+            eraseVaultEntry(
+                eraseKeystoreAlias = {
+                    val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).also { it.load(null) }
+                    val alias = keystoreAlias(key)
+                    if (ks.containsAlias(alias)) ks.deleteEntry(alias)
+                },
+                eraseCiphertext = {
+                    prefs().edit()
+                        .remove(KEY_PREFIX_IV + key)
+                        .remove(KEY_PREFIX_CT + key)
+                        .commit()
+                },
+            )
+            result.success(null)
+        } catch (_: Exception) {
+            result.error("delete_failed", "vault delete failed", null)
+        }
     }
 
     // -------------------------------------------------------------------------

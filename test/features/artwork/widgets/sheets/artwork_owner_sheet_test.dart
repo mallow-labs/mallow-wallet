@@ -51,7 +51,7 @@ void main() {
   testWidgets('a listing-blocked artwork can still be sent', (tester) async {
     // The flagged / sold-out-master case: the webapp gates only "List for
     // sale" (`ActionBox`) and leaves Transfer
-    // available (`:200-217`).
+    // available.
     await _pump(tester, canList: false, canSend: true);
     expect(find.text('Send artwork'), findsOneWidget);
     expect(find.text('List artwork'), findsNothing);

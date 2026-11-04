@@ -13,6 +13,7 @@ import 'package:web3auth_flutter/web3auth_flutter.dart';
 import 'core/analytics/analytics_events.dart';
 import 'core/analytics/analytics_service.dart';
 import 'core/config/remote_config_service.dart';
+import 'core/config/remote_config.dart';
 import 'core/config/system_status_service.dart';
 import 'core/crypto/wallet_manager.dart';
 import 'core/models/account.dart';
@@ -23,14 +24,19 @@ import 'core/router/app_router.dart';
 import 'core/router/auth_state_notifier.dart';
 import 'core/router/nav_bar_state.dart';
 import 'core/security/app_lock_bloc.dart';
+import 'core/services/deep_link_handler_registry.dart';
 import 'core/services/deep_link_service.dart';
+import 'core/services/keystone_sign_service.dart';
 import 'core/services/preferences_service.dart';
+import 'core/services/program_label_service.dart';
+import 'core/services/signer_prompt_tracker.dart';
 import 'core/services/social_auth_service.dart';
 import 'core/services/token_price_service.dart';
 import 'core/services/twitter_connect_notifier.dart';
 import 'core/services/wallet_repository.dart';
 import 'di.dart';
 import 'features/activity/widgets/pending_tx_resolution_listener.dart';
+import 'features/browser/services/browser_lock.dart';
 import 'features/cast/models/cast_queue.dart';
 import 'features/cast/services/cast_awake_guard.dart';
 import 'features/cast/services/cast_bloc.dart';
@@ -41,12 +47,14 @@ import 'features/cast/widgets/cast_error_toast.dart';
 import 'features/cast/widgets/cast_receiver_view.dart';
 import 'features/cast/widgets/now_casting_bar.dart';
 import 'features/home/widgets/drawer_signal.dart';
+import 'features/keystone/widgets/keystone_sign_sheet.dart';
 import 'features/ledger/widgets/hardware_verify_sheet.dart';
 import 'features/ledger/widgets/ledger_connect_sheet.dart';
 import 'shared/theme/mallow_theme.dart';
 import 'shared/widgets/action_menu.dart';
 import 'shared/widgets/bottom_nav_bar.dart';
 import 'shared/widgets/force_upgrade_overlay.dart';
+import 'shared/widgets/in_app_push_banner.dart';
 import 'shared/widgets/lock_screen.dart';
 import 'shared/widgets/mallow_scroll_behavior.dart';
 import 'shared/widgets/mallow_sheet.dart';
@@ -110,6 +118,9 @@ class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
       if (state is AppLockStateUnlocked && _isObscured && mounted) {
         setState(() => _isObscured = false);
       }
+      // Here, not in the browser screen: a minimised browser is unmounted,
+      // and its tab screenshots must still not outlive a lock.
+      dropBrowserThumbnailsOnLock(state);
     });
     // Same workaround for AirPlay: when the external display scene tears
     // down (e.g. the receiver stops mirroring from its side), iOS fires a
@@ -283,6 +294,10 @@ class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
     // the webapp reads; failures announce nothing.
     sl<SystemStatusService>().start();
 
+    // Names for the signing review's program calls. At most one fetch a day;
+    // without a list the review shows addresses alone.
+    sl<ProgramLabelService>().start();
+
     _isInitialized = true;
 
     final router = createRouter(authStateNotifier: authStateNotifier);
@@ -306,6 +321,7 @@ class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
     _deepLinkService = DeepLinkService(
       router: router,
       twitterConnectNotifier: sl<TwitterConnectNotifier>(),
+      handlerRegistry: sl<DeepLinkHandlerRegistry>(),
     );
     unawaited(_deepLinkService!.start());
 
@@ -597,9 +613,11 @@ class _AppWithLockScreen extends StatelessWidget {
                       // each screen wiring it up.
                       _HardwareVerifyListener(
                         child: _LedgerConnectListener(
-                          child: PendingTxResolutionListener(
-                            child: CastBarMediaQueryInset(
-                              child: child ?? const SizedBox.shrink(),
+                          child: _KeystoneSignListener(
+                            child: PendingTxResolutionListener(
+                              child: CastBarMediaQueryInset(
+                                child: child ?? const SizedBox.shrink(),
+                              ),
                             ),
                           ),
                         ),
@@ -653,21 +671,48 @@ class _AppWithLockScreen extends StatelessWidget {
                 ),
                 child: Stack(
                   children: [
-                    content,
-                    // Operator announcements (scheduled maintenance / broadcast).
-                    // Floats over the top of whatever is routed rather than
-                    // taking layout: it must be visible from every screen and
-                    // from inside a sheet, and it renders nothing the vast
-                    // majority of the time. Listed before the force-upgrade wall
-                    // (which supersedes any announcement) and before the privacy
-                    // blur (which must stay topmost so the OS snapshot is
-                    // blurred) — in a Stack, later children paint on top.
-                    const Positioned(
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      child: SystemStatusBanner(),
+                    // Foreground push banner (Android). Takes layout: while
+                    // one shows, everything inside — routes, sheets, the
+                    // announcement banner — is pushed down below it. The
+                    // force-upgrade wall and the privacy blur stay outside so
+                    // they still cover it. Disabled while locked or still
+                    // resolving the lock, so a notification's text never sits
+                    // above the lock screen.
+                    InAppPushBannerHost(
+                      enabled:
+                          lockState is! AppLockStateLocked &&
+                          lockState is! AppLockStateUninitialized,
+                      child: Stack(
+                        children: [
+                          // Screens that draw under the system bars without
+                          // an AppBar get icons for the wallet's theme, not
+                          // the platform's default. A nested region (an
+                          // AppBar, the browser) wins.
+                          AnnotatedRegion<SystemUiOverlayStyle>(
+                            value: MallowTheme.systemBarsOver(
+                              Theme.of(context).brightness,
+                            ),
+                            child: content,
+                          ),
+                          // Operator announcements (scheduled maintenance /
+                          // broadcast). Floats over the top of whatever is
+                          // routed rather than taking layout: it must be
+                          // visible from every screen and from inside a
+                          // sheet, and it renders nothing the vast majority
+                          // of the time.
+                          const Positioned(
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            child: SystemStatusBanner(),
+                          ),
+                        ],
+                      ),
                     ),
+                    // Listed before the force-upgrade wall (which supersedes
+                    // any banner) and the privacy blur (which must stay
+                    // topmost so the OS snapshot is blurred) — in a Stack,
+                    // later children paint on top.
                     // Force-upgrade wall. Above the router (and the lock
                     // screen) so no route can get behind it, but below the
                     // privacy blur — the blur must stay topmost so the OS
@@ -820,6 +865,7 @@ class _HardwareVerifyListenerState extends State<_HardwareVerifyListener> {
     }
 
     _isShowing = true;
+    final tracker = sl<SignerPromptTracker>()..opened();
 
     showMallowSheet<void>(
       context: navContext,
@@ -830,11 +876,66 @@ class _HardwareVerifyListenerState extends State<_HardwareVerifyListener> {
         completer: request.completer,
       ),
     ).whenComplete(() {
+      tracker.closed();
       _isShowing = false;
       // Ensure completer is resolved even if sheet was dismissed externally
       if (!request.completer.isCompleted) {
         request.completer.complete(false);
       }
+    });
+  }
+
+  @override
+  void dispose() {
+    _sub.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+/// Listens to [KeystoneSignController] and shows the QR exchange sheet when a
+/// Keystone wallet has to sign.
+class _KeystoneSignListener extends StatefulWidget {
+  const _KeystoneSignListener({required this.child});
+  final Widget child;
+
+  @override
+  State<_KeystoneSignListener> createState() => _KeystoneSignListenerState();
+}
+
+class _KeystoneSignListenerState extends State<_KeystoneSignListener> {
+  late final StreamSubscription<KeystoneSignPrompt> _sub;
+  bool _isShowing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _sub = sl<KeystoneSignController>().requests.listen(_onRequest);
+  }
+
+  void _onRequest(KeystoneSignPrompt prompt) {
+    if (prompt.completer.isCompleted) return;
+    // Signing is serial, so a second prompt while one is up means something
+    // upstream is racing. Refuse it rather than stack two QR exchanges.
+    if (_isShowing) {
+      prompt.cancel();
+      return;
+    }
+    final navContext = AppRoutes.rootNavigatorKey.currentContext;
+    if (navContext == null) {
+      prompt.cancel();
+      return;
+    }
+
+    _isShowing = true;
+    final tracker = sl<SignerPromptTracker>()..opened();
+    showKeystoneSignSheet(navContext, prompt).whenComplete(() {
+      tracker.closed();
+      _isShowing = false;
+      // However the sheet went away, the request is over.
+      prompt.cancel();
     });
   }
 
@@ -871,6 +972,7 @@ class _LedgerConnectListenerState extends State<_LedgerConnectListener> {
 
   void _onRequest(LedgerConnectRequest request) {
     debugPrint('[LedgerConnectListener] _onRequest — _isShowing=$_isShowing');
+    if (request.completer.isCompleted) return;
     if (_isShowing) {
       debugPrint('[LedgerConnectListener] dropping request — already showing');
       request.completer.complete(false);
@@ -888,6 +990,7 @@ class _LedgerConnectListenerState extends State<_LedgerConnectListener> {
 
     _isShowing = true;
     debugPrint('[LedgerConnectListener] showing LedgerConnectSheet');
+    final tracker = sl<SignerPromptTracker>()..opened();
 
     showMallowSheet<void>(
       context: navContext,
@@ -898,6 +1001,7 @@ class _LedgerConnectListenerState extends State<_LedgerConnectListener> {
       ),
     ).whenComplete(() {
       debugPrint('[LedgerConnectListener] sheet closed');
+      tracker.closed();
       _isShowing = false;
       if (!request.completer.isCompleted) {
         request.completer.complete(false);
@@ -1005,13 +1109,17 @@ class _PersistentNavBarState extends State<_PersistentNavBar> {
               child: ValueListenableBuilder<MallowNavTab>(
                 valueListenable: NavBarState.activeTab,
                 builder: (context, activeTab, _) {
-                  return MallowBottomNavBar(
-                    currentTab: activeTab,
-                    showFab: !_isWatchOnly,
-                    onFabPressed: () => ActionMenu.toggle(context, router),
-                    onTabSelected: (tab) {
-                      NavBarState.selectedTab.value = tab;
-                    },
+                  return ValueListenableBuilder<RemoteConfig>(
+                    valueListenable: sl<RemoteConfigService>().config,
+                    builder: (context, config, _) => MallowBottomNavBar(
+                      currentTab: activeTab,
+                      showBrowser: config.browserEnabled,
+                      showFab: !_isWatchOnly,
+                      onFabPressed: () => ActionMenu.toggle(context, router),
+                      onTabSelected: (tab) {
+                        NavBarState.selectedTab.value = tab;
+                      },
+                    ),
                   );
                 },
               ),

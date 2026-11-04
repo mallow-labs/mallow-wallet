@@ -4,8 +4,7 @@ import 'package:mallow_api/mallow_api.dart' as api;
 
 /// Wraps `POST /v0/events/byMint/:mintAccount`. Returns paged marketplace
 /// activity for a mint — listings, sales, bids, offers, claims. Powers the
-/// Activity tab on the artwork detail screen and the bid-history modal
-/// (Phase 5 wiring).
+/// Activity tab on the artwork detail screen and the bid-history modal.
 @lazySingleton
 class ArtworkEventsRepository {
   ArtworkEventsRepository(this._api);

@@ -22,11 +22,18 @@ void main() {
     await tester.pump();
   }
 
-  testWidgets('every branch keeps the webapp headline', (tester) async {
+  testWidgets('every branch renders the appropriate headline', (tester) async {
     for (final reason in ListingBlockReason.values) {
       await pumpSheet(tester, reason);
       expect(find.text('Verify to list'), findsOneWidget);
-      expect(find.text('Sorry, this item cannot be listed.'), findsOneWidget);
+      expect(
+        find.text(
+          reason == ListingBlockReason.unverifiedAsset
+              ? 'Could not verify this artwork.'
+              : 'Sorry, this item cannot be listed.',
+        ),
+        findsOneWidget,
+      );
     }
   });
 
@@ -43,6 +50,39 @@ void main() {
     );
     expect(find.text('Open application form'), findsNothing);
     expect(find.text('Edit profile'), findsNothing);
+  });
+
+  testWidgets('unverified asset offers a retry without claiming restrictions', (
+    tester,
+  ) async {
+    VerifyToListAction? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: MallowTheme.lightTheme,
+        home: Scaffold(
+          body: Builder(
+            builder: (context) => TextButton(
+              onPressed: () async => result = await showVerifyToListSheet(
+                context,
+                ListingBlockReason.unverifiedAsset,
+              ),
+              child: const Text('Open'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(
+      find.text('Could not verify artwork eligibility. Please try again.'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('transfer restrictions'), findsNothing);
+    await tester.tap(find.text('Try again'));
+    await tester.pumpAndSettle();
+    expect(result, VerifyToListAction.retry);
   });
 
   testWidgets('an unvetted creator is pointed at the application form', (

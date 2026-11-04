@@ -1,4 +1,14 @@
 // Models barrel export
+export '../generated/openapi.models.swagger.dart'
+    show
+        MagicEdenBuyQuote,
+        MagicEdenBuyQuoteResponse,
+        MagicEdenBuyTxRequest,
+        MagicEdenBuyTxResponse,
+        $MagicEdenBuyQuoteExtension,
+        $MagicEdenBuyQuoteResponseExtension,
+        $MagicEdenBuyTxRequestExtension,
+        $MagicEdenBuyTxResponseExtension;
 export 'activity.dart';
 export 'api_response.dart';
 export 'api_user_ref.dart';
@@ -80,6 +90,14 @@ export '../generated/openapi.models.swagger.dart'
         BuyEditionTxsResponse,
         CreateOfferTxRequest,
         CancelOfferTxRequest,
+        WithdrawBidRefundTxRequest,
+        BidRefund,
+        BidRefundsResponse,
+        BidRefundClaim,
+        BidRefundClaimsResponse,
+        CloseBidRefundClaimTxRequest,
+        PushSolBidRefundTxRequest,
+        PushBidRefundTxRequest,
         AcceptOfferTxRequest,
         CreateFixedPriceTxRequest,
         CreateFixedPriceTxResponse,
@@ -102,7 +120,7 @@ export '../generated/openapi.models.swagger.dart'
 
 // Generated v2 artwork-portfolio request + response models (synced from
 // the server's API contract). Used by `MallowApiV2Client` for the
-// `/v2/portfolio/*` reads. The shared `NftPreviewRender` (+ nested
+// `/v2/portfolio/*` reads and the `/v2/portfolio/received` report. The shared `NftPreviewRender` (+ nested
 // `NftPreview*` metadata/creator types) carries the full rich shape the
 // portfolio renders. The group drilldown shares that shape:
 // `PortfolioDrilldownResult.artworks` is a `List<NftPreviewRender>`, the same
@@ -122,7 +140,9 @@ export '../generated/openapi.models.swagger.dart'
         PortfolioGroupsResult,
         PortfolioGroupSummary,
         PortfolioGroupDrilldownResponse,
-        PortfolioDrilldownResult;
+        PortfolioDrilldownResult,
+        PortfolioReceivedRequest,
+        PortfolioReceivedResult;
 
 // Generated `/v2/config/mobile` models (the mobile kill-switch + force-upgrade
 // payload). Parsed once, at `RemoteConfig.fromWire`, which folds `disabledFlows`
@@ -154,4 +174,17 @@ export '../generated/openapi.enums.swagger.dart'
         ReportReason,
         PortfolioArtworkSort,
         PortfolioGroupSort,
-        PortfolioGroupsRequestGroupBy;
+        PortfolioGroupsRequestGroupBy,
+        PortfolioReceivedChain,
+        PortfolioReceivedStatus;
+
+export '../generated/openapi.models.swagger.dart'
+    show
+        OpenSeaPurchaseQuote,
+        OpenSeaPurchaseQuoteRequest,
+        OpenSeaPurchasePrepareRequest,
+        OpenSeaPurchasePrepareResponse,
+        OpenSeaPurchasePrepareResponse$Result,
+        OpenSeaPurchaseConfirmRequest,
+        $OpenSeaPurchaseQuoteExtension,
+        $OpenSeaPurchasePrepareResponse$ResultExtension;

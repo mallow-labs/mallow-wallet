@@ -33,12 +33,19 @@ class AppSnackBar {
 
   /// Shows [message] in a top-anchored snack bar over the root overlay.
   /// Any currently visible snack bar is animated out before this one appears.
+  ///
+  /// [actionLabel] adds a trailing text button that runs [onAction] and
+  /// dismisses the snack bar. It still times out after [duration], so an
+  /// action never leaves it stuck on screen.
   static void show(
     BuildContext context,
     String message, {
     Duration duration = _defaultDuration,
     AppSnackBarType type = AppSnackBarType.info,
+    String? actionLabel,
+    VoidCallback? onAction,
   }) {
+    assert((actionLabel == null) == (onAction == null));
     dismiss();
     // `Overlay.of` searches ancestors, so it throws when [context] is the root
     // Navigator's own context (e.g. `rootNavigatorKey.currentContext`, used by
@@ -56,6 +63,8 @@ class AppSnackBar {
         message: message,
         duration: duration,
         type: type,
+        actionLabel: actionLabel,
+        onAction: onAction,
         onRemoved: () {
           entry.remove();
           if (identical(_currentKey, key)) {
@@ -93,12 +102,16 @@ class _AppSnackBarEntry extends StatefulWidget {
     required this.duration,
     required this.type,
     required this.onRemoved,
+    this.actionLabel,
+    this.onAction,
     super.key,
   });
 
   final String message;
   final Duration duration;
   final AppSnackBarType type;
+  final String? actionLabel;
+  final VoidCallback? onAction;
   final VoidCallback onRemoved;
 
   @override
@@ -179,10 +192,39 @@ class _AppSnackBarEntryState extends State<_AppSnackBarEntry>
           side: BorderSide(color: borderColor),
           borderRadius: BorderRadius.circular(AppSnackBar._radius),
         ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          child: Text(widget.message, style: textStyle),
-        ),
+        child: widget.actionLabel == null
+            ? Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 14,
+                ),
+                child: Text(widget.message, style: textStyle),
+              )
+            : Row(
+                children: [
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 14, 8, 14),
+                      child: Text(widget.message, style: textStyle),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      _dismiss();
+                      widget.onAction!();
+                    },
+                    style: TextButton.styleFrom(
+                      foregroundColor: colors.textPrimary,
+                      minimumSize: const Size(48, 48),
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                    ),
+                    child: Text(
+                      widget.actionLabel!,
+                      style: textStyle?.copyWith(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
+              ),
       ),
     );
     // Reduce Motion swaps the vertical slide for a plain opacity fade so the

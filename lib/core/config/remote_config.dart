@@ -20,7 +20,7 @@ part 'remote_config.freezed.dart';
 ///   burn is available. What a build implements is a property of that build.
 ///
 /// Only three flows are multi-chain ([nativeSend] ×3, [tokenSend] ×3,
-/// [nftTransfer] ×2); the other 29 cells are Solana-only by construction.
+/// [nftTransfer] ×2); the other cells are Solana-only by construction.
 ///
 /// The 🔓 cells below are **escape hatches** — how users get assets back out
 /// (`*-cancel`, [auctionSettle], the raffle claims, [withdrawStake],
@@ -86,9 +86,14 @@ enum AppFlow {
   /// 🔓 `/tx/auctions/settle` — funds and NFT are in escrow until this runs.
   auctionSettle('auction-settle', {Chain.solana}),
 
+  /// 🔓 Bid-refund withdrawals, sponsored SOL/token releases and deposit recovery:
+  /// `/tx/auctions/withdraw-bid-refund`, `/tx/auctions/push-sol-bid-refund`,
+  /// `/tx/auctions/push-bid-refund`, `/tx/auctions/close-bid-refund-claim`.
+  auctionRefundWithdraw('auction-refund-withdraw', {Chain.solana}),
+
   // --- Marketplace, buy side ---
-  /// `/tx/fixed-price/buy`.
-  fixedPriceBuy('fixed-price-buy', {Chain.solana}),
+  /// Solana fixed-price buys and Ethereum OpenSea purchases.
+  fixedPriceBuy('fixed-price-buy', {Chain.solana, Chain.ethereum}),
 
   /// `/tx/fixed-price/buy-edition` (batched, partial-signed).
   editionBuy('edition-buy', {Chain.solana}),
@@ -129,7 +134,21 @@ enum AppFlow {
   withdrawStake('withdraw-stake', {Chain.solana}),
 
   /// `buildLiquidSwapTx` — Jupiter.
-  stakeLiquid('stake-liquid', {Chain.solana});
+  stakeLiquid('stake-liquid', {Chain.solana}),
+
+  /// Website-requested transactions, independent of app transaction builders.
+  browserTransaction('browser-transaction', {
+    Chain.solana,
+    Chain.ethereum,
+    Chain.tezos,
+  }),
+
+  /// Website-requested off-chain signatures, typed data included.
+  browserMessage('browser-message', {
+    Chain.solana,
+    Chain.ethereum,
+    Chain.tezos,
+  });
 
   const AppFlow(this.wire, this.chains);
 
@@ -167,7 +186,7 @@ enum AppFlow {
 class FlowKey {
   const FlowKey(this.chain, this.flow);
 
-  /// Convenience for the 29 Solana-only cells, which are most call sites.
+  /// Convenience for the Solana-only cells, which are most call sites.
   const FlowKey.solana(this.flow) : chain = Chain.solana;
 
   final Chain chain;
@@ -204,6 +223,9 @@ sealed class RemoteConfig with _$RemoteConfig {
     /// the operator's message explaining why the cell is off.
     @Default(<String, String>{}) Map<String, String> disabledMessages,
 
+    /// Disable the entire browser independently of its signing flows.
+    @Default(true) bool browserEnabled,
+
     /// Lowest app version the backend still accepts, or null when unset.
     String? minimumVersion,
 
@@ -233,6 +255,7 @@ sealed class RemoteConfig with _$RemoteConfig {
     }
     return RemoteConfig(
       disabledMessages: Map.unmodifiable(messages),
+      browserEnabled: response.browserEnabled ?? true,
       minimumVersion: response.minimumVersion,
       updateRequired: response.updateRequired,
       updateMessage: response.updateMessage,

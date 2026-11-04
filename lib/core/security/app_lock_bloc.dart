@@ -82,7 +82,12 @@ sealed class AppLockState with _$AppLockState {
 /// - Biometric enable/disable
 /// - Locking when app is backgrounded
 /// - Unlocking with PIN or biometrics
-@injectable
+///
+/// One instance per DI graph: the app initializes it, and services outside
+/// the widget tree (WalletConnect) read the same lock through `sl`. A factory
+/// handed each of them a bloc that was never initialized, so it read as
+/// locked for good.
+@lazySingleton
 class AppLockBloc extends Bloc<AppLockEvent, AppLockState> {
   AppLockBloc(this._storage, this._biometricAuth, this._db)
     : super(const AppLockState.uninitialized()) {

@@ -69,6 +69,7 @@ class OffersSection extends StatelessWidget {
               )
             : null,
         age: offer.date == null ? null : formatLastUpdated(offer.date),
+        transactionHash: offer.txId,
       ),
     );
   }

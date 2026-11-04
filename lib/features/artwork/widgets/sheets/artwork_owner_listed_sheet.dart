@@ -20,7 +20,7 @@ import 'artwork_sheet_frame.dart';
 /// asset back — so it cannot stay buried inside the hidden update sheet:
 /// [onCancelListing] takes the primary slot directly.
 ///
-/// Triggered by `owner` × `buyNow` — see `docs/artwork_state.md`.
+/// Triggered by `owner` × `buyNow` in `resolveArtworkActionState`.
 class ArtworkOwnerListedSheet extends StatelessWidget {
   const ArtworkOwnerListedSheet({
     required this.artwork,
@@ -30,6 +30,7 @@ class ArtworkOwnerListedSheet extends StatelessWidget {
     this.highestOffer,
     this.editionState,
     this.isLoading = false,
+    this.canAcceptOffer = true,
     super.key,
   });
 
@@ -58,6 +59,7 @@ class ArtworkOwnerListedSheet extends StatelessWidget {
   final OfferRender? highestOffer;
 
   final bool isLoading;
+  final bool canAcceptOffer;
 
   @override
   Widget build(BuildContext context) {
@@ -115,7 +117,7 @@ class ArtworkOwnerListedSheet extends StatelessWidget {
               isLoading: isLoading,
               isFullWidth: true,
             ),
-            if (offer != null) ...[
+            if (offer != null && canAcceptOffer) ...[
               const SizedBox(height: MallowTheme.spacingSm),
               MallowButton(
                 label: 'Accept highest offer',

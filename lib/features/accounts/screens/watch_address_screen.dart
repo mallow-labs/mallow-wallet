@@ -232,7 +232,23 @@ class _WatchAddressScreenState extends State<WatchAddressScreen> {
           .where((w) => w.walletType == WalletType.viewOnly)
           .length;
       final name = 'Watch wallet ${watchCount + 1}';
-      final wallet = await repo.addViewOnlyWallet(address, name);
+      WalletInfo wallet;
+      var backupFailed = false;
+      try {
+        wallet = await repo.addViewOnlyWallet(address, name);
+      } on GraphSyncException {
+        // A view-only add throws this only after its row is written (a
+        // duplicate is refused as a duplicate), and a watch wallet holds no
+        // key, so it is added: carry on as added and say the backup lags. The
+        // switch below (when it runs) syncs the graph again, and any later
+        // sync rebuilds it from the rows.
+        final added = await repo.getWalletByAddress(address);
+        if (added == null || added.walletType != WalletType.viewOnly) {
+          rethrow;
+        }
+        wallet = added;
+        backupFailed = true;
+      }
 
       // Take the new account along — not just the wallet — so the drawer/home
       // header shows "Account NN" + dicebear avatar (matching mnemonic/ledger
@@ -245,9 +261,27 @@ class _WatchAddressScreenState extends State<WatchAddressScreen> {
       }
 
       if (mounted) {
-        AppSnackBar.show(context, 'Watch wallet added');
+        if (backupFailed) {
+          AppSnackBar.show(
+            context,
+            'Watch wallet added. Its recovery data will be updated the next '
+            'time your wallets change.',
+          );
+        } else {
+          AppSnackBar.show(context, 'Watch wallet added');
+        }
         DrawerSignal.showAccountsOnNextOpen = true;
         context.go(AppRoutes.home);
+      }
+    } on GraphSyncException {
+      // Reached only when the row the add wrote cannot be read back. The
+      // exception's own text carries the raw platform error, so it gets
+      // fixed copy rather than the catch-all's `$e`.
+      if (mounted) {
+        setState(() {
+          _error = 'Could not update recovery data. Please try again.';
+          _isLoading = false;
+        });
       }
     } catch (e) {
       if (mounted) {

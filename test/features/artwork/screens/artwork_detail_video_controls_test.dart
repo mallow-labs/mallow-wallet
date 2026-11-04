@@ -191,7 +191,7 @@ void main() {
 
   /// A Mux-backed video artwork whose original is on the blacklisted
   /// `shdw-drive` host, so the transcode is the *only* candidate: no
-  /// `/original/` URL means no decision-26 HEAD probe, and the test never
+  /// `/original/` URL means no gateway-fallback HEAD probe, and the test never
   /// reaches the network. `imageUrl` is empty so the poster stays a local
   /// placeholder rather than a `CachedNetworkImage` (no path_provider here).
   const artwork = ArtworkDetails(
@@ -285,6 +285,7 @@ void main() {
 
     when(() => authService.currentAddress).thenReturn(null);
     when(() => sessionManager.sessionAddresses).thenReturn(const {});
+    when(() => sessionManager.sessionWallets).thenReturn(const []);
     when(
       () => permissionService.checkPermissions(
         any(),

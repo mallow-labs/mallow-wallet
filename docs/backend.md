@@ -119,21 +119,23 @@ traffic and the logs are both yours.
 | **First-party hosts** | `FIRST_PARTY_HOSTS` | Nothing visibly. Your own proxies stop receiving the client-id header and are handled as anonymous traffic. **Read [Which hosts receive your credentials](#which-hosts-receive-your-credentials)** |
 | **Solana RPC with DAS** | `RPC_PROXY_BASE_URL` | Portfolio, all NFT lists, compressed-NFT proofs. **Read the section below** |
 | **Solana mainnet RPC** | `SOLANA_MAINNET_RPC_URL` | Nothing outright. `.sol` name resolution and native staking run on Solana's public mainnet node instead, at public rate limits |
-| **EVM simulation** | `EVM_SIMULATION_URL` | All EVM transfers. No default; fails closed by design |
+| **EVM simulation** | `EVM_SIMULATION_URL` | All EVM transfers. No default; fails closed by design. In the in-app browser a website's transaction is still reviewable without it, but only from the request itself, under a *Simulation unavailable* warning |
 | **EVM gas API** | `EVM_GAS_API_URL` | The Low/Market/High tiers on the EVM send sheet. No default; sends fall back to node-derived fees |
-| **Ethereum RPC** | `ETH_RPC_URL` | EVM balances, nonces, gas estimation, broadcast. Defaults to a public keyless node |
-| **Tezos RPC** | `TEZOS_RPC_URL` | Tezos sends. Defaults to a public mainnet node |
+| **Ethereum RPC** | `ETH_RPC_URL` | EVM balances, nonces, gas estimation, broadcast, and the in-app browser's Ethereum provider (a website's read-only calls go to this node too). Defaults to a public keyless node |
+| **Tezos RPC** | `TEZOS_RPC_URL` | Tezos sends, and websites' Tezos operations in the in-app browser and over WalletConnect. Defaults to a public mainnet node |
 | **Jupiter** | `JUPITER_BASE_URL` | Swaps, token metadata, token search. Defaults to Jupiter's public API |
 | **CoinGecko** | `COINGECKO_BASE_URL` | Token prices and charts. Defaults to the public API |
 | **IPFS pinning** | `IPFS_UPLOAD_URL` | The NFT mint flow. No default — see [Media, CDN and gateways](#media-cdn-and-gateways) |
 | **Image CDN** | `IMAGE_CDN_BASE_URL` | Nothing visibly. Images load from their own origin at full size instead of a resized bucket |
 | **Static asset CDN** | `ASSET_CDN_BASE_URL` | Rewards-store metadata, and the maintenance/broadcast banners |
+| **Program labels** | `PROGRAM_LABELS_URL` | Nothing — the signing review still names the compiled-in core programs and their instructions; other program calls show their address alone |
 | **IPFS gateway** | `IPFS_GATEWAY_URL` | Direct IPFS fetches fall through to `ipfs.io`, then `dweb.link`. Defaults to `ipfs.io` |
 | **Arweave gateway** | `ARWEAVE_GATEWAY_URL` | The mirror retry for an Arweave 403. Defaults to `arweave.net`, which makes the retry a no-op |
 | **Avatar service** | `AVATAR_SERVICE_URL` | Nothing — defaults to DiceBear's public API |
 | **Firebase** | config files, not variables | Android build fails outright; iOS throws at startup |
 | **Web3Auth** (MetaMask Embedded Wallets) | `WEB3AUTH_CLIENT_ID` | Social sign-in cannot initialise |
 | **Sentry** | `SENTRY_DSN` | No crash reports. Everything else works |
+| **WalletConnect** (Reown Cloud) | `WALLETCONNECT_PROJECT_ID` | WalletConnect is hidden: no entry point shows and a `wc:` link only shows a notice that WalletConnect is not available. Create the project as a *wallet* and list the app's bundle and package ids on it. The app then talks to Reown's relay and Verify service only; SDK telemetry is switched off in code |
 
 Also available: `JUPITER_REFERRAL_ACCOUNT` (collects an integrator fee on swaps;
 without it swaps run fee-free) and `ANALYTICS_ENABLED` (set `false` to

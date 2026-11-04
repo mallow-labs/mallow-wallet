@@ -86,6 +86,11 @@ class TransactionPipeline {
   /// type. Set [useLedger] = false to opt out entirely (e.g. flows that
   /// don't surface Ledger-specific copy and want to avoid the extra
   /// stream subscription).
+  ///
+  /// [discardSignatureIf] runs between sign and broadcast; returning true
+  /// throws `SignedTooLateException` without broadcasting. The executor uses
+  /// it to rebuild a builder-dependent tx that went stale while a slow signer
+  /// was busy.
   Future<Result<String, AppFailure>> signAndBroadcast({
     required String unsignedTxBase64,
     required double? usdValue,
@@ -95,9 +100,11 @@ class TransactionPipeline {
     void Function(LedgerSigningState)? onLedgerSigning,
     bool useLedger = true,
     SolanaRpcService? rpcOverride,
+    bool Function()? discardSignatureIf,
   }) => Result.guard(
     () => signSendConfirm(
       unsignedTxBase64,
+      discardSignatureIf: discardSignatureIf,
       walletManager: _walletManager,
       rpcService: rpcOverride ?? _rpcService,
       authGate: _authGate,

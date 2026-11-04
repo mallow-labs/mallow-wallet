@@ -5,6 +5,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:mallow_api/mallow_api.dart' as api;
 
 import '../../../core/data/address_scope_key.dart';
+import '../../../core/network/auth_service.dart';
 import '../../../core/services/pending_evm_tx_tracker.dart';
 import '../../../core/services/wallet_repository.dart';
 import '../../../core/session/session_manager.dart';
@@ -272,7 +273,20 @@ class _ActivityListViewState extends State<_ActivityListView> {
   /// to the active Account's held wallets (or, in Profile mode, the active
   /// Profile's linked wallets), matching `offers_inbox_bloc.dart`, and
   /// normalised for the backend's lowercased owner index.
-  List<String> _sessionAddresses() => sl<SessionManager>().apiOwnerAddresses;
+  ///
+  /// The signed-in wallet goes first: the request keeps only the first
+  /// addresses within the endpoint's limits ([capActivityAddresses]), and that
+  /// wallet's own transactions must never be the ones dropped.
+  List<String> _sessionAddresses() {
+    final addresses = sl<SessionManager>().apiOwnerAddresses;
+    final current = sl.isRegistered<AuthService>()
+        ? sl<AuthService>().currentAddress
+        : null;
+    if (current == null) return addresses;
+    final first = apiOwnerAddress(current);
+    if (!addresses.contains(first)) return addresses;
+    return [first, ...addresses.where((a) => a != first)];
+  }
 
   List<api.Activity> _mergeOptimistic(List<api.Activity> serverItems) {
     final serverKeys = {

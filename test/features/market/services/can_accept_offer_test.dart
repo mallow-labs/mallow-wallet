@@ -176,7 +176,7 @@ void main() {
   });
 
   group('refusal copy', () {
-    // The reason has to reach the user — every Tier-B refusal that falls
+    // The reason has to reach the user — every refusal that falls
     // through to the generic failure path reads as "the app is broken".
     test('every refusal carries distinct, non-empty copy', () {
       final messages = AcceptOfferRefusal.values

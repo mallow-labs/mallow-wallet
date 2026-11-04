@@ -514,6 +514,78 @@ void main() {
     );
   });
 
+  group('renameAccount', () {
+    blocTest<ImportWalletsBloc, ImportWalletsState>(
+      'stores a trimmed name, and a blank name clears it',
+      build: buildBloc,
+      seed: () => ImportWalletsState.loaded(
+        seedPhraseId: testSeedPhraseId,
+        accounts: [pickerAccount0()],
+      ),
+      act: (bloc) => bloc
+        ..add(const ImportWalletsEvent.renameAccount(0, '  Trading  '))
+        ..add(const ImportWalletsEvent.renameAccount(0, '   ')),
+      expect: () => [
+        isA<ImportWalletsLoaded>().having((s) => s.customNames, 'customNames', {
+          0: 'Trading',
+        }),
+        isA<ImportWalletsLoaded>().having(
+          (s) => s.customNames,
+          'customNames',
+          isEmpty,
+        ),
+      ],
+    );
+
+    blocTest<ImportWalletsBloc, ImportWalletsState>(
+      'ignores an account that already exists',
+      build: buildBloc,
+      seed: () => ImportWalletsState.loaded(
+        seedPhraseId: testSeedPhraseId,
+        accounts: [
+          PickerAccount(
+            index: 0,
+            wallets: pickerAccount0().wallets,
+            importedName: 'Account 01',
+          ),
+        ],
+      ),
+      act: (bloc) =>
+          bloc.add(const ImportWalletsEvent.renameAccount(0, 'Trading')),
+      expect: () => const <ImportWalletsState>[],
+    );
+
+    blocTest<ImportWalletsBloc, ImportWalletsState>(
+      'passes the names to the import',
+      setUp: () {
+        when(
+          mockWalletRepo.importAccountsFromPhrase(
+            any,
+            any,
+            accountNames: anyNamed('accountNames'),
+          ),
+        ).thenAnswer((_) async => [importedWallet]);
+      },
+      build: buildBloc,
+      seed: () => ImportWalletsState.loaded(
+        seedPhraseId: testSeedPhraseId,
+        accounts: [pickerAccount0()],
+        selectedKeys: const {'0:solana:'},
+        customNames: const {0: 'Trading'},
+      ),
+      act: (bloc) => bloc.add(const ImportWalletsEvent.importSelected()),
+      verify: (_) {
+        verify(
+          mockWalletRepo.importAccountsFromPhrase(
+            any,
+            any,
+            accountNames: {0: 'Trading'},
+          ),
+        ).called(1);
+      },
+    );
+  });
+
   group('setIncludeLegacy', () {
     blocTest<ImportWalletsBloc, ImportWalletsState>(
       'persists the preference and surfaces the legacy Solana row',

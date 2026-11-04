@@ -168,6 +168,7 @@ class CastProgressiveArtwork extends StatelessWidget {
   const CastProgressiveArtwork({
     required this.imageUrl,
     required this.fit,
+    this.alignment = Alignment.center,
     this.fullUrl,
     this.upgrade,
     super.key,
@@ -177,6 +178,11 @@ class CastProgressiveArtwork extends StatelessWidget {
   final String imageUrl;
 
   final BoxFit fit;
+
+  /// Where both image layers sit inside the box when [fit] leaves room, so
+  /// the full-resolution layer lands exactly over the poster. Does not move
+  /// the [upgrade] layer, which sizes itself.
+  final Alignment alignment;
 
   /// Resolved full-resolution URL to layer over the poster. Null/empty leaves
   /// the poster as the final frame. Ignored when [upgrade] is set.
@@ -209,6 +215,7 @@ class CastProgressiveArtwork extends StatelessWidget {
           _CastImageLayer(
             url: ArtworkMediaResolver.posterUrl(imageUrl),
             fit: fit,
+            alignment: alignment,
             whileLoading: const CastShimmerSurface(),
           )
         else
@@ -221,6 +228,7 @@ class CastProgressiveArtwork extends StatelessWidget {
           _CastImageLayer(
             url: full,
             fit: fit,
+            alignment: alignment,
             cacheWidth: _fullResMaxDecodeWidth,
             fadeIn: true,
           ),
@@ -234,6 +242,7 @@ class _CastImageLayer extends StatelessWidget {
   const _CastImageLayer({
     required this.url,
     required this.fit,
+    this.alignment = Alignment.center,
     this.cacheWidth,
     this.fadeIn = false,
     this.whileLoading = const SizedBox.shrink(),
@@ -241,6 +250,7 @@ class _CastImageLayer extends StatelessWidget {
 
   final String url;
   final BoxFit fit;
+  final Alignment alignment;
   final int? cacheWidth;
   final bool fadeIn;
   final Widget whileLoading;
@@ -250,6 +260,7 @@ class _CastImageLayer extends StatelessWidget {
     return ExtendedImage.network(
       url,
       fit: fit,
+      alignment: alignment,
       cacheWidth: cacheWidth,
       loadStateChanged: (state) => switch (state.extendedImageLoadState) {
         LoadState.loading => whileLoading,

@@ -4,6 +4,46 @@ import 'package:mallow_api/mallow_api.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('Bubblegum v2 interface wins over the compressed marker', () {
+    for (final compressed in [false, true]) {
+      expect(
+        TokenStandardDas.fromDasInterface('MplBubblegumV2', isCompressed: compressed),
+        TokenStandard.cnftV2,
+      );
+    }
+    expect(TokenStandardDas.fromDasInterface('V1_NFT', isCompressed: true), TokenStandard.cnft);
+  });
+
+  test('v2 transfer and burn send the generated cnft-v2 wire value', () {
+    final standard = TokenStandard.cnftV2.apiValue;
+    expect(
+      TransferTxRequest(
+        authority: 'owner',
+        asset: 'asset',
+        recipient: 'recipient',
+        tokenStandard: standard,
+      ).toJson()['tokenStandard'],
+      'cnft-v2',
+    );
+    expect(
+      BurnTxRequest(
+        authority: 'owner',
+        asset: 'asset',
+        tokenStandard: standard,
+      ).toJson()['tokenStandard'],
+      'cnft-v2',
+    );
+  });
+
+  test('collection standards tolerate unknown wire values and parse v2', () {
+    for (final wire in ['cnft-v2', 'future-standard', null]) {
+      final json = {'mintAccount': 'collection', 'tokenStandard': wire};
+      final expected = wire == 'cnft-v2' ? TokenStandard.cnftV2 : null;
+      expect(CollectionDetailNft.fromJson(json).tokenStandard, expected);
+      expect(MintCollectionRef.fromJson(json).tokenStandard, expected);
+    }
+  });
+
   group('TokenStandard wire values', () {
     // Lock down the wire format. The backend routes account fetchers off
     // these strings (`core` -> safeFetchAssetV1, `core-collection` ->
@@ -15,6 +55,7 @@ void main() {
       TokenStandard.coreCollection: 'core-collection',
       TokenStandard.pnft: 'pnft',
       TokenStandard.cnft: 'cnft',
+      TokenStandard.cnftV2: 'cnft-v2',
       TokenStandard.objkt: 'objkt',
       TokenStandard.native: 'native',
       TokenStandard.erc20: 'erc20',

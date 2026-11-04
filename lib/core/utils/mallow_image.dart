@@ -49,7 +49,7 @@ class MallowImage {
   /// The source URL embedded in a CDN resize path: the canonical form
   /// (`ipfs://<CID>` / `ar://<TXID>`, verbatim https otherwise), so every
   /// arrival shape of one asset collapses onto a single Cloudflare edge key and
-  /// a single R2 object (original-serving spec).
+  /// a single R2 object.
   ///
   /// Unconditional since 2026-09. It was gated on a build flag through the
   /// rollout, while the resizer still had to accept both forms; every

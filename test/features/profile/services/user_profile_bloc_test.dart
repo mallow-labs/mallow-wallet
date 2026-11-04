@@ -5,7 +5,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_api/mallow_api.dart' as api;
 import 'package:mallow_wallet/core/models/account.dart';
 import 'package:mallow_wallet/core/network/auth_service.dart';
-import 'package:mallow_wallet/core/network/hardware_verify_controller.dart';
 import 'package:mallow_wallet/core/session/session_manager.dart';
 import 'package:mallow_wallet/features/artwork/widgets/add_to_curation_sheet.dart';
 import 'package:mallow_wallet/di.dart';
@@ -26,14 +25,12 @@ import 'user_profile_bloc_test.mocks.dart';
   UserProfileRepository,
   CurationRepository,
   AuthService,
-  HardwareVerifyController,
   SessionManager,
 ])
 void main() {
   late MockUserProfileRepository mockRepository;
   late MockCurationRepository mockCurationRepository;
   late MockAuthService mockAuthService;
-  late MockHardwareVerifyController mockHardwareVerifyController;
 
   const testAddress = 'PROFILE_ADDR';
 
@@ -116,7 +113,6 @@ void main() {
     mockRepository = MockUserProfileRepository();
     mockCurationRepository = MockCurationRepository();
     mockAuthService = MockAuthService();
-    mockHardwareVerifyController = MockHardwareVerifyController();
 
     // Default: viewing own profile (skips youOwn fetch).
     when(mockAuthService.currentAddress).thenReturn(testAddress);
@@ -147,7 +143,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -167,7 +162,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -186,7 +180,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -212,7 +205,6 @@ void main() {
         mockRepository,
         mockCurationRepository,
         mockAuthService,
-        mockHardwareVerifyController,
       ),
       act: (bloc) =>
           bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -234,7 +226,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -271,7 +262,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -364,7 +354,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           await loadThenLoadMore(bloc, tab: ProfileTab.created);
@@ -437,7 +426,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           await loadThenLoadMore(bloc, tab: ProfileTab.owned);
@@ -476,7 +464,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         seed: () =>
             UserProfileState.loaded(
@@ -542,7 +529,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -620,7 +606,6 @@ void main() {
               mockRepository,
               mockCurationRepository,
               mockAuthService,
-              mockHardwareVerifyController,
             );
             addTearDown(bloc.close);
             if (!delayed) response.complete(groups);
@@ -714,7 +699,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         seed: seedCreated,
         act: (bloc) =>
@@ -732,7 +716,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         seed: () =>
             UserProfileState.loaded(profile: profile()) as UserProfileLoaded,
@@ -778,7 +761,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -810,7 +792,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -857,7 +838,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -901,7 +881,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -967,7 +946,6 @@ void main() {
             mockRepository,
             mockCurationRepository,
             mockAuthService,
-            mockHardwareVerifyController,
           ),
           act: (bloc) async {
             bloc.add(const UserProfileEvent.load(address: evmLower));
@@ -1003,7 +981,7 @@ void main() {
       // tab refetches page 0 on apply.
       const activeFilter = api.ExploreFilter(listingTypes: ['buy-now']);
 
-      // FINDING 1: a failed listed refetch settles the tab on its empty state,
+      // A failed listed refetch settles the tab on its empty state,
       // but the private `_allListedArtworks` used to keep its stale pre-filter
       // contents. A later sort emits `sortArtworks(_allListedArtworks)` (because
       // `listedArtworks != null`), which would resurrect the filtered-out items
@@ -1045,7 +1023,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -1071,7 +1048,7 @@ void main() {
         },
       );
 
-      // FINDING 2: a listed load-more in flight across a filter change appends a
+      // A listed load-more in flight across a filter change appends a
       // stale old-cursor page onto the (now replaced) list. A generation guard —
       // captured before the load-more's await, bumped by the refetch — must
       // discard the stale page when it lands.
@@ -1124,7 +1101,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -1191,7 +1167,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         seed: seedCollections,
         act: (bloc) {
@@ -1220,7 +1195,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         seed: seedCollections,
         act: (bloc) {
@@ -1263,7 +1237,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1297,7 +1270,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1340,7 +1312,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1418,7 +1389,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1475,7 +1445,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1524,7 +1493,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1554,7 +1522,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1601,7 +1568,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: 'WALLET_B')),
@@ -1654,7 +1620,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1718,7 +1683,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: 'WALLET_B')),
@@ -1763,7 +1727,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1775,32 +1738,180 @@ void main() {
         },
       );
 
-      // Tapping the CTA must name the device the user actually holds: the sheet
-      // renders a different flow per type, and a Seed Vault owner told to
-      // connect a Ledger over Bluetooth is sent somewhere they cannot go.
+      // A Keystone (or Ledger) Ethereum row is stored checksummed; the
+      // profile's linked EVM address can arrive lowercased. Compared raw, the
+      // only signer for the profile was invisible to both the gate and the
+      // verify handler.
       blocTest<UserProfileBloc, UserProfileState>(
-        'verify event on a Seed Vault wallet requests it as a Seed Vault',
+        'a checksummed hardware EVM wallet matches its lowercased linked '
+        'address for the CTA and the verify',
         setUp: () {
-          stubLoadHappyPath(loadedProfile: profile());
-          when(mockSessionManager.sessionAddresses).thenReturn({testAddress});
+          const checksummed = '0x9858EfFD232B4033E47d90003D41EC34EcaEda94';
+          stubLoadHappyPath(
+            loadedProfile: profile(
+              linkedAddresses: [checksummed.toLowerCase()],
+            ),
+          );
+          when(mockSessionManager.sessionAddresses).thenReturn({checksummed});
           when(
             mockSessionManager.sessionWallets,
-          ).thenReturn([wallet(testAddress, WalletType.seedVault)]);
+          ).thenReturn([wallet(checksummed, WalletType.keystone)]);
           when(
             mockAuthService.hasValidWalletSigForAny(any),
           ).thenAnswer((_) async => false);
           when(
-            mockHardwareVerifyController.requestVerification(
-              any,
-              walletType: anyNamed('walletType'),
-            ),
-          ).thenAnswer((_) async => false);
+            mockAuthService.signAndVerifyForWallet(any, any),
+          ).thenAnswer((_) async {});
         },
         build: () => UserProfileBloc(
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
+        ),
+        act: (bloc) async {
+          bloc.add(const UserProfileEvent.load(address: testAddress));
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          expect(
+            (bloc.state as UserProfileLoaded).showVerifyPrivateCurationsCta,
+            isTrue,
+          );
+          bloc.add(const UserProfileEvent.verifyForPrivateCurations());
+        },
+        wait: const Duration(milliseconds: 50),
+        verify: (bloc) {
+          const checksummed = '0x9858EfFD232B4033E47d90003D41EC34EcaEda94';
+          verify(
+            mockAuthService.signAndVerifyForWallet(
+              'id-$checksummed',
+              checksummed,
+            ),
+          ).called(1);
+        },
+      );
+
+      // Tapping the CTA must SIGN with the device the user holds, not stop at
+      // consent: Seed Vault's and Keystone's verify sheets sign nothing, and a
+      // refetch after consent alone carried no wallet-sig.
+      for (final type in [WalletType.seedVault, WalletType.keystone]) {
+        blocTest<UserProfileBloc, UserProfileState>(
+          'verify event on a ${type.name} wallet signs and caches a wallet-sig',
+          setUp: () {
+            stubLoadHappyPath(loadedProfile: profile());
+            when(mockSessionManager.sessionAddresses).thenReturn({testAddress});
+            when(
+              mockSessionManager.sessionWallets,
+            ).thenReturn([wallet(testAddress, type)]);
+            when(
+              mockAuthService.hasValidWalletSigForAny(any),
+            ).thenAnswer((_) async => false);
+            when(
+              mockAuthService.signAndVerifyForWallet(any, any),
+            ).thenAnswer((_) async {});
+          },
+          build: () => UserProfileBloc(
+            mockRepository,
+            mockCurationRepository,
+            mockAuthService,
+          ),
+          act: (bloc) async {
+            bloc.add(const UserProfileEvent.load(address: testAddress));
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+            bloc.add(const UserProfileEvent.verifyForPrivateCurations());
+          },
+          wait: const Duration(milliseconds: 50),
+          verify: (bloc) {
+            verify(
+              mockAuthService.signAndVerifyForWallet(
+                'id-$testAddress',
+                testAddress,
+              ),
+            ).called(1);
+            final state = bloc.state as UserProfileLoaded;
+            expect(state.isVerifyingCurations, isFalse);
+            expect(state.showVerifyPrivateCurationsCta, isFalse);
+          },
+        );
+      }
+
+      // A load resolves the gate and fetches curations before it knows a verify
+      // is coming. When the verify finishes first — a slow collections fetch on
+      // a pull-to-refresh is enough — the load's answer is older than what is
+      // on screen: applying it re-raised the CTA and swapped the unlocked
+      // curations back for the cookieless list.
+      blocTest<UserProfileBloc, UserProfileState>(
+        'a load still in flight when the verify lands keeps the unlocked '
+        'curations and the CTA down',
+        setUp: () {
+          stubLoadHappyPath(loadedProfile: profile());
+          when(mockSessionManager.sessionAddresses).thenReturn({testAddress});
+          when(
+            mockSessionManager.sessionWallets,
+          ).thenReturn([wallet(testAddress, WalletType.keystone)]);
+          // The backend's view: private curations only once a sig is cached.
+          var verified = false;
+          when(
+            mockAuthService.hasValidWalletSigForAny(any),
+          ).thenAnswer((_) async => verified);
+          when(
+            mockAuthService.signAndVerifyForWallet(any, any),
+          ).thenAnswer((_) async => verified = true);
+          when(
+            mockCurationRepository.getCurations(ownerAddress: testAddress),
+          ).thenAnswer(
+            (_) async => verified ? const [curation] : const <UserCuration>[],
+          );
+        },
+        build: () => UserProfileBloc(
+          mockRepository,
+          mockCurationRepository,
+          mockAuthService,
+        ),
+        act: (bloc) async {
+          final collections = Completer<List<ArtGroup>>();
+          when(
+            mockRepository.getUserCollections(any, page: anyNamed('page')),
+          ).thenAnswer((_) => collections.future);
+
+          bloc.add(const UserProfileEvent.load(address: testAddress));
+          // The load resolves its gate and fetches curations unverified, then
+          // parks on the collections fetch.
+          await pumpEventQueue();
+          bloc.add(const UserProfileEvent.verifyForPrivateCurations());
+          await pumpEventQueue();
+          final unlocked = bloc.state as UserProfileLoaded;
+          expect(unlocked.showVerifyPrivateCurationsCta, isFalse);
+          expect(unlocked.groups!.single.id, 'cur-private');
+
+          collections.complete(const []);
+          await pumpEventQueue();
+        },
+        verify: (bloc) {
+          final state = bloc.state as UserProfileLoaded;
+          expect(state.isRefreshing, isFalse);
+          expect(state.showVerifyPrivateCurationsCta, isFalse);
+          expect(state.groups!.single.id, 'cur-private');
+        },
+      );
+
+      blocTest<UserProfileBloc, UserProfileState>(
+        'verify event: a cancelled device leaves the CTA up',
+        setUp: () {
+          stubLoadHappyPath(loadedProfile: profile());
+          when(mockSessionManager.sessionAddresses).thenReturn({testAddress});
+          when(
+            mockSessionManager.sessionWallets,
+          ).thenReturn([wallet(testAddress, WalletType.keystone)]);
+          when(
+            mockAuthService.hasValidWalletSigForAny(any),
+          ).thenAnswer((_) async => false);
+          when(
+            mockAuthService.signAndVerifyForWallet(any, any),
+          ).thenThrow(HardwareVerificationCancelledException());
+        },
+        build: () => UserProfileBloc(
+          mockRepository,
+          mockCurationRepository,
+          mockAuthService,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -1809,12 +1920,9 @@ void main() {
         },
         wait: const Duration(milliseconds: 50),
         verify: (bloc) {
-          verify(
-            mockHardwareVerifyController.requestVerification(
-              testAddress,
-              walletType: WalletType.seedVault,
-            ),
-          ).called(1);
+          final state = bloc.state as UserProfileLoaded;
+          expect(state.isVerifyingCurations, isFalse);
+          expect(state.showVerifyPrivateCurationsCta, isTrue);
         },
       );
 
@@ -1834,7 +1942,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -1844,7 +1951,7 @@ void main() {
         },
         wait: const Duration(milliseconds: 50),
         verify: (bloc) {
-          verifyNever(mockHardwareVerifyController.requestVerification(any));
+          verifyNever(mockAuthService.signAndVerifyForWallet(any, any));
           final state = bloc.state as UserProfileLoaded;
           expect(state.isVerifyingCurations, isFalse);
         },
@@ -1872,7 +1979,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.load(address: testAddress)),
@@ -1903,7 +2009,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -1940,7 +2045,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -2004,7 +2108,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) async {
           bloc.add(const UserProfileEvent.load(address: testAddress));
@@ -2041,7 +2144,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.loadByUsername(username: 'alice')),
@@ -2066,7 +2168,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         ),
         act: (bloc) =>
             bloc.add(const UserProfileEvent.loadByUsername(username: 'ghost')),
@@ -2099,7 +2200,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         );
         await settle(bloc);
 
@@ -2119,7 +2219,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         );
         await settle(bloc);
 
@@ -2154,7 +2253,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         );
         await settle(bloc);
 
@@ -2174,7 +2272,6 @@ void main() {
           mockRepository,
           mockCurationRepository,
           mockAuthService,
-          mockHardwareVerifyController,
         );
         await settle(bloc);
 

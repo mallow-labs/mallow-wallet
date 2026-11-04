@@ -18,18 +18,38 @@ void main() {
     WidgetTester tester, {
     required bool userOwnOffer,
     bool isLoading = false,
+    bool canMakeOffer = true,
   }) => tester.pumpWidget(
     MaterialApp(
       home: Scaffold(
         body: OfferActionButtons(
           userOwnOffer: userOwnOffer,
           isLoading: isLoading,
+          canMakeOffer: canMakeOffer,
           onMakeOffer: () {},
           onCancelOffer: () {},
         ),
       ),
     ),
   );
+
+  testWidgets('ineligible asset hides update but keeps cancellation', (
+    tester,
+  ) async {
+    debugShowNftCommerceOverride = true;
+    await pump(tester, userOwnOffer: true, canMakeOffer: false);
+    expect(find.text('Update offer'), findsNothing);
+    expect(find.text('Make offer'), findsNothing);
+    expect(find.text('Cancel offer'), findsOneWidget);
+  });
+
+  testWidgets('ineligible asset with no existing offer has no CTA', (
+    tester,
+  ) async {
+    debugShowNftCommerceOverride = true;
+    await pump(tester, userOwnOffer: false, canMakeOffer: false);
+    expect(find.byType(MallowButton), findsNothing);
+  });
 
   testWidgets('commerce hidden: an in-flight cancel shows the spinner', (
     tester,

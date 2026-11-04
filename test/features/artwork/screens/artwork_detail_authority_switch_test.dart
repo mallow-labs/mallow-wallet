@@ -84,16 +84,16 @@ class _FakeMallowApiClient extends Fake implements MallowApiClient {}
 
 class _MockDio extends Mock implements Dio {}
 
-/// Track A regression suite for the artwork detail screen's authority
+/// Regression suite for the artwork detail screen's authority
 /// actions.
 ///
 /// Every assertion here is about **the address the tx will be built with**, so
 /// the tests record `AuthService.currentAddress` at the moment the bloc event
 /// is dispatched. Asserting only that `selectSourceWallet` was called would
 /// pass while the flow is still broken: the switch used to be fire-and-forget,
-/// leaving `currentAddress` null (or stale) for the whole dispatch — the wallet-switch
-/// race in the wallet-switching contract.
-/// Permissive kill-switch config. The entry gates added in Phase 4c read
+/// leaving `currentAddress` null (or stale) for the whole dispatch — the
+/// wallet-switch race.
+/// Permissive kill-switch config. The flow entry gates read
 /// [RemoteConfigService] before dispatching, so it must be in GetIt; nothing
 /// is killed here, which keeps behaviour identical to the pre-kill-switch
 /// baseline these tests were written against.
@@ -115,9 +115,9 @@ class _PermissiveRemoteConfigService extends Fake
 
 void main() {
   const mint = 'mint-1';
-  // Active signing wallet: watch-only, so it also exercises A1d — the
-  // view-only guard must not block an action whose authority is a *signable*
-  // session wallet.
+  // Active signing wallet: watch-only, so it also exercises the guard order —
+  // the view-only guard must not block an action whose authority is a
+  // *signable* session wallet.
   const activeAddress = 'HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH';
   // The session wallet that actually holds the piece / placed the offer.
   const holderAddress = 'Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS';
@@ -156,7 +156,7 @@ void main() {
   late MockArtworkEventsRepository eventsRepository;
 
   /// The live active signer. `selectSourceWallet` moves it *atomically* —
-  /// the Phase-0 contract: the awaited `/v0/login` has landed by the time it
+  /// that is its contract: the awaited `/v0/login` has landed by the time it
   /// resolves, so `currentAddress` is the target when the caller continues.
   late String? active;
 
@@ -254,7 +254,7 @@ void main() {
       const Stream<TokenBalanceState>.empty(),
       initialState: const TokenBalanceState.initial(),
     );
-    // Record the active address AT DISPATCH TIME — the whole point of Track A.
+    // Record the active address AT DISPATCH TIME — the point of this suite.
     when(() => marketBloc.add(any())).thenAnswer((invocation) {
       dispatched.add((invocation.positionalArguments.single as Object, active));
     });
@@ -266,6 +266,7 @@ void main() {
     when(
       () => sessionManager.sessionAddresses,
     ).thenReturn(const {activeAddress, holderAddress});
+    when(() => sessionManager.sessionWallets).thenReturn(const []);
     when(
       () => sessionManager.sessionWalletForAddress(holderAddress),
     ).thenReturn(holderWallet);
@@ -293,7 +294,7 @@ void main() {
     // Reproduces the live switch: `AuthService.switchWallet` clears the
     // session synchronously — nulling `currentAddress` and dropping the auth
     // interceptor — and only re-authenticates as the target once `/v0/login`
-    // returns an async gap later. Phase 0 (T0.2) makes `selectSourceWallet`
+    // returns an async gap later. `selectSourceWallet` is written to
     // await that login, so the address is the target by the time it RESOLVES —
     // but it is null for anyone who dispatches without awaiting. That is what
     // makes "assert `currentAddress` at dispatch time" a real test: a
@@ -308,7 +309,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       active = wallet.address;
     });
-    // `guardViewOnly` reads the DB's active wallet — watch-only until the
+    // `guardSolanaSigner` reads the DB's active wallet — watch-only until the
     // signer is re-pointed to the holder.
     when(() => walletRepository.getActiveWallet()).thenAnswer(
       (_) async => active == holderAddress ? holderWallet : activeWallet,
@@ -429,7 +430,7 @@ void main() {
   /// every authority action animates indefinitely (shimmering cost lines while
   /// the tx builds), so settling never terminates. The handler chain is
   /// `selectSourceWallet` (a zero-delay timer standing in for the login round
-  /// trip) → `guardViewOnly`'s DB read → dispatch → sheet route, so a handful
+  /// trip) → `guardSolanaSigner`'s DB read → dispatch → sheet route, so a handful
   /// of small pumps is enough to drive it to the dispatch.
   Future<void> pumpAction(WidgetTester tester) async {
     for (var i = 0; i < 12; i++) {
@@ -485,7 +486,7 @@ void main() {
   // Settle-auction is the strictest case: the sheet's proceeds breakdown and
   // the optimistic ownership bookkeeping are BOTH derived from
   // `currentAddress`, so the signer has to be re-pointed before any of it is
-  // computed (A1a) — not just before the tx is built.
+  // computed — not just before the tx is built.
   testWidgets(
     'settle-auction from a non-active seller dispatches as the seller and '
     'still carries the winning-bid proceeds',
@@ -501,13 +502,13 @@ void main() {
       // The authority `SettleAuctionTxRequest.caller` resolves from — asserted
       // at dispatch time, not merely "a switch happened".
       expect(settle.$2, holderAddress);
-      // A1a: `me` is re-read after the switch, so the seller still gets the
+      // `me` is re-read after the switch, so the seller still gets the
       // proceeds line instead of a gas-only sheet.
       expect((settle.$1 as MarketSettleAuction).winningBid?.rawAmount, 1e9);
     },
   );
 
-  // A1d: `guardViewOnly` runs AFTER the signer moves, so a watch-only *active*
+  // `guardSolanaSigner` runs AFTER the signer moves, so a watch-only *active*
   // wallet no longer blocks an action whose authority is a signable session
   // wallet. (`activeWallet` above is watch-only for every test in this file.)
   testWidgets(
@@ -521,7 +522,7 @@ void main() {
       await pumpAction(tester);
 
       // Run guard-first and this is what you get instead: the active wallet is
-      // still the watch-only one when `guardViewOnly` reads it, so the sheet
+      // still the watch-only one when `guardSolanaSigner` reads it, so the sheet
       // goes up and the action never dispatches.
       expect(find.text('View-only wallet'), findsNothing);
       expect(dispatched.map((d) => d.$1).whereType<MarketSettleAuction>(), [
@@ -530,7 +531,7 @@ void main() {
     },
   );
 
-  // A1b end-to-end: the own-offer lookup spans the session, so an offer placed
+  // End to end: the own-offer lookup spans the session, so an offer placed
   // by a non-active wallet surfaces "Cancel offer" — and cancelling it signs as
   // the maker, since `CancelOfferTxRequest.buyer` IS the signer.
   testWidgets(
@@ -555,8 +556,8 @@ void main() {
       await pumpScreen(tester);
       // Let the widened own-offer lookup resolve and flip the CTA. The offer
       // was placed by a wallet that is NOT the active signer, so the CTA
-      // appearing at all is the A1b widening (`buyerAddresses` = the whole
-      // session, not `[currentAddress]`).
+      // appearing at all is the session-wide widening (`buyerAddresses` = the
+      // whole session, not `[currentAddress]`).
       await tester.pump();
       await tester.pump();
       expect(find.text('Cancel offer'), findsOneWidget);
@@ -570,10 +571,10 @@ void main() {
     },
   );
 
-  // The same A1b widening turns "Make offer" into "Update offer", and the
-  // backend builder only emits an `updateOffer` re-bid for the buyer that
-  // already has one — i.e. the SIGNER. Without re-pointing to the maker first,
-  // "Update offer" escrows a second, independent full-price offer for the
+  // The same session-wide widening turns "Make offer" into "Update offer",
+  // and the backend builder only emits an `updateOffer` re-bid for the buyer
+  // that already has one — i.e. the SIGNER. Without re-pointing to the maker
+  // first, "Update offer" escrows a second, independent full-price offer for the
   // active wallet and the user ends up holding two.
   testWidgets(
     'update-offer on an offer placed by another session wallet dispatches as '

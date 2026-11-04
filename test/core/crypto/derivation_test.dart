@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import 'package:bip32/bip32.dart' as bip32;
+import 'package:bip39/bip39.dart' as bip39;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_wallet/core/crypto/derivation.dart';
 // web3dart 3.x folded crypto.dart into the root library and re-homed
@@ -175,6 +177,46 @@ void main() {
 
     test('Ethereum path is the BIP44 ETH default', () {
       expect(MultiChainDerivation.ethereumPath, "m/44'/60'/0'/0/0");
+    });
+  });
+
+  group('MultiChainDerivation.ethereumAddressFromAccountXpub', () {
+    // A Keystone exports only the account xpub at m/44'/60'/0'. The address
+    // it yields at 0/i must be the one the seed gives at m/44'/60'/0'/0/i, or
+    // an imported row would show an address its device never signs for.
+    test('matches the seed-derived address at every index', () async {
+      for (final mnemonic in [abandonMnemonic, legalWinnerMnemonic]) {
+        final account = bip32.BIP32
+            .fromSeed(bip39.mnemonicToSeed(mnemonic))
+            .derivePath("m/44'/60'/0'");
+        for (final index in [0, 1, 7, 49]) {
+          expect(
+            MultiChainDerivation.ethereumAddressFromAccountXpub(
+              account.publicKey,
+              account.chainCode,
+              index,
+            ),
+            await MultiChainDerivation.getEthereumAddressAtIndex(
+              mnemonic,
+              index,
+            ),
+          );
+        }
+      }
+    });
+
+    test('pins the BIP-39 vector', () {
+      final account = bip32.BIP32
+          .fromSeed(bip39.mnemonicToSeed(abandonMnemonic))
+          .derivePath("m/44'/60'/0'");
+      expect(
+        MultiChainDerivation.ethereumAddressFromAccountXpub(
+          account.publicKey,
+          account.chainCode,
+          0,
+        ),
+        '0x9858EfFD232B4033E47d90003D41EC34EcaEda94',
+      );
     });
   });
 

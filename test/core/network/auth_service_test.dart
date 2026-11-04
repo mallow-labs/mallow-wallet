@@ -153,6 +153,7 @@ class _StubVerifyAdapter implements HttpClientAdapter {
 
   /// Set when `/v0/authToken/verify` is reached.
   bool verifyCalled = false;
+  Map<String, dynamic>? lastVerifyBody;
 
   static final _jsonHeaders = {
     Headers.contentTypeHeader: [Headers.jsonContentType],
@@ -180,6 +181,7 @@ class _StubVerifyAdapter implements HttpClientAdapter {
     }
     if (options.path.endsWith('/v0/authToken/verify')) {
       verifyCalled = true;
+      lastVerifyBody = Map<String, dynamic>.from(options.data as Map);
       final address = (options.data as Map)['address'] as String;
       return ResponseBody.fromString(
         jsonEncode({
@@ -540,6 +542,40 @@ void main() {
     });
 
     test(
+      'Given a SIWS challenge, login signs and submits it verbatim',
+      () async {
+        const message =
+            'example.com wants you to sign in with your Solana account:\n'
+            '$activeAddr\n\nSign in to mallow.\n\nURI: https://example.com\n'
+            'Version: 1\nNonce: abc12345\nIssued At: 2026-10-04T00:00:00.000Z';
+        when(
+          () => api.getAuthToken(any()),
+        ).thenAnswer((_) async => const ApiResponse<String>(result: message));
+
+        await auth.initializeSession();
+
+        final request =
+            verify(() => api.getAuthToken(captureAny())).captured.single
+                as AuthTokenRequest;
+        expect(request.address, activeAddr);
+        expect(request.format, 'siws');
+        verify(
+          () => walletManager.signLoginChallengeForAddress(
+            activeAddr,
+            message: message,
+            token: null,
+          ),
+        ).called(1);
+        expect(adapter.lastVerifyBody, {
+          'address': activeAddr,
+          'message': message,
+          'format': 'siws',
+          'signature': 'SIG',
+        });
+      },
+    );
+
+    test(
       'a perk absent from the login render is picked up from verify',
       () async {
         await auth.initializeSession();
@@ -877,7 +913,7 @@ void main() {
         () => walletManager.signLoginChallengeForAddress(
           socialAddr,
           message: any(named: 'message'),
-          token: 'TOKEN',
+          token: null,
         ),
       ).called(1);
       verify(
@@ -1200,7 +1236,6 @@ void main() {
     });
   });
 
-  // T0.5 of the wallet-switching contract. Since T0.2,
   // `SessionManager.selectSourceWallet` AWAITS `switchWallet`, so a wallet
   // switch is no longer fire-and-forget: whatever the caller dispatches next
   // (burn authority, accept-offer seller, …) reads `currentAddress` the instant
@@ -1283,7 +1318,7 @@ void main() {
       },
     );
 
-    // WHY (the T0.2 item-3 regression): the null-`currentAddress`-at-dispatch
+    // WHY (regression): the null-`currentAddress`-at-dispatch
     // bug. A naive serialization that awaits the in-flight switch BEFORE
     // publishing its own pending address still passes the test above, because
     // during that wait the dedup guard reads the OLD pending address — so a
@@ -1370,7 +1405,8 @@ void main() {
     // orphaned completer behind. If it did, the next switch would await a
     // completer nobody ever completes and the caller — now a blocking
     // `selectSourceWallet` — would hang forever with no wallet logged in.
-    // The error must also reach the caller: T0.2's rollback depends on it.
+    // The error must also reach the caller: the switch's rollback depends on
+    // it.
     test(
       'a failed switch surfaces the error and does not wedge the guard',
       () async {
@@ -1454,7 +1490,7 @@ void main() {
     });
   });
 
-  // The Seed Vault contract, and the reason Phase 4 exists at all: a Seed Vault
+  // The Seed Vault contract, and the reason its login is deferred: a Seed Vault
   // signature is approved in a full-screen OS Activity. A prompt with no user
   // action behind it does not read as a stray bottom sheet — it reads as a
   // system-level security event, and it would fire on every cold start and
@@ -1585,7 +1621,11 @@ void main() {
       },
     );
 
-    for (final type in [WalletType.ledger, WalletType.seedVault]) {
+    for (final type in [
+      WalletType.ledger,
+      WalletType.seedVault,
+      WalletType.keystone,
+    ]) {
       test('currentWalletNeedsHardwareVerification is true for a ${type.name} '
           'wallet with no sig', () async {
         registerSession(type);
@@ -1680,7 +1720,7 @@ void main() {
         await dio.get<dynamic>('https://api.test/gated');
         await sub.cancel();
 
-        // D6: Seed Vault signs the challenge verbatim, so the proof is the same
+        // Seed Vault signs the challenge verbatim, so the proof is the same
         // {address, message, signature} the backend already verifies for HD and
         // imported wallets — no `chain` discriminator, and none of the
         // memo-transaction shape Ledger needs. Getting this wrong is a silent
@@ -1688,7 +1728,8 @@ void main() {
         expect(adapter.verifyBodies, hasLength(1));
         expect(adapter.verifyBodies.single, {
           'address': vaultAddr,
-          'message': 'mallow Login',
+          'message': 'TOKEN',
+          'format': 'siws',
           'signature': 'SIG',
         });
       });
@@ -1709,6 +1750,36 @@ void main() {
         // caller instead — an error they can act on, not a prompt they cannot.
         expect(signCalls, 0);
         expect(adapter.verifyBodies, isEmpty);
+      });
+
+      // The site that compiled clean when Keystone was added: as
+      // `device == seedVault` it let a Keystone user consent and then never
+      // asked the device to sign, so the 401 surfaced anyway.
+      test('a Keystone 401 signs once, after the consent sheet', () async {
+        registerSession(WalletType.keystone);
+        await auth.initializeSession();
+
+        HardwareVerifyRequest? request;
+        var signCallsWhenAsked = -1;
+        final sub = controller.requests.listen((r) {
+          request = r;
+          signCallsWhenAsked = signCalls;
+          r.completer.complete(true);
+        });
+
+        final response = await dio.get<dynamic>('https://api.test/gated');
+        await sub.cancel();
+
+        expect(request!.walletType, WalletType.keystone);
+        expect(signCallsWhenAsked, 0);
+        expect(signCalls, 1);
+        expect(adapter.verifyBodies.single, {
+          'address': vaultAddr,
+          'message': 'TOKEN',
+          'format': 'siws',
+          'signature': 'SIG',
+        });
+        expect(response.statusCode, 200);
       });
 
       test('a Ledger 401 does not sign a second time after the sheet', () async {

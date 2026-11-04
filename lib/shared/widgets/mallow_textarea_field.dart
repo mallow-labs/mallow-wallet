@@ -18,6 +18,8 @@ class MallowTextareaField extends StatelessWidget {
     this.enabled = true,
     this.autocorrect = true,
     this.enableSuggestions = true,
+    this.enableIMEPersonalizedLearning = true,
+    this.autofillHints = const <String>[],
     this.textCapitalization = TextCapitalization.none,
   });
 
@@ -30,6 +32,15 @@ class MallowTextareaField extends StatelessWidget {
   final bool enabled;
   final bool autocorrect;
   final bool enableSuggestions;
+
+  /// False asks the keyboard not to learn from what is typed here (Android's
+  /// incognito mode). Turn it off for any field that receives a secret.
+  final bool enableIMEPersonalizedLearning;
+
+  /// Null sends the platform a disabled autofill configuration, keeping the
+  /// field out of autofill; the default empty list leaves it visible to the
+  /// platform's autofill service.
+  final Iterable<String>? autofillHints;
   final TextCapitalization textCapitalization;
 
   @override
@@ -52,6 +63,8 @@ class MallowTextareaField extends StatelessWidget {
         enabled: enabled,
         autocorrect: autocorrect,
         enableSuggestions: enableSuggestions,
+        enableIMEPersonalizedLearning: enableIMEPersonalizedLearning,
+        autofillHints: autofillHints,
         textCapitalization: textCapitalization,
         maxLines: null,
         expands: true,

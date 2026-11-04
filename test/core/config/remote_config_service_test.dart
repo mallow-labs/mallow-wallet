@@ -260,7 +260,7 @@ void main() {
 
       // Foreground/flow-entry triggers are frequent; without the TTL guard a
       // few tab flips would hammer the endpoint. Past the failure cooldown, so
-      // it is the TTL doing the work here and not F6's 30s window.
+      // it is the TTL doing the work here and not the 30 s retry cooldown.
       fakeElapsed += retryGap;
       await service.refreshIfStale();
       await service.refreshIfStale();

@@ -1,18 +1,48 @@
+import 'dart:async';
+
 import 'package:bloc_test/bloc_test.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_api/mallow_api.dart' as api;
 import 'package:mallow_wallet/core/session/session_manager.dart';
+import 'package:mallow_wallet/core/models/account.dart';
 import 'package:mallow_wallet/features/offers/data/offers_inbox_repository.dart';
 import 'package:mallow_wallet/features/offers/services/offers_inbox_bloc.dart';
+import 'package:mallow_wallet/features/offers/models/bid_refund_balance.dart';
+import 'package:mallow_wallet/features/offers/models/bid_refund_deposit.dart';
 
 /// Records every getInbox call so tests can assert what the bloc requested
 /// (owners aggregation, sort, page), and serves a page-indexed response.
 class _RecordingInboxRepo implements OffersInboxRepository {
-  _RecordingInboxRepo(this._byPage);
+  _RecordingInboxRepo(
+    this._byPage, {
+    this.refunds = const [],
+    this.refundFailure,
+    this.refundReader,
+    this.inboxReader,
+  });
+  final List<BidRefundBalance> refunds;
+
+  @override
+  Future<List<BidRefundDeposit>> getBidRefundDeposits(
+    Iterable<String> owners,
+  ) => throw StateError(
+    'Deposit discovery must not run while loading the inbox',
+  );
+  final Object? refundFailure;
+  final Future<List<BidRefundBalance>> Function()? refundReader;
+  final Future<api.OffersInboxPage> Function()? inboxReader;
+  int refundCalls = 0;
 
   final api.OffersInboxPage Function(int page) _byPage;
   final calls =
       <({Iterable<String> owners, api.OffersInboxSort sort, int page})>[];
+
+  @override
+  Future<List<BidRefundBalance>> getBidRefunds(Iterable<String> owners) async {
+    refundCalls++;
+    if (refundFailure != null) throw refundFailure!;
+    return refundReader != null ? await refundReader!() : List.of(refunds);
+  }
 
   @override
   Future<api.OffersInboxPage> getInbox({
@@ -22,19 +52,27 @@ class _RecordingInboxRepo implements OffersInboxRepository {
     int pageSize = 30,
   }) async {
     calls.add((owners: owners, sort: sort, page: page));
-    return _byPage(page);
+    return inboxReader != null ? await inboxReader!() : _byPage(page);
   }
 }
 
-/// Stands in for the current session. The bloc reads only `apiOwnerAddresses`
-/// (the active Account's / Profile's wallet addresses, normalised for the
-/// backend's owner index, NOT every wallet on the device), so the fake serves
-/// that list verbatim rather than re-deriving it from wallets — re-deriving
-/// would mirror the production accessor and could never disagree with it.
+/// Supplies the current session owner keys and their chain-bearing wallet rows.
 class _FakeSession extends Fake implements SessionManager {
   _FakeSession(this.apiOwnerAddresses);
   @override
   final List<String> apiOwnerAddresses;
+  @override
+  List<WalletInfo> get sessionWallets => apiOwnerAddresses
+      .map(
+        (address) => WalletInfo(
+          id: address,
+          address: address,
+          name: address,
+          walletType: WalletType.hd,
+          chain: 'solana',
+        ),
+      )
+      .toList();
 }
 
 void main() {
@@ -73,6 +111,301 @@ void main() {
 
   OffersInboxBloc build(api.OffersInboxPage Function(int) byPage) =>
       OffersInboxBloc(_RecordingInboxRepo(byPage), session);
+
+  test(
+    'live refund survives an empty auction feed and refresh removes a withdrawn claim',
+    () async {
+      final balance = BidRefundBalance(
+        bidder: 'W1',
+        refund: const api.BidRefund(
+          claim: 'CLAIM',
+          mint: 'CURRENCY',
+          amount: '2000000',
+        ),
+      );
+      final refunds = [balance];
+      final repo = _RecordingInboxRepo(
+        (_) => const api.OffersInboxPage(result: []),
+        refunds: refunds,
+      );
+      final bloc = OffersInboxBloc(repo, session);
+      bloc.add(const OffersInboxEvent.load());
+      final loaded =
+          await bloc.stream.firstWhere(
+                (state) =>
+                    state is OffersInboxLoaded && state.bidRefunds.isNotEmpty,
+              )
+              as OffersInboxLoaded;
+      expect(loaded.items, isEmpty);
+      expect(loaded.bidRefunds.single.bidder, 'W1');
+      refunds.clear();
+      bloc.add(const OffersInboxEvent.refresh());
+      final refreshed =
+          await bloc.stream.firstWhere(
+                (state) =>
+                    state is OffersInboxLoaded &&
+                    !state.isRefreshing &&
+                    state.bidRefunds.isEmpty,
+              )
+              as OffersInboxLoaded;
+      expect(refreshed.bidRefunds, isEmpty);
+      await bloc.close();
+    },
+  );
+  test(
+    'refund read failure stays visible instead of claiming there is no balance',
+    () async {
+      final repo = _RecordingInboxRepo(
+        (_) => const api.OffersInboxPage(result: []),
+        refundFailure: Exception('Refund network unavailable'),
+      );
+      final bloc = OffersInboxBloc(repo, session);
+      bloc.add(const OffersInboxEvent.load());
+      final loaded =
+          await bloc.stream.firstWhere(
+                (state) =>
+                    state is OffersInboxLoaded && state.bidRefundError != null,
+              )
+              as OffersInboxLoaded;
+      expect(loaded.bidRefundError, contains('unavailable'));
+      await bloc.close();
+    },
+  );
+  test(
+    'refund withdrawal remains reachable when the artwork inbox fails',
+    () async {
+      const balance = BidRefundBalance(
+        bidder: 'W1',
+        refund: api.BidRefund(claim: 'CLAIM', mint: 'CURRENCY', amount: '42'),
+      );
+      final repo = _RecordingInboxRepo(
+        (_) => throw Exception('Inbox unavailable'),
+        refunds: [balance],
+      );
+      final bloc = OffersInboxBloc(repo, session);
+      bloc.add(const OffersInboxEvent.load());
+      final loaded =
+          await bloc.stream.firstWhere((state) => state is OffersInboxLoaded)
+              as OffersInboxLoaded;
+      expect(loaded.bidRefunds.single.bidder, 'W1');
+      expect(loaded.inboxError, contains('Inbox unavailable'));
+      await bloc.close();
+    },
+  );
+
+  test('inbox renders before a slow refund scan finishes', () async {
+    final refunds = Completer<List<BidRefundBalance>>();
+    final repo = _RecordingInboxRepo(
+      (_) => api.OffersInboxPage(result: [item('ART')]),
+      refundReader: () => refunds.future,
+    );
+    final bloc = OffersInboxBloc(repo, session);
+    bloc.add(const OffersInboxEvent.load());
+    final loaded =
+        await bloc.stream.firstWhere((s) => s is OffersInboxLoaded)
+            as OffersInboxLoaded;
+    expect(loaded.items!.single.asset, 'ART');
+    expect(refunds.isCompleted, isFalse);
+    expect(repo.refundCalls, 1);
+    refunds.complete([]);
+    await bloc.close();
+  });
+
+  test(
+    'older inbox and refund responses cannot restore a withdrawn claim',
+    () async {
+      const balance = BidRefundBalance(
+        bidder: 'W1',
+        refund: api.BidRefund(claim: 'CLAIM', mint: 'CURRENCY', amount: '42'),
+      );
+      final oldInbox = Completer<api.OffersInboxPage>();
+      final oldRefunds = Completer<List<BidRefundBalance>>();
+      var inboxCalls = 0;
+      var refundCalls = 0;
+      final repo = _RecordingInboxRepo(
+        (_) => const api.OffersInboxPage(result: []),
+        inboxReader: () => ++inboxCalls == 1
+            ? oldInbox.future
+            : Future.value(api.OffersInboxPage(result: [item('NEW')])),
+        refundReader: () =>
+            ++refundCalls == 1 ? oldRefunds.future : Future.value([]),
+      );
+      final bloc = OffersInboxBloc(repo, session);
+      bloc.add(const OffersInboxEvent.load());
+      // Wait for both first reads to start, then simulate the post-withdraw ack.
+      await Future<void>.delayed(Duration.zero);
+      bloc.add(const OffersInboxEvent.refresh());
+      await bloc.stream.firstWhere((s) => s is OffersInboxLoaded);
+      oldInbox.complete(api.OffersInboxPage(result: [item('OLD')]));
+      oldRefunds.complete([balance]);
+      await bloc.close();
+      final state = bloc.state as OffersInboxLoaded;
+      expect(state.items!.single.asset, 'NEW');
+      expect(state.bidRefunds, isEmpty);
+    },
+  );
+
+  for (final refundFails in [false, true]) {
+    test(
+      'failed load-more preserves concurrent refund ${refundFails ? 'error' : 'balance'}',
+      () async {
+        const balance = BidRefundBalance(
+          bidder: 'W1',
+          refund: api.BidRefund(claim: 'CLAIM', mint: 'CURRENCY', amount: '42'),
+        );
+        final refunds = Completer<List<BidRefundBalance>>();
+        final nextPage = Completer<api.OffersInboxPage>();
+        var inboxCalls = 0;
+        final repo = _RecordingInboxRepo(
+          (_) => throw StateError('Unexpected synchronous page read'),
+          refundReader: () => refunds.future,
+          inboxReader: () => ++inboxCalls == 1
+              ? Future.value(
+                  api.OffersInboxPage(result: [item('ART')], nextPage: 1),
+                )
+              : nextPage.future,
+        );
+        final bloc = OffersInboxBloc(repo, session);
+        addTearDown(bloc.close);
+        final initial = bloc.stream.firstWhere((s) => s is OffersInboxLoaded);
+        bloc.add(const OffersInboxEvent.load());
+        await initial;
+        final loading = bloc.stream.firstWhere(
+          (s) => s is OffersInboxLoaded && s.isLoadingMore,
+        );
+        bloc.add(const OffersInboxEvent.loadMore());
+        await loading;
+        final refundUpdate = bloc.stream.firstWhere(
+          (s) =>
+              s is OffersInboxLoaded &&
+              (refundFails
+                  ? s.bidRefundError != null
+                  : s.bidRefunds.isNotEmpty),
+        );
+        if (refundFails) {
+          refunds.completeError(Exception('Refund unavailable'));
+        } else {
+          refunds.complete([balance]);
+        }
+        await refundUpdate;
+        final finished = bloc.stream.firstWhere(
+          (s) => s is OffersInboxLoaded && !s.isLoadingMore,
+        );
+        nextPage.completeError(Exception('Next page unavailable'));
+        final current = await finished as OffersInboxLoaded;
+        expect(current.items!.single.asset, 'ART');
+        expect(current.hasMore, isTrue);
+        if (refundFails) {
+          expect(current.bidRefundError, contains('Refund unavailable'));
+        } else {
+          expect(current.bidRefunds, [balance]);
+          expect(current.bidRefundError, isNull);
+        }
+        expect(repo.refundCalls, 1);
+      },
+    );
+  }
+
+  test('sort and load-more preserve refunds without repeating scans', () async {
+    const balance = BidRefundBalance(
+      bidder: 'W1',
+      refund: api.BidRefund(claim: 'CLAIM', mint: 'CURRENCY', amount: '42'),
+    );
+    final repo = _RecordingInboxRepo(
+      (_) => api.OffersInboxPage(result: [item('ART')], nextPage: 1),
+      refunds: [balance],
+    );
+    final bloc = OffersInboxBloc(repo, session);
+    bloc.add(const OffersInboxEvent.load());
+    await bloc.stream.firstWhere(
+      (s) => s is OffersInboxLoaded && s.bidRefunds.isNotEmpty,
+    );
+    final states = <OffersInboxState>[];
+    final sub = bloc.stream.listen(states.add);
+    bloc.add(const OffersInboxEvent.setSort(sort: api.OffersInboxSort.amount));
+    await bloc.stream.firstWhere(
+      (s) => s is OffersInboxLoaded && !s.isRefreshing,
+    );
+    expect(
+      states.whereType<OffersInboxLoaded>().every(
+        (s) => s.bidRefunds.single == balance,
+      ),
+      isTrue,
+    );
+    bloc.add(const OffersInboxEvent.loadMore());
+    await bloc.stream.firstWhere(
+      (s) => s is OffersInboxLoaded && !s.isLoadingMore,
+    );
+    expect(repo.refundCalls, 1);
+    await sub.cancel();
+    await bloc.close();
+  });
+
+  test(
+    'artwork-only refresh skips refunds and errors retain the selected sort',
+    () async {
+      const balance = BidRefundBalance(
+        bidder: 'W1',
+        refund: api.BidRefund(claim: 'CLAIM', mint: 'CURRENCY', amount: '42'),
+      );
+      var fail = false;
+      final repo = _RecordingInboxRepo(
+        (_) => fail
+            ? throw Exception('Inbox unavailable')
+            : const api.OffersInboxPage(result: []),
+        refunds: [balance],
+      );
+      final bloc = OffersInboxBloc(repo, session);
+      bloc.add(const OffersInboxEvent.load());
+      await bloc.stream.firstWhere(
+        (s) => s is OffersInboxLoaded && s.bidRefunds.isNotEmpty,
+      );
+      bloc.add(const OffersInboxEvent.refresh(refreshRefunds: false));
+      await bloc.stream.firstWhere(
+        (s) => s is OffersInboxLoaded && !s.isRefreshing,
+      );
+      expect(repo.refundCalls, 1);
+      fail = true;
+      bloc.add(
+        const OffersInboxEvent.setSort(sort: api.OffersInboxSort.amount),
+      );
+      final error =
+          await bloc.stream.firstWhere(
+                (s) => s is OffersInboxLoaded && s.inboxError != null,
+              )
+              as OffersInboxLoaded;
+      expect(error.sort, api.OffersInboxSort.amount);
+      expect(error.bidRefunds, [balance]);
+      expect(repo.refundCalls, 1);
+      await bloc.close();
+    },
+  );
+
+  test(
+    'total network failure is an error, including after changing sort',
+    () async {
+      final repo = _RecordingInboxRepo(
+        (_) => throw Exception('Inbox unavailable'),
+        refundFailure: Exception('Refund unavailable'),
+      );
+      final bloc = OffersInboxBloc(repo, session);
+      bloc.add(const OffersInboxEvent.load());
+      expect(
+        await bloc.stream.firstWhere((s) => s is OffersInboxError),
+        isA<OffersInboxError>().having(
+          (s) => s.message,
+          'message',
+          contains('Inbox unavailable'),
+        ),
+      );
+      bloc.add(
+        const OffersInboxEvent.setSort(sort: api.OffersInboxSort.amount),
+      );
+      await bloc.stream.firstWhere((s) => s is OffersInboxError);
+      expect(repo.calls.last.sort, api.OffersInboxSort.amount);
+      await bloc.close();
+    },
+  );
 
   group('load', () {
     blocTest<OffersInboxBloc, OffersInboxState>(
@@ -269,7 +602,7 @@ void main() {
         const OffersInboxEvent.setSort(sort: api.OffersInboxSort.amount),
       );
       await bloc.stream.firstWhere(
-        (s) => s is OffersInboxLoaded && s.items != null,
+        (s) => s is OffersInboxLoaded && !s.isRefreshing,
       );
       expect(repo.calls.last.sort, api.OffersInboxSort.amount);
       expect(repo.calls.last.page, 0);

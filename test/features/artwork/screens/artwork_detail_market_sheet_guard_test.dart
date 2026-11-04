@@ -185,6 +185,7 @@ void main() {
     // Empty session — the action-state resolver reads this synchronously in
     // build to widen ownership across the session's wallets.
     when(() => sessionManager.sessionAddresses).thenReturn(const {});
+    when(() => sessionManager.sessionWallets).thenReturn(const []);
 
     // Build-path side-effect loaders: keep them inert (never resolve / empty)
     // so they don't drive extra rebuilds during the test.

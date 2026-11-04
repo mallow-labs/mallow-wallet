@@ -115,9 +115,11 @@ void main() {
     evmService = MockEvmArtworkTransferService();
     prefs = MockPreferencesService();
     // The EVM simulate path now kicks the fee-market fetch off concurrently with
-    // prepare (FINDING 8b), so it is always invoked — give it a default market;
+    // prepare, so it is always invoked — give it a default market;
     // individual tests override it (e.g. to fail).
     when(evmService.gasMarket()).thenAnswer((_) async => _market());
+    // Hardware signers are the conservative default: they stay on v0.
+    when(walletManager.activeSignerCanSignV1()).thenAnswer((_) async => false);
   });
 
   TransferArtworkBloc build() => TransferArtworkBloc(
@@ -166,6 +168,7 @@ void main() {
       TokenStandard.pnft,
       TokenStandard.core,
       TokenStandard.cnft,
+      TokenStandard.cnftV2,
       // A Core collection "transfer" is an update-authority reassignment, built
       // by the same backend route (UpdateCollectionV1).
       TokenStandard.coreCollection,
@@ -335,13 +338,68 @@ void main() {
     // and is only hit for non-legacy standards. A snake_case regression here
     // would 422 on the real route, so this test must fail if the request shape
     // drifts.
+    for (final standard in [TokenStandard.core, TokenStandard.cnftV2]) {
+      blocTest<TransferArtworkBloc, TransferArtworkState>(
+        '${standard.name} simulate requests a transfer tx with camelCase wire fields',
+        setUp: () {
+          when(dasApi.getAsset(_mint)).thenAnswer(
+            (_) async => _asset(standard, collectionKey: _collection),
+          );
+          when(walletManager.getAddress()).thenAnswer((_) async => _source);
+          when(apiV2.getTransferTx(any)).thenAnswer(
+            (_) async => const ApiResponse<TransferTxResponse>(
+              result: TransferTxResponse(tx: 'dHg='),
+            ),
+          );
+          when(
+            rpc.simulateWithDelta(
+              address: anyNamed('address'),
+              simulate: anyNamed('simulate'),
+              requirePreBalance: anyNamed('requirePreBalance'),
+            ),
+          ).thenAnswer(
+            (_) async => const SimulationDelta(
+              result: SimulationResult(success: true),
+              lamportsDelta: -5000,
+            ),
+          );
+        },
+        build: build,
+        act: (b) async {
+          b.add(const TransferArtworkEvent.started(_mint));
+          await Future<void>.delayed(Duration.zero);
+          b.add(const TransferArtworkEvent.recipientChanged(_recipient));
+          b.add(const TransferArtworkEvent.proceed());
+          await Future<void>.delayed(Duration.zero);
+        },
+        verify: (_) {
+          final req =
+              verify(apiV2.getTransferTx(captureAny)).captured.single
+                  as TransferTxRequest;
+          expect(req.tokenStandard.value, standard.wireValue);
+          expect(req.asset, _mint);
+          expect(req.recipient, _recipient);
+          expect(req.authority, _source);
+          // The contract is camelCase on the wire — snake_case would 422.
+          expect(req.toJson()['tokenStandard'], standard.wireValue);
+          // A signer that cannot sign v1 must not be handed one.
+          expect(req.transactionVersion, isNull);
+        },
+      );
+    }
+
+    // A wallet whose key the app holds signs v1, which fits a compressed NFT's
+    // Merkle proof however deep its tree and however small its canopy.
     blocTest<TransferArtworkBloc, TransferArtworkState>(
-      'simulate requests a transfer tx with camelCase wire fields',
+      'asks for a v1 transaction when the active signer can sign one',
       setUp: () {
         when(dasApi.getAsset(_mint)).thenAnswer(
-          (_) async => _asset(TokenStandard.core, collectionKey: _collection),
+          (_) async => _asset(TokenStandard.cnftV2, collectionKey: _collection),
         );
         when(walletManager.getAddress()).thenAnswer((_) async => _source);
+        when(
+          walletManager.activeSignerCanSignV1(),
+        ).thenAnswer((_) async => true);
         when(apiV2.getTransferTx(any)).thenAnswer(
           (_) async => const ApiResponse<TransferTxResponse>(
             result: TransferTxResponse(tx: 'dHg='),
@@ -372,12 +430,8 @@ void main() {
         final req =
             verify(apiV2.getTransferTx(captureAny)).captured.single
                 as TransferTxRequest;
-        expect(req.tokenStandard.value, 'core');
-        expect(req.asset, _mint);
-        expect(req.recipient, _recipient);
-        expect(req.authority, _source);
-        // The contract is camelCase on the wire — snake_case would 422.
-        expect(req.toJson()['tokenStandard'], 'core');
+        expect(req.transactionVersion, 1);
+        expect(req.toJson()['transactionVersion'], 1);
       },
     );
 
@@ -850,7 +904,7 @@ void main() {
       },
     );
 
-    // WHY (FINDING 8b): the fee-market fetch runs concurrently with prepare now.
+    // WHY: the fee-market fetch runs concurrently with prepare now.
     // A market failure must still let the simulation succeed and degrade only to
     // a null market/selection (read-only default fee) — the concurrency change
     // must not turn a market outage into a blocked transfer.

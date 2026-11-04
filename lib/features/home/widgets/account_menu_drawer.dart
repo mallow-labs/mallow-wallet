@@ -25,12 +25,14 @@ import '../../../shared/widgets/mallow_refresh_indicator.dart';
 import '../../../shared/widgets/mallow_svg_icon.dart';
 import '../../../shared/widgets/mallow_underline_tab_bar.dart';
 import '../../../shared/widgets/menu_row.dart';
+import '../../../shared/widgets/switch_pill.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
 import '../../../shared/widgets/wallet_type_badge.dart';
 import '../../notifications/data/notifications_repository.dart';
 import '../../profile/data/user_profile_repository.dart';
 import '../../profile/widgets/profile_required_sheet.dart';
 import '../../receive/sheets/account_receive_sheet.dart';
+import '../../scan/widgets/scan_qr_code.dart';
 import '../../wallets/services/wallet_drawer_bloc.dart';
 import 'account_menu_constants.dart';
 

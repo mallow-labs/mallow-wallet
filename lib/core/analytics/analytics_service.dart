@@ -53,6 +53,7 @@ class AnalyticsService {
 
   bool _initialized = false;
   String? _deviceId;
+  bool _isNewInstall = false;
   String? _sessionId;
   DateTime? _lastActivity;
 
@@ -65,7 +66,38 @@ class AnalyticsService {
 
   bool get _enabled => Config.analyticsEnabled && !_prefs.analyticsOptOut;
 
+  /// Whether [track] would send right now. Lets a caller skip work that only
+  /// exists to build an event, such as a wallet-store read for its properties.
+  bool get isRecording => _initialized && _enabled;
+
   String get _network => Config.isDevnet ? 'devnet' : 'mainnet';
+
+  /// The device id, for a request that carries it as `Device-Id`.
+  ///
+  /// The value stored under `mallow_analytics_device_id`: the cached one when
+  /// [init] has resolved it, otherwise read (or minted) from secure storage now.
+  /// Null only when storage fails, and a caller must then not send the header:
+  /// never an empty string.
+  Future<String?> deviceId() async {
+    final cached = _deviceId;
+    if (cached != null && cached.isNotEmpty) return cached;
+    try {
+      final id = await _resolveDeviceId();
+      if (id.isEmpty) return null;
+      _deviceId = id;
+      return id;
+    } catch (e) {
+      debugPrint('[Analytics] device id unavailable: $e');
+      return null;
+    }
+  }
+
+  /// Whether [init] minted the device id on this launch, because none was
+  /// stored — the first launch of a fresh install. On iOS the id lives in the
+  /// keychain and survives reinstall, so a reinstall is not a new install there;
+  /// on Android it is. The id minted by [resetDeviceIdentity] does not count:
+  /// a reset is not an install.
+  bool get isNewInstall => _isNewInstall;
 
   /// Resolve device id, app/device context, restore the queue, and open a
   /// session. Safe to call more than once. Best-effort — any failure leaves
@@ -338,6 +370,7 @@ class AnalyticsService {
     if (existing != null && existing.isNotEmpty) return existing;
     final id = _uuid.v4();
     await _secureStorage.write(key: _deviceIdKey, value: id);
+    if (!_initialized) _isNewInstall = true;
     return id;
   }
 

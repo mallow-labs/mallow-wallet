@@ -13,10 +13,14 @@ import 'app.dart';
 import 'core/analytics/analytics_events.dart';
 import 'core/analytics/analytics_service.dart';
 import 'core/config/environment.dart';
+import 'core/observability/app_logger.dart';
 import 'core/services/sentry_service.dart';
 import 'core/utils/local_timezone.dart';
 import 'di.dart';
 import 'features/cast/cast_receiver_app.dart';
+import 'features/browser/services/browser_domain_policy.dart';
+import 'features/browser/services/browser_site_icons.dart';
+import 'features/walletconnect/walletconnect_module.dart';
 
 /// Top-level background message handler for FCM.
 ///
@@ -45,13 +49,17 @@ Future<void> main() async {
   // failure surfaces as a visible error screen instead of a blank white
   // screen on TestFlight / release builds.
   await runZonedGuarded(_bootstrap, (error, stackTrace) {
-    debugPrint('[main] Uncaught zone error: $error\n$stackTrace');
+    AppLogger.error('main', 'Uncaught zone error', error, stackTrace);
     unawaited(SentryService.captureException(error, stackTrace: stackTrace));
   });
 }
 
 Future<void> _bootstrap() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await BrowserDomainPolicy.initialize();
+  // Site icons the browser drew are kept on disk, so a restored tab shows
+  // its icon before the page loads again.
+  BrowserSiteIcons.useCacheDirectory();
 
   // The native manifests (AndroidManifest screenOrientation, Info.plist
   // UISupportedInterfaceOrientations) are the authoritative portrait lock and
@@ -71,6 +79,11 @@ Future<void> _bootstrap() async {
   // its own. Without this the license page would omit the licence of the one
   // family the whole UI is set in. All three OFL files that ship must appear
   // here; `bundled_google_fonts_test.dart` fails if one does not.
+  //
+  // The vendored model-viewer bundle that renders 3D artworks is an asset for
+  // the same reason, so its Apache-2.0 licence is registered here too, with
+  // the licences of the libraries compiled into it. The icon sets are assets
+  // too, and several of their licences require the notice in the app.
   GoogleFonts.config.allowRuntimeFetching = false;
   LicenseRegistry.addLicense(() async* {
     yield LicenseEntryWithLineBreaks(const [
@@ -82,6 +95,15 @@ Future<void> _bootstrap() async {
     yield LicenseEntryWithLineBreaks(const [
       'Geist',
     ], await rootBundle.loadString('assets/fonts/Geist-OFL.txt'));
+    yield LicenseEntryWithLineBreaks(const [
+      'model-viewer',
+    ], await rootBundle.loadString('assets/model_viewer/LICENSE'));
+    yield LicenseEntryWithLineBreaks(const [
+      'model-viewer',
+    ], await rootBundle.loadString('assets/model_viewer/THIRD_PARTY_LICENSES'));
+    yield LicenseEntryWithLineBreaks(const [
+      'icons',
+    ], await rootBundle.loadString('assets/icons/THIRD_PARTY_LICENSES'));
   });
 
   // Size the image cache for the dense artwork grids. With MallowNetworkImage
@@ -96,8 +118,19 @@ Future<void> _bootstrap() async {
     ..maximumSizeBytes = 200 << 20;
 
   // Forward framework-level errors so post-init crashes are also visible.
+  // After SentryService.init the SDK's handler captures first and then chains
+  // to this one, so the capture below repeats it; the SDK's deduplication
+  // drops the repeat.
   FlutterError.onError = (details) {
-    FlutterError.presentError(details);
+    // Framework diagnostics can include widget text or rejected input, so
+    // log the error type and (debug only) the scrubbed frames, never
+    // presentError or the diagnostics tree.
+    AppLogger.error(
+      'Flutter',
+      'Framework error',
+      details.exception,
+      details.stack,
+    );
     unawaited(
       SentryService.captureException(
         details.exception,
@@ -126,16 +159,22 @@ Future<void> _bootstrap() async {
 
     await Firebase.initializeApp();
 
-    // Gap 3 fix: Register background handler before runApp() to ensure it
+    // Register the background handler before runApp() to ensure it
     // is in place before any background isolate is spawned.
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
 
     await configureDependencies();
+    registerWalletConnectModule();
 
     // Initialize analytics and record the cold start. Best-effort — the
     // service self-disables on any init failure and never throws.
     final analytics = sl<AnalyticsService>();
     await analytics.init();
+    // Enqueued before `App Opened`, so a new device's first event is the
+    // install.
+    if (analytics.isNewInstall) {
+      unawaited(analytics.track(AnalyticsEvent.appInstalled));
+    }
     unawaited(
       analytics.track(
         AnalyticsEvent.appOpened,
@@ -147,7 +186,7 @@ Future<void> _bootstrap() async {
     // are also captured. SentryService gracefully no-ops when DSN is empty.
     await SentryService.init(appRunner: () => runApp(const MallowApp()));
   } catch (error, stackTrace) {
-    debugPrint('[main] Startup failed: $error\n$stackTrace');
+    AppLogger.error('main', 'Startup failed', error, stackTrace);
     unawaited(
       SentryService.captureException(
         error,

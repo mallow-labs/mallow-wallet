@@ -3,11 +3,13 @@ import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/widgets/mallow_network_image.dart';
+import '../../../shared/widgets/sliver_overscroll_anchored.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
 
 /// Full-width banner image with an overlaid back button.
 /// If [bannerUrl] is null, no banner image is shown (back button still renders).
-/// Avatar lives in [ProfileHeader] directly below.
+/// Avatar lives in [ProfileHeader] directly below. Holds still on a top
+/// overscroll ([SliverOverscrollAnchored]) so the back button stays put.
 class ProfileBanner extends StatelessWidget {
   const ProfileBanner({
     required this.bannerUrl,
@@ -27,7 +29,7 @@ class ProfileBanner extends StatelessWidget {
 
     if (bannerUrl == null || bannerUrl!.isEmpty) {
       // No banner: render just enough space for the back button.
-      return SliverToBoxAdapter(
+      return SliverOverscrollAnchored(
         child: SizedBox(
           height: topPadding + 48,
           child: Stack(
@@ -43,7 +45,7 @@ class ProfileBanner extends StatelessWidget {
       );
     }
 
-    return SliverToBoxAdapter(
+    return SliverOverscrollAnchored(
       child: Stack(
         children: [
           // Banner image — full-width, use 800px CDN bucket for crisp retina rendering

@@ -22,6 +22,8 @@ enum TokenStandard {
   pnft,
   @JsonValue('cnft')
   cnft,
+  @JsonValue('cnft-v2')
+  cnftV2,
   @JsonValue('objkt')
   objkt,
   @JsonValue('native')
@@ -35,10 +37,10 @@ enum TokenStandard {
 }
 
 /// Map a Helius DAS `getAsset` `interface` string onto a [TokenStandard].
-/// Compressed assets are surfaced as [TokenStandard.cnft] regardless of
-/// interface (matches the parsing in `on_chain_asset.dart`).
+/// Bubblegum v2 has its own interface; other compressed assets remain v1.
 extension TokenStandardDas on TokenStandard {
   static TokenStandard fromDasInterface(String? dasInterface, {bool isCompressed = false}) {
+    if (dasInterface == 'MplBubblegumV2') return TokenStandard.cnftV2;
     if (isCompressed) return TokenStandard.cnft;
     return switch (dasInterface) {
       'MplCoreAsset' => TokenStandard.core,
@@ -57,6 +59,7 @@ extension TokenStandardDas on TokenStandard {
     TokenStandard.coreCollection => 'core-collection',
     TokenStandard.pnft => 'pnft',
     TokenStandard.cnft => 'cnft',
+    TokenStandard.cnftV2 => 'cnft-v2',
     TokenStandard.objkt => 'objkt',
     TokenStandard.native => 'native',
     TokenStandard.erc20 => 'erc20',
@@ -144,8 +147,10 @@ sealed class MintNftMetadata with _$MintNftMetadata {
 /// Reference to the parent collection of a new mint.
 @freezed
 sealed class MintCollectionRef with _$MintCollectionRef {
-  const factory MintCollectionRef({required String mintAccount, TokenStandard? tokenStandard}) =
-      _MintCollectionRef;
+  const factory MintCollectionRef({
+    required String mintAccount,
+    @JsonKey(unknownEnumValue: JsonKey.nullForUndefinedEnumValue) TokenStandard? tokenStandard,
+  }) = _MintCollectionRef;
 
   factory MintCollectionRef.fromJson(Map<String, dynamic> json) =>
       _$MintCollectionRefFromJson(json);

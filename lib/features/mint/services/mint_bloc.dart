@@ -309,6 +309,7 @@ class MintState extends Equatable {
     this.preEditMetadataJson,
     this.preEditMaxSupply,
     this.preEditCollectionMint,
+    this.preEditRoyaltyFields,
     this.isSimulatingTxCost = false,
     this.simulatedTxCostLamports,
   });
@@ -341,7 +342,7 @@ class MintState extends Equatable {
   final String? collectionName;
   // Full preview render for the picked collection. Held so the
   // Categorization step can derive the collection's category/free-tag
-  // partition for UI gating (mirrors `Details 371-416`).
+  // partition for UI gating (mirrors the webapp's `Details` step).
   final CollectionPreviewRender? collectionSource;
   final bool nsfw;
 
@@ -487,6 +488,10 @@ class MintState extends Equatable {
   /// not visible in the metadata JSON.
   final String? preEditCollectionMint;
 
+  /// [royaltyFields] at prefill time. Royalties live on-chain and are not in
+  /// the metadata JSON, so they are tracked separately for the no-change check.
+  final List<Object>? preEditRoyaltyFields;
+
   /// True while the cost simulation is in flight. Drives the
   /// "Solana and protocol fees" loading state on the confirm sheet.
   final bool isSimulatingTxCost;
@@ -548,6 +553,7 @@ class MintState extends Equatable {
     Object? preEditMetadataJson = _sentinel,
     Object? preEditMaxSupply = _sentinel,
     Object? preEditCollectionMint = _sentinel,
+    Object? preEditRoyaltyFields = _sentinel,
     bool? isSimulatingTxCost,
     Object? simulatedTxCostLamports = _sentinel,
   }) => MintState(
@@ -651,6 +657,9 @@ class MintState extends Equatable {
     preEditCollectionMint: identical(preEditCollectionMint, _sentinel)
         ? this.preEditCollectionMint
         : preEditCollectionMint as String?,
+    preEditRoyaltyFields: identical(preEditRoyaltyFields, _sentinel)
+        ? this.preEditRoyaltyFields
+        : preEditRoyaltyFields as List<Object>?,
     isSimulatingTxCost: isSimulatingTxCost ?? this.isSimulatingTxCost,
     simulatedTxCostLamports: identical(simulatedTxCostLamports, _sentinel)
         ? this.simulatedTxCostLamports
@@ -707,6 +716,7 @@ class MintState extends Equatable {
     preEditMetadataJson,
     preEditMaxSupply,
     preEditCollectionMint,
+    preEditRoyaltyFields,
     isSimulatingTxCost,
     simulatedTxCostLamports,
   ];
@@ -764,6 +774,11 @@ class MintState extends Equatable {
     if (banner != null) return true;
     if (preEditMaxSupply != maxSupplyForRequest) return true;
     if (preEditCollectionMint != collection?.mintAccount) return true;
+    final preRoyalties = preEditRoyaltyFields;
+    if (preRoyalties != null &&
+        !const DeepCollectionEquality().equals(preRoyalties, royaltyFields)) {
+      return true;
+    }
     final preJson = preEditMetadataJson;
     if (preJson == null) return true;
     return !const DeepCollectionEquality().equals(preJson, toMetadataJson());
@@ -851,7 +866,9 @@ class MintState extends Equatable {
 
   /// Creator-split validation — null when valid.
   String? get creatorsError {
-    if (creators.isEmpty) return null;
+    // Webapp parity: an empty list cannot add up to 100%, and the chain
+    // rejects an empty Royalties plugin.
+    if (creators.isEmpty) return 'Proceed splits must add up to 100%';
     var total = 0;
     final addresses = <String>{};
     for (final c in creators) {
@@ -939,14 +956,24 @@ class MintState extends Equatable {
     return out;
   }
 
+  /// The royalty percentage as the request carries it, in basis points.
+  int get sellerFeeBasisPoints {
+    final pct = double.tryParse(royaltyPercent.trim()) ?? 0;
+    return (pct * 100).round().clamp(0, 1500);
+  }
+
+  /// The royalty fields the request writes on-chain: the seller fee, then each
+  /// creator's address and share. The webapp's no-change check compares the
+  /// whole `nftMetadata`, so a royalties-only edit is a real update.
+  List<Object> get royaltyFields => [
+    sellerFeeBasisPoints,
+    for (final c in creators)
+      (c.address.trim(), int.tryParse(c.shareText.trim()) ?? 0),
+  ];
+
   /// Convert the form state into an `nftMetadata` payload for the
   /// create-asset request.
   MintNftMetadata toNftMetadata() {
-    final sellerFeeBps = () {
-      final pct = double.tryParse(royaltyPercent.trim()) ?? 0;
-      return (pct * 100).round().clamp(0, 1500);
-    }();
-
     final apiCreators = creators.map((c) {
       final addr = c.address.trim();
       // Edit mode (token-metadata): preserve the original `verified`
@@ -1006,7 +1033,7 @@ class MintState extends Equatable {
 
     return MintNftMetadata(
       name: name.trim(),
-      sellerFeeBasisPoints: sellerFeeBps,
+      sellerFeeBasisPoints: sellerFeeBasisPoints,
       creators: apiCreators,
       extendedMetadata: extended,
       // Webapp parity (Mint): 1/1 → 0, Limited → count, Open → null.
@@ -1193,18 +1220,19 @@ class MintBloc extends Bloc<MintEvent, MintState> {
     );
     on<MintAddCreator>((_, emit) {
       if (state.creators.length >= 5) return;
-      emit(
-        state.copyWith(
-          creators: [
-            ...state.creators,
-            const MintCreatorInput(address: '', shareText: ''),
-          ],
-        ),
-      );
+      // The first wallet on an empty list is the user's own, holding the
+      // whole share — a blank first row would be the only way to reach 100%.
+      final newCreator = state.creators.isEmpty && state.userPubkey.isNotEmpty
+          ? MintCreatorInput(address: state.userPubkey, isSelf: true)
+          : const MintCreatorInput(address: '', shareText: '');
+      emit(state.copyWith(creators: [...state.creators, newCreator]));
     });
+    // The user's own row is locked by identity, not by position: in edit mode
+    // the first row is whichever creator is on-chain, and may not be the user.
     on<MintSetCreatorAddress>((e, emit) {
       final next = [...state.creators];
-      if (e.index <= 0 || e.index >= next.length) return; // self row locked
+      if (e.index < 0 || e.index >= next.length) return;
+      if (next[e.index].isSelf) return;
       next[e.index] = next[e.index].copyWith(address: e.address);
       emit(state.copyWith(creators: next));
     });
@@ -1215,7 +1243,8 @@ class MintBloc extends Bloc<MintEvent, MintState> {
       emit(state.copyWith(creators: next));
     });
     on<MintRemoveCreator>((e, emit) {
-      if (e.index <= 0 || e.index >= state.creators.length) return;
+      if (e.index < 0 || e.index >= state.creators.length) return;
+      if (state.creators[e.index].isSelf) return;
       final next = [...state.creators]..removeAt(e.index);
       emit(state.copyWith(creators: next));
     });
@@ -1451,13 +1480,40 @@ class MintBloc extends Bloc<MintEvent, MintState> {
     // changed. Mirrors webapp's `setPreEditNftMetadata(cloneDeep(...))`
     // in CreateContext.onEditAssetFetched.
     final preEditJson = prefilledState.toMetadataJson();
+
+    // An asset minted without creators (a Core asset or collection with no
+    // Royalties plugin, or a legacy NFT with no creator list) leaves the
+    // royalties step with no rows, and every collection edit writes the
+    // Royalties plugin, which the chain rejects with an empty list. Seed the
+    // wallet that will sign the edit at 100%, as a new mint does. The snapshot
+    // keeps the on-chain (empty) list, so the edit counts as an update.
+    final seedAddress = creatorInputs.isEmpty
+        ? _editSignerAddress(p.updateAuthority, user)
+        : '';
     emit(
       prefilledState.copyWith(
         preEditMetadataJson: preEditJson,
         preEditMaxSupply: prefilledState.maxSupplyForRequest,
         preEditCollectionMint: p.collection?.mintAccount,
+        preEditRoyaltyFields: prefilledState.royaltyFields,
+        creators: seedAddress.isEmpty
+            ? creatorInputs
+            : [MintCreatorInput(address: seedAddress, isSelf: true)],
       ),
     );
+  }
+
+  /// The wallet an edit will be signed by: the asset's update authority when
+  /// it is a signable session wallet (`_onConfirmMint` switches to it before
+  /// signing), otherwise the active wallet. Empty when neither is known.
+  String _editSignerAddress(String? updateAuthority, String activeAddress) {
+    if (updateAuthority != null && updateAuthority.isNotEmpty) {
+      final wallet = sl<SessionManager>().sessionWalletForAddress(
+        updateAuthority,
+      );
+      if (wallet != null && wallet.canSign) return wallet.address;
+    }
+    return activeAddress;
   }
 
   Future<void> _onStarted(MintStarted _, Emitter<MintState> emit) async {
@@ -1938,19 +1994,15 @@ class MintBloc extends Bloc<MintEvent, MintState> {
       // with the ephemeral mint keypair (and any lazily-created group
       // keypair) via [additionalSigners]; edit flows pass none.
       //
-      // No [StaleTxTracker] here — and NOT because these txs are unsigned by
-      // the server. They frequently are co-signed: the v2 mint and edit
-      // builders attach the auth keypair's signature whenever
-      // `unlockableContentIds` is non-empty (it is the AppData data
-      // authority) and the subsidy keypair's on a subsidized master-edition
-      // mint (it pays the group rent), so `hasPreAttachedSignature` is
-      // routinely true on this batch. The tracker is omitted because it has
-      // no window to cover here: it closes the gap between a *prepare*-time
-      // build and a later Confirm tap (the marketplace flows' `prepare` →
-      // ready → `execute` split), and this handler builds the tx a few lines
-      // up, milliseconds before `execute`. An expired blockhash surfaces in
-      // the catch below, and Retry (`MintRetryMint` re-enters this handler)
-      // rebuilds from the builder rather than re-signing the stale bytes.
+      // No builder tracker: each real mint/edit build inserts an upload
+      // record, and subsidized builds reserve a slot before returning. A
+      // replay can lose that subsidy and silently switch to user-paid fees.
+      // These txs can carry auth or subsidy co-signatures, so a slow Keystone
+      // exchange must check the original blockhash after signing instead.
+      // The shared signing path discards known-expired signatures unsent and
+      // the executor surfaces the readable expiry without retrying those
+      // bytes, including the edit after a cNFT lookup-table setup confirms.
+      // User Retry re-enters this handler and builds a new attempt.
       final signResult = await _executor.execute(
         txsBase64: txBatch,
         usdValue: usdOutflow,

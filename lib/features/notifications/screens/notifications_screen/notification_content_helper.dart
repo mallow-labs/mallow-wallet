@@ -303,7 +303,7 @@ class NotificationContentHelper {
         );
 
       // ---- Gumball ----
-      // Mobile has no Gumball screens (Tier D), so the Gumball-scoped rows fall
+      // Mobile has no Gumball screens, so the Gumball-scoped rows fall
       // through to mallow.art; the ones the webapp points at an artwork stay
       // in-app.
       case api.NotificationType.gumballPurchased:

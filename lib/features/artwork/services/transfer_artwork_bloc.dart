@@ -252,6 +252,7 @@ class TransferArtworkBloc
     TokenStandard.pnft,
     TokenStandard.core,
     TokenStandard.cnft,
+    TokenStandard.cnftV2,
     TokenStandard.coreCollection,
   };
 
@@ -330,6 +331,7 @@ class TransferArtworkBloc
       _tokenStandard == TokenStandard.pnft ||
       _tokenStandard == TokenStandard.core ||
       _tokenStandard == TokenStandard.cnft ||
+      _tokenStandard == TokenStandard.cnftV2 ||
       _tokenStandard == TokenStandard.coreCollection;
 
   Future<void> _onStarted(
@@ -1018,17 +1020,23 @@ class TransferArtworkBloc
   /// standards (pNFT / Core / cNFT). The backend resolves the per-standard
   /// accounts (auth-rules, mpl-core, Bubblegum proof) server-side, so the
   /// request is identical across standards apart from [_tokenStandard].
+  ///
+  /// Asks for a v1 transaction when the active wallet can sign one. v1 holds
+  /// 4,096 bytes rather than 1,232, so a compressed NFT in a deep tree with a
+  /// small canopy still fits its Merkle proof. Hardware signers stay on v0.
   Future<String> _buildBackendTransferTx({
     required String authority,
     required String recipient,
     required String mint,
   }) async {
+    final canSignV1 = await _walletManager.activeSignerCanSignV1();
     final response = await _apiV2.getTransferTx(
       TransferTxRequest(
         authority: authority,
         asset: mint,
         recipient: recipient,
         tokenStandard: _tokenStandard!.apiValue,
+        transactionVersion: canSignV1 ? 1 : null,
       ),
     );
     // Solana standards always return a base64 `tx` (EVM returns `evm` instead,

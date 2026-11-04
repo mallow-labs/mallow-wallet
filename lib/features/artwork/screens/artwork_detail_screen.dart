@@ -48,9 +48,11 @@ import '../../../shared/widgets/mallow_refresh_indicator.dart';
 import '../../../shared/widgets/mallow_sheet.dart';
 import '../../../shared/widgets/mallow_svg_icon.dart';
 import '../../../shared/widgets/mallow_image_cache_manager.dart';
+import '../../../shared/widgets/mallow_network_image.dart';
 import '../../../shared/widgets/mallow_underline_tab_bar.dart';
 import '../../../shared/widgets/new_curation_sheet.dart';
 import '../../../shared/widgets/nsfw_obscured.dart';
+import '../../../shared/widgets/pinned_top_bar.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
 import '../../../shared/widgets/tappable.dart';
 import '../../../shared/widgets/transaction_pipeline_sheet.dart';
@@ -62,6 +64,9 @@ import '../../cast/services/cast_actions.dart';
 import '../../market/data/whitelist_eligibility_repository.dart';
 import '../../market/services/analytics_failure_reason.dart';
 import '../../market/services/edition_buy_routing.dart';
+import '../../market/widgets/opensea_purchase_sheet.dart';
+import '../../market/widgets/opensea_listing_sheet.dart';
+import '../../market/widgets/magic_eden_purchase_sheet.dart';
 import '../../market/services/market_bloc.dart';
 import '../../market/widgets/market_pipeline_sheet_view.dart';
 import '../../portfolio/services/portfolio_bloc.dart'
@@ -91,6 +96,8 @@ import '../data/market_account_repository.dart';
 import '../data/market_listing_repository.dart';
 import '../data/offer_repository.dart';
 import '../models/on_chain_asset.dart';
+import '../../search/models/search_models.dart';
+import '../../search/screens/search_drilldown_screen.dart';
 import '../../search/services/recently_viewed_recorder.dart';
 import '../services/artwork_action_state.dart';
 import '../services/artwork_bloc.dart';
@@ -98,6 +105,8 @@ import '../services/artwork_download_actions.dart';
 import '../services/artwork_hide_actions.dart';
 import '../services/ensure_signer.dart';
 import '../services/artwork_permission_service.dart';
+import '../widgets/artwork_html_viewer.dart';
+import '../widgets/artwork_model_viewer.dart';
 import '../widgets/add_to_curation_sheet.dart';
 import '../widgets/artwork_context_menu_sheet.dart';
 import '../widgets/burn_artwork_flow.dart';
@@ -108,10 +117,12 @@ import '../widgets/collection_curation_row.dart';
 import '../widgets/curated_in_sheet.dart';
 import '../widgets/sheets/artwork_auction_bid_sheet.dart';
 import '../widgets/sheets/artwork_auction_claim_sheet.dart';
+import '../widgets/sheets/artwork_sheet_frame.dart';
 import '../widgets/sheets/artwork_auction_owner_sheet.dart';
 import '../widgets/sheets/artwork_buy_edition_sheet.dart';
 import '../widgets/sheets/artwork_buy_sheet.dart';
 import '../widgets/sheets/artwork_connect_wallet_sheet.dart';
+import '../widgets/sheets/artwork_import_wallet_sheet.dart';
 import '../widgets/sheets/artwork_external_link_sheet.dart';
 import '../widgets/sheets/artwork_owner_listed_sheet.dart';
 import '../widgets/sheets/artwork_owner_sheet.dart';
@@ -227,7 +238,7 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
   MarketPrice? _userOwnOfferAmount;
 
   /// The wallet that actually placed the loaded offer. The own-offer lookup is
-  /// session-wide (A1b), so the maker need not be the active signer — cancel
+  /// session-wide, so the maker need not be the active signer — cancel
   /// passes this to `ensureSigner` so `CancelOfferTxRequest.buyer` is the
   /// wallet the Offer PDA is keyed by. Null when no offer is loaded.
   String? _userOwnOfferBuyer;
@@ -260,7 +271,7 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
 
   /// DAS-derived edition state — `isPrintableMasterEdition` + live supply.
   /// Drives the dispatcher's `BuyEditionSheet` ↔ `BuySheet` routing and
-  /// the progress bar on the edition sheet. Phase 9.
+  /// the progress bar on the edition sheet.
   EditionLiveState? _editionLive;
   String? _editionLiveLoadedFor;
 
@@ -715,7 +726,7 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
                         _userOwnOfferAmount = null;
                         // A just-made offer's buyer IS the signer; a cancel
                         // keeps the resolved maker so the reconcile poll reads
-                        // the right Offer PDA (A1b).
+                        // the right Offer PDA.
                         if (madeOffer) _userOwnOfferBuyer = me;
                         // Pinned on the same session-set key the loader uses,
                         // or the widened lookup re-runs and reverts the flip.
@@ -969,6 +980,7 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
                           _pricingMint(loaded),
                           chain: loaded.chain,
                         ),
+                        solanaSigner: _solanaSigner(),
                       );
                 if (loaded != null) {
                   _debugLogActionState(loaded, currentAddress, actionState);

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../../../core/models/account.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/utils/address_utils.dart';
 import '../../../shared/widgets/account_avatar.dart';
@@ -17,6 +19,9 @@ import '../models/picker_account.dart';
 /// the caller via [selectedKeys]; row toggles call [onToggleWallet] with the
 /// wallet's [PickerWallet.key] and the header "select all" calls
 /// [onToggleAccount] with the account's index.
+///
+/// When [onRename] is set, a not-yet-imported card shows an edit icon beside
+/// its name that turns the name into an in-place text field.
 class AccountPickerCard extends StatelessWidget {
   const AccountPickerCard({
     required this.account,
@@ -24,6 +29,7 @@ class AccountPickerCard extends StatelessWidget {
     required this.selectedKeys,
     required this.onToggleWallet,
     required this.onToggleAccount,
+    this.onRename,
     super.key,
   });
 
@@ -36,6 +42,11 @@ class AccountPickerCard extends StatelessWidget {
   final Set<String> selectedKeys;
   final ValueChanged<String> onToggleWallet;
   final ValueChanged<int> onToggleAccount;
+
+  /// Called with the edited name (untrimmed, possibly blank) when the user
+  /// finishes editing. Null hides the edit icon. Never offered for an account
+  /// that already exists — the import does not rename it.
+  final ValueChanged<String>? onRename;
 
   @override
   Widget build(BuildContext context) {
@@ -68,17 +79,19 @@ class AccountPickerCard extends StatelessWidget {
                   children: [
                     AccountAvatar(seed: account.avatarSeed, size: 16),
                     const SizedBox(width: 8),
-                    Text(
-                      // Leading derivation-index prefix (1-based), then the
-                      // resolved name. The prefix is positional; the name's
-                      // number (when present) comes from the global counter.
-                      '${account.index + 1}. $displayName',
-                      style: MallowTheme.uiBody.copyWith(
-                        fontWeight: FontWeight.w500,
-                        color: colors.textPrimary,
+                    Expanded(
+                      child: _AccountName(
+                        // Leading derivation-index prefix (1-based), then the
+                        // resolved name. The prefix is positional; the name's
+                        // number (when present) comes from the global counter.
+                        prefix: '${account.index + 1}. ',
+                        name: displayName,
+                        onRename: account.importedName == null
+                            ? onRename
+                            : null,
                       ),
                     ),
-                    const Spacer(),
+                    const SizedBox(width: 8),
                     _AccountActivity(account: account),
                     if (!allImported) ...[
                       const SizedBox(width: 8),
@@ -118,6 +131,123 @@ class AccountPickerCard extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The card header's name. Read-only text, plus an edit icon when [onRename]
+/// is set; tapping it swaps the name for a text field in the same place, which
+/// commits on Done or when it loses focus.
+class _AccountName extends StatefulWidget {
+  const _AccountName({
+    required this.prefix,
+    required this.name,
+    required this.onRename,
+  });
+
+  final String prefix;
+  final String name;
+  final ValueChanged<String>? onRename;
+
+  @override
+  State<_AccountName> createState() => _AccountNameState();
+}
+
+class _AccountNameState extends State<_AccountName> {
+  final _controller = TextEditingController();
+  final _focusNode = FocusNode();
+  bool _editing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _focusNode.addListener(() {
+      if (!_focusNode.hasFocus) _commit();
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  void _startEditing() {
+    _controller.value = TextEditingValue(
+      text: widget.name,
+      selection: TextSelection(baseOffset: 0, extentOffset: widget.name.length),
+    );
+    setState(() => _editing = true);
+    _focusNode.requestFocus();
+  }
+
+  void _commit() {
+    if (!_editing) return;
+    setState(() => _editing = false);
+    // Confirming the name as shown is not a rename: storing it would pin a
+    // previewed `Account NN` that should keep tracking the selection.
+    if (_controller.text.trim() == widget.name) return;
+    widget.onRename?.call(_controller.text);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.mallowColors;
+    final style = MallowTheme.uiBody.copyWith(
+      fontWeight: FontWeight.w500,
+      color: colors.textPrimary,
+    );
+    return Row(
+      children: [
+        Text(widget.prefix, style: style),
+        if (_editing)
+          Expanded(
+            child: TextField(
+              controller: _controller,
+              focusNode: _focusNode,
+              style: style,
+              cursorColor: colors.textPrimary,
+              textInputAction: TextInputAction.done,
+              textCapitalization: TextCapitalization.words,
+              inputFormatters: [
+                LengthLimitingTextInputFormatter(kMaxAccountNameLength),
+              ],
+              decoration: InputDecoration.collapsed(
+                hintText: 'Account name',
+                hintStyle: style.copyWith(color: colors.textTertiary),
+              ),
+              onSubmitted: (_) => _focusNode.unfocus(),
+              onTapOutside: (_) => _focusNode.unfocus(),
+            ),
+          )
+        else ...[
+          Flexible(
+            child: Text(
+              widget.name,
+              style: style,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (widget.onRename != null) ...[
+            const SizedBox(width: 6),
+            TapTargetExpander(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _startEditing,
+                child: MallowSvgIcon(
+                  'assets/icons/edit.svg',
+                  width: 14,
+                  height: 14,
+                  color: colors.textSecondary,
+                  semanticLabel: 'Edit account name',
+                ),
+              ),
+            ),
+          ],
+        ],
+      ],
     );
   }
 }

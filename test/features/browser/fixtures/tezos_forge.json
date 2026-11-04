@@ -1,0 +1,43 @@
+{
+  "operation": {
+    "branch": "BMXTnznPZDFf3TbpmdXptcTqcEuTHiCTgjxZaWif3YgVVPpp4Nq",
+    "contents": [
+      {
+        "kind": "transaction",
+        "source": "tz1TyyX7U6r6tB1uSS4aUnfKX9rj3y9NCEVL",
+        "fee": "1000",
+        "counter": "1",
+        "gas_limit": "2200",
+        "storage_limit": "10",
+        "amount": "0",
+        "destination": "KT1EctCuorV2NfVb1XTQgvzJ88MQtWP8cMMv",
+        "parameters": {
+          "entrypoint": "transfer",
+          "value": {
+            "prim": "Pair",
+            "args": [
+              {
+                "string": "hello"
+              },
+              {
+                "int": "-65"
+              },
+              {
+                "prim": "Some",
+                "args": [
+                  {
+                    "bytes": "abcd"
+                  }
+                ]
+              }
+            ],
+            "annots": [
+              "%test"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "hex": "eed324370ccdde023d0cd47b52ffbc9c1ab3da2b39ff48dbfba84bbcb8698fb86c005b86ad5d98e94ed73ea969f37fc157c57dea257ce8070198110a00014237213a07fff34d24c914013d87484efcc5875c00ffff087472616e7366657200000025090700000016010000000568656c6c6f00c10105090a00000002abcd000000052574657374"
+}

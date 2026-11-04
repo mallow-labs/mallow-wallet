@@ -10,6 +10,7 @@ import 'package:mallow_wallet/core/services/token_price_service.dart';
 import 'package:mallow_wallet/core/session/session_manager.dart';
 import 'package:mallow_wallet/di.dart';
 import 'package:mallow_wallet/features/portfolio/data/session_portfolio_aggregator.dart';
+import 'package:mallow_wallet/features/portfolio/data/token_repository.dart';
 import 'package:mallow_wallet/features/portfolio/models/token_balance.dart';
 import 'package:mallow_wallet/features/portfolio/services/token_balance_bloc.dart';
 import 'package:mallow_wallet/features/swap/services/swap_bloc.dart';
@@ -33,6 +34,8 @@ class MockWalletManager extends Mock implements WalletManager {}
 class MockSessionManager extends Mock implements SessionManager {}
 
 class MockTokenPriceService extends Mock implements TokenPriceService {}
+
+class MockTokenRepository extends Mock implements TokenRepository {}
 
 /// The swap sell picker.
 ///
@@ -339,6 +342,50 @@ void main() {
     expect(picked.mint, solMint);
     expect(picked.uiBalance, 1);
   });
+
+  testWidgets(
+    'a swap that empties a holding drops it from the picker without reopening '
+    'the sheet',
+    (tester) async {
+      stubCandidates();
+      final invalidations = StreamController<String>.broadcast();
+      addTearDown(invalidations.close);
+      final repository = MockTokenRepository();
+      when(
+        () => repository.balancesInvalidated,
+      ).thenAnswer((_) => invalidations.stream);
+      register<TokenRepository>(repository);
+      addTearDown(() => sl.unregister<TokenRepository>());
+      when(
+        () => aggregator.sessionSolanaAddresses(),
+      ).thenReturn(const [addressA, addressB]);
+
+      await pumpSheet(tester);
+      await openPicker(tester);
+      expect(find.widgetWithText(ListTile, 'BONK'), findsOneWidget);
+      await tester.tapAt(const Offset(10, 10));
+      await settleSheet(tester);
+
+      // The swap sold all of wallet B's BONK. Its reconcile leaves the cached
+      // row at zero rather than deleting it, then signals the wallet.
+      when(
+        () => aggregator.signableSolanaBalances(refresh: any(named: 'refresh')),
+      ).thenAnswer(
+        (_) async => [
+          sessionSol,
+          siblingBonk.copyWith(rawBalance: 0, uiBalance: 0),
+          unverifiedAirdrop,
+        ],
+      );
+      invalidations.add(addressB);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      await openPicker(tester);
+      expect(find.widgetWithText(ListTile, 'BONK'), findsNothing);
+      expect(find.widgetWithText(ListTile, 'MYSTERY'), findsOneWidget);
+    },
+  );
 
   testWidgets('falls back to the signer\'s own balances when the session read '
       'fails', (tester) async {

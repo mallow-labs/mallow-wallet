@@ -48,6 +48,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>mallowwallet</string>
+				<string>wc</string>
 			</array>
 		</dict>
 	</array>
@@ -60,7 +61,7 @@
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>mallow wallet needs Bluetooth to connect to your Ledger hardware wallet for secure transaction signing.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>mallow wallet uses the camera to scan QR codes, such as a wallet address you are sending to.</string>
+	<string>mallow wallet uses the camera to scan QR codes, such as a wallet address you are sending to or the codes a Keystone hardware wallet shows.</string>
 	<!-- Read-write photo access is needed only to create and add to the album a
 	     collection download is saved into: Gal.requestAccess(toAlbum: true) maps to
 	     PHPhotoLibrary.requestAuthorization(for: .readWrite), which aborts the process

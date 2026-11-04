@@ -249,6 +249,7 @@ void main() {
 
     when(() => authService.currentAddress).thenAnswer((_) => active);
     when(() => sessionManager.sessionAddresses).thenReturn(const {});
+    when(() => sessionManager.sessionWallets).thenReturn(const []);
 
     // Build-path loaders that are not under test: inert.
     when(

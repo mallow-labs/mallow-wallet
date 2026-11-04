@@ -4,6 +4,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../core/config/app_version.dart';
 import '../../../features/onboarding/widgets/artwork_ring_3d.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../widgets/settings_page_scaffold.dart';
@@ -196,7 +197,7 @@ class _ArtworkCreditsState extends State<_ArtworkCredits> {
 /// on condition that the credit appears as hyperlinked text on an app's About
 /// surface. Removing this line puts the app out of licence with every
 /// Streamline icon it ships. Tabler is MIT, whose notice obligation is met by
-/// `THIRD_PARTY_NOTICES.md`; it is named here because the two sets sit side by
+/// `assets/icons/THIRD_PARTY_LICENSES` on the licence page; it is named here because the two sets sit side by
 /// side and a partial credit reads as a claim about the rest.
 class _IconCredits extends StatefulWidget {
   const _IconCredits();
@@ -252,7 +253,8 @@ class _IconCreditsState extends State<_IconCredits> {
   }
 }
 
-/// Installed app version + build number, e.g. `1.4.0 (137)`.
+/// Installed app version + build number, e.g. `1.4.0 (137)`, plus the build
+/// label on a preview build (see [displayAppVersion]).
 ///
 /// Stateful so `PackageInfo.fromPlatform()` is read once per mount rather than
 /// on every rebuild. Renders nothing until it resolves, so the layout never
@@ -274,7 +276,7 @@ class _VersionLabelState extends State<_VersionLabel> {
       builder: (context, snapshot) {
         final info = snapshot.data;
         return Text(
-          info == null ? '' : '${info.version} (${info.buildNumber})',
+          info == null ? '' : displayAppVersion(info),
           style: MallowTheme.uiCaption.copyWith(
             color: context.mallowColors.textTertiary,
           ),

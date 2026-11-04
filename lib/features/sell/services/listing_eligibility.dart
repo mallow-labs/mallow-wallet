@@ -1,6 +1,7 @@
 import 'package:mallow_api/mallow_api.dart';
 
 import '../../artwork/models/on_chain_asset.dart';
+import 'trade_eligibility.dart';
 
 /// Pure port of the webapp's "can this user list this artwork?" gate.
 ///
@@ -23,11 +24,17 @@ import '../../artwork/models/on_chain_asset.dart';
 /// `admin` and `primaryLister` (`user`).
 const _approvedCreatorRoles = {'primaryLister', 'admin'};
 
-/// Why the listing flow is closed. Ordered exactly like the webapp's
+/// Why the listing flow is closed. Asset eligibility precedes the webapp's
 /// `VerifyToList` body branches
 /// (`VerifyToList`), which
 /// are mutually exclusive and evaluated top-down.
 enum ListingBlockReason {
+  /// The leaf or its collection cannot safely enter marketplace escrow.
+  ineligibleAsset,
+
+  /// Eligibility inputs could not be loaded. CTA: retry the lookup.
+  unverifiedAsset,
+
   /// The artwork or its creator is flagged. No CTA — the copy points at
   /// discord.
   flagged,
@@ -57,6 +64,7 @@ class ArtworkListingFacts {
     required this.hasVerifiedSale,
     required this.hasOnChainAsset,
     required this.hasVerifiedCreator,
+    this.tradeEligibility = TradeEligibility.eligible,
   });
 
   /// `nftPreview.isFlagged` from `GET /v0/listingData/{mint}`.
@@ -75,6 +83,7 @@ class ArtworkListingFacts {
 
   /// See [computeHasVerifiedCreator].
   final bool hasVerifiedCreator;
+  final TradeEligibility tradeEligibility;
 }
 
 /// Evaluates the gate. Returns `null` when the user may list, otherwise the
@@ -90,6 +99,12 @@ ListingBlockReason? evaluateListingEligibility({
   required User? user,
   ArtworkListingFacts? artwork,
 }) {
+  if (artwork?.tradeEligibility == TradeEligibility.restricted) {
+    return ListingBlockReason.ineligibleAsset;
+  }
+  if (artwork?.tradeEligibility == TradeEligibility.unverified) {
+    return ListingBlockReason.unverifiedAsset;
+  }
   final flagged = artwork != null
       ? (artwork.isFlagged || artwork.creatorIsFlagged)
       : (user?.isFlagged ?? false);
@@ -166,6 +181,7 @@ bool isVerifiedCreatorAddress({
     case TokenStandard.nft:
     case TokenStandard.pnft:
     case TokenStandard.cnft:
+    case TokenStandard.cnftV2:
       return asset.updateAuthority == creator ||
           asset.tokenMetadataCreators.any(
             (c) => c.verified && c.address == creator,

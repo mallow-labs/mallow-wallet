@@ -5,6 +5,7 @@ import '../../../shared/widgets/loading_indicator.dart';
 
 import '../../../core/router/auth_state_notifier.dart';
 import '../../../core/security/app_lock_bloc.dart';
+import '../../../core/security/reauth_gate.dart';
 import '../../../core/services/app_reset_service.dart';
 import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
@@ -15,9 +16,14 @@ import '../widgets/settings_page_scaffold.dart';
 /// Full-screen "Reset app" confirmation screen.
 ///
 /// Mirrors the "Before you proceed" pattern from recovery phrase, with
-/// a checkbox gate and destructive action button.
+/// a checkbox gate and destructive action button, then [requireReauth] right
+/// before the wipe.
 class ResetAppScreen extends StatefulWidget {
-  const ResetAppScreen({super.key});
+  const ResetAppScreen({super.key, this.resetService});
+
+  /// Test seam; production builds the service from the locator.
+  @visibleForTesting
+  final AppResetService? resetService;
 
   @override
   State<ResetAppScreen> createState() => _ResetAppScreenState();
@@ -26,9 +32,23 @@ class ResetAppScreen extends StatefulWidget {
 class _ResetAppScreenState extends State<ResetAppScreen> {
   bool _confirmed = false;
   bool _resetting = false;
+  bool _authorizing = false;
 
   Future<void> _resetApp() async {
-    if (_resetting) return;
+    if (_resetting || _authorizing) return;
+    // The screen gates itself rather than trusting the Security & Privacy
+    // gate in front of it: that one ran when the hub opened, possibly long
+    // ago, and any other way onto this route would skip it entirely. The wipe
+    // deletes every key on the device, so it asks for the PIN or biometrics
+    // right before it runs.
+    _authorizing = true;
+    final bool passed;
+    try {
+      passed = await requireReauth(context);
+    } finally {
+      _authorizing = false;
+    }
+    if (!passed || !mounted) return;
     setState(() => _resetting = true);
 
     final authNotifier = sl<AuthStateNotifier>();
@@ -39,9 +59,8 @@ class _ResetAppScreenState extends State<ResetAppScreen> {
     // Best-effort teardown: it never throws, it reports. A partial failure is
     // shown but still logs the user out — a half-wiped device must not look
     // signed in.
-    final failures = await AppResetService.fromLocator().resetApp(
-      reason: ResetReason.resetApp,
-    );
+    final resetService = widget.resetService ?? AppResetService.fromLocator();
+    final failures = await resetService.resetApp(reason: ResetReason.resetApp);
 
     // Drop the in-memory lock state, whatever the wipe reported. The PIN hash
     // the bloc verifies against was just deleted, so a bloc still holding

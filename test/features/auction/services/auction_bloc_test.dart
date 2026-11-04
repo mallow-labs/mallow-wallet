@@ -505,7 +505,7 @@ void main() {
     // first is the confirmation barrier that makes the table exist by the time
     // the auction tx names it — and makes a setup failure abort before the
     // auction tx is ever broadcast. Send them the other way round (or drop the
-    // setup, as this wallet did until plan 049 step 0) and the auction tx
+    // setup, as this wallet once did) and the auction tx
     // references a lookup table that does not exist and fails on-chain, with
     // an error that reads to the user like a mallow bug. Order is therefore
     // the assertion, not batch length.
@@ -713,6 +713,7 @@ void main() {
           onLedgerSigning: anyNamed('onLedgerSigning'),
           useLedger: anyNamed('useLedger'),
           rpcOverride: anyNamed('rpcOverride'),
+          discardSignatureIf: anyNamed('discardSignatureIf'),
         ),
       ).thenAnswer((inv) async {
         signed.add(inv.namedArguments[#unsignedTxBase64] as String);
@@ -936,6 +937,137 @@ void main() {
       ).thenAnswer((_) async => testWalletAddress);
     });
 
+    for (final restriction in [
+      'flags',
+      'permanent_delegate',
+      'missing_parent',
+    ]) {
+      test('picker refuses v2 $restriction before pricing', () async {
+        final leaf = DigitalAsset.fromJson({
+          'id': pickedArtwork.mintAccount,
+          'interface': 'MplBubblegumV2',
+          'compression': {
+            'compressed': true,
+            'flags': restriction == 'flags' ? 1 : 0,
+          },
+          'ownership': {'owner': testWalletAddress},
+          if (restriction != 'flags')
+            'grouping': [
+              {'group_key': 'collection', 'group_value': 'parent'},
+            ],
+        });
+        when(
+          mockDasApi.getAsset(pickedArtwork.mintAccount),
+        ).thenAnswer((_) async => leaf);
+        if (restriction == 'missing_parent') {
+          when(
+            mockDasApi.getAsset('parent'),
+          ).thenThrow(StateError('unavailable'));
+        } else if (restriction == 'permanent_delegate') {
+          when(mockDasApi.getAsset('parent')).thenAnswer(
+            (_) async => DigitalAsset.fromJson({
+              'id': 'parent',
+              'interface': 'MplCoreCollection',
+              'plugins': {
+                'permanent_transfer_delegate': {
+                  'data': <String, dynamic>{},
+                  'authority': {'type': 'UpdateAuthority'},
+                },
+              },
+            }),
+          );
+        }
+        when(
+          mockArtworkRepo.getArtworkDetail(pickedArtwork.mintAccount),
+        ).thenAnswer((_) async => detailWithCreatorShares());
+        final bloc = buildBloc();
+        bloc.add(const AuctionEvent.started());
+        await bloc.stream.firstWhere((s) => s.userPubkey.isNotEmpty);
+        final checked = bloc.stream.firstWhere(
+          (s) => s.listingEligibilityError != null && !s.isCheckingEligibility,
+        );
+        bloc.add(AuctionEvent.selectArtwork(pickedArtwork));
+        await checked;
+        expect(
+          bloc.state.listingEligibilityError,
+          restriction == 'missing_parent'
+              ? contains('try again')
+              : contains('transfer restrictions'),
+        );
+        expect(bloc.state.flow, isA<TxFlowIdle<void, AuctionSuccessData>>());
+        expect(bloc.state.canGoNext, isFalse);
+        bloc.add(const AuctionEvent.next());
+        bloc.add(const AuctionEvent.requestList());
+        await Future<void>.delayed(Duration.zero);
+        expect(bloc.state.step, AuctionStep.selectArtwork);
+        verify(mockDasApi.getAsset(pickedArtwork.mintAccount)).called(1);
+        if (restriction != 'flags')
+          verify(mockDasApi.getAsset('parent')).called(1);
+        await bloc.close();
+      });
+    }
+    test(
+      'detail entry retries verification without losing price or step',
+      () async {
+        when(
+          mockDasApi.getAsset(pickedArtwork.mintAccount),
+        ).thenThrow(StateError('offline'));
+        when(
+          mockArtworkRepo.getArtworkDetail(pickedArtwork.mintAccount),
+        ).thenThrow(StateError('offline'));
+        final bloc = buildBloc();
+        final failed = bloc.stream.firstWhere(
+          (s) => s.listingEligibilityError != null && !s.isCheckingEligibility,
+        );
+        bloc.add(AuctionEvent.started(artwork: pickedArtwork));
+        await failed;
+        expect(bloc.state.flow, isA<TxFlowIdle<void, AuctionSuccessData>>());
+        expect(bloc.state.listingEligibilityError, contains('try again'));
+        bloc.add(const AuctionEvent.setReservePrice(1000000000));
+        await bloc.stream.firstWhere((s) => s.reservePrice == 1000000000);
+        when(
+          mockDasApi.getAsset(pickedArtwork.mintAccount),
+        ).thenAnswer((_) async => nft(primarySaleHappened: false));
+        when(
+          mockArtworkRepo.getArtworkDetail(pickedArtwork.mintAccount),
+        ).thenAnswer((_) async => detailWithCreatorShares());
+        final retried = bloc.stream.firstWhere(
+          (s) => s.listingEligibilityError == null,
+        );
+        bloc.add(const AuctionEvent.retryEligibility());
+        await retried;
+        expect(bloc.state.step, AuctionStep.pricing);
+        expect(bloc.state.reservePrice, 1000000000);
+        expect(bloc.state.canGoNext, isTrue);
+        expect(bloc.state.flow, isA<TxFlowIdle<void, AuctionSuccessData>>());
+        verify(mockDasApi.getAsset(pickedArtwork.mintAccount)).called(2);
+        await bloc.close();
+      },
+    );
+
+    test('picker cannot advance while eligibility is unresolved', () async {
+      final pending = Completer<DigitalAsset>();
+      when(
+        mockDasApi.getAsset(pickedArtwork.mintAccount),
+      ).thenAnswer((_) => pending.future);
+      when(
+        mockArtworkRepo.getArtworkDetail(pickedArtwork.mintAccount),
+      ).thenAnswer((_) async => detailWithCreatorShares());
+      final bloc = buildBloc();
+      bloc.add(const AuctionEvent.started());
+      await bloc.stream.firstWhere((s) => s.userPubkey.isNotEmpty);
+      final checking = bloc.stream.firstWhere((s) => s.selectedArtwork != null);
+      bloc.add(AuctionEvent.selectArtwork(pickedArtwork));
+      await checking;
+      expect(bloc.state.canGoNext, isFalse);
+      final checked = bloc.stream.firstWhere(
+        (s) => s.listingEligibilityError == null,
+      );
+      pending.complete(nft(primarySaleHappened: false));
+      await checked;
+      expect(bloc.state.canGoNext, isTrue);
+      await bloc.close();
+    });
     test('selecting a primary NFT hydrates the gate (shown)', () async {
       when(
         mockDasApi.getAsset(pickedArtwork.mintAccount),

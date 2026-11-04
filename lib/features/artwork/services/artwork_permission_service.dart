@@ -107,15 +107,16 @@ class ArtworkPermissionService {
       final owned = await ownedAddresses();
       final asset = await _dasApi.getAsset(mintAccount);
 
-      // For Core assets in a collection, fetch collection for delegate checks
+      // Fetch the parent once for delegate checks and royalty resolution.
       DigitalAsset? collectionAsset;
-      if (asset.tokenStandard == TokenStandard.core &&
+      if ((asset.tokenStandard == TokenStandard.core ||
+              asset.tokenStandard == TokenStandard.cnftV2) &&
           asset.collectionKey != null) {
         try {
           collectionAsset = await _dasApi.getAsset(asset.collectionKey!);
         } catch (_) {
-          // Collection fetch failure is non-fatal; collection-level delegates
-          // just won't be checked
+          // Missing v2 collections fail trading closed in the eligibility check;
+          // other permissions still use the available leaf state.
         }
       }
 
@@ -149,6 +150,7 @@ class ArtworkPermissionService {
       }..removeWhere((a) => a.isEmpty);
 
       return ArtworkPermissions(
+        tokenStandard: asset.tokenStandard,
         // A live listing blocks BOTH transfer and burn, whatever the on-chain
         // mechanic — see [isListedForSale]. The on-chain arms below can only
         // see a freeze, so the indexer term is what stops a transfer on a
@@ -164,6 +166,9 @@ class ArtworkPermissionService {
         canBurn:
             !listed && _canBurn(asset, signers, userAddress, collectionAsset),
         canList: _canList(asset, signers, userAddress, collectionAsset),
+        canTrade: asset.tokenStandard == TokenStandard.cnftV2
+            ? asset.isCnftV2TradeEligible(collection: collectionAsset)
+            : !asset.heldByThirdParty,
         canDownload: ownsOrCreated,
         canHide: canHide,
         // Not a permission — the Details tab's on-chain royalty fallback,
@@ -371,7 +376,7 @@ class ArtworkPermissionService {
   // Permission logic — mirrors the mallow web app
   // ---------------------------------------------------------------------------
 
-  // The DAS API only ever yields the five Solana standards parsed in
+  // The DAS API only ever yields the six Solana standards parsed in
   // `TokenStandardDas.fromDasInterface`. The wildcard arms below cover
   // `objkt` / EVM standards so the switch stays exhaustive against the
   // canonical enum, but they're never reached in practice.
@@ -434,11 +439,15 @@ class ArtworkPermissionService {
     // its whole life, so the raw flag disabled transfer for every pNFT.
     final notFrozen =
         !asset.heldByThirdParty &&
+        !asset.nonTransferable &&
+        (asset.tokenStandard != TokenStandard.cnftV2 ||
+            asset.compressionFlags != null) &&
         !(collection?.permanentFreezeDelegateFrozen ?? false);
     return switch (asset.tokenStandard) {
       TokenStandard.nft ||
       TokenStandard.pnft ||
-      TokenStandard.cnft => notFrozen && signers.contains(asset.owner),
+      TokenStandard.cnft ||
+      TokenStandard.cnftV2 => notFrozen && signers.contains(asset.owner),
       TokenStandard.core =>
         notFrozen &&
             (signers.contains(asset.owner) ||
@@ -495,20 +504,17 @@ class ArtworkPermissionService {
     // `onChainCollectionAsset.asset.permanentFreezeDelegate?.frozen` check.
     final notFrozen =
         !asset.heldByThirdParty &&
+        !asset.nonTransferable &&
+        (asset.tokenStandard != TokenStandard.cnftV2 ||
+            asset.compressionFlags != null) &&
         !(collection?.permanentFreezeDelegateFrozen ?? false);
     return switch (asset.tokenStandard) {
       TokenStandard.nft ||
       TokenStandard.pnft => asset.supply == 0 && notFrozen && owns(asset.owner),
-      // cNFT burn IS supported by the v2 builder: `/v2/tx/assets/burn`
-      // dispatches `TokenStandard::Cnft` to `build_cnft_burn_ixs`, which
-      // resolves the leaf, its Merkle proof and (v2) its collection
-      // server-side and emits Bubblegum `Burn` / `BurnV2` — both tree
-      // versions, off the same `{authority, asset, tokenStandard}` body every
-      // other standard sends. Its authority precondition is transfer's: the
-      // DAS leaf owner must be the signer, so a leaf held in a listing /
-      // auction escrow is refused with a 400. `supply` is not part of it —
-      // Bubblegum leaves cannot print editions.
-      TokenStandard.cnft => notFrozen && owns(asset.owner),
+      // Both compressed standards use the server burn builder, which resolves
+      // the leaf, proof and collection. Leaves have no edition supply gate.
+      TokenStandard.cnft ||
+      TokenStandard.cnftV2 => notFrozen && owns(asset.owner),
       TokenStandard.core =>
         notFrozen &&
             (owns(asset.owner) ||
@@ -541,14 +547,20 @@ class ArtworkPermissionService {
   ) {
     // `heldByThirdParty` rather than `frozen`: listing a pNFT is exactly what
     // the raw flag blocked for the entire standard.
+    if (asset.tokenStandard == TokenStandard.cnftV2 &&
+        !asset.isCnftV2TradeEligible(collection: collection)) {
+      return false;
+    }
     if (asset.heldByThirdParty ||
+        asset.nonTransferable ||
         (collection?.permanentFreezeDelegateFrozen ?? false)) {
       return false;
     }
     return switch (asset.tokenStandard) {
       TokenStandard.nft ||
       TokenStandard.pnft ||
-      TokenStandard.cnft => signers.contains(asset.owner),
+      TokenStandard.cnft ||
+      TokenStandard.cnftV2 => signers.contains(asset.owner),
       TokenStandard.core =>
         signers.contains(asset.owner) ||
             asset.transferDelegateAuthority == user,

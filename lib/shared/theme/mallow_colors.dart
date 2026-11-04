@@ -68,7 +68,10 @@ class MallowColors extends ThemeExtension<MallowColors> {
   static const light = MallowColors(
     surfaceMuted: Color(0xFFF1EFEB),
     textPrimary: Color(0xFF121212),
-    textSecondary: Color(0xFF9A9A9A),
+    // Darkened from 0xFF9A9A9A (2.7:1 on bgPrimary, fails AA) to a warm grey
+    // that clears WCAG AA 4.5:1 on every light surface: ~5.0:1 on bgPrimary,
+    // ~5.3:1 on bgSurface and ~4.6:1 on surfaceMuted.
+    textSecondary: Color(0xFF6F6B66),
     textTertiary: Color(0xFFC4C4C4),
     divider: Color(0xFFDAD6D0),
     dividerLight: Color(0xFFE6E3DE),

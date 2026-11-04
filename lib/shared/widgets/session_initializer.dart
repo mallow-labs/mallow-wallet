@@ -2,11 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/network/auth_service.dart';
+import '../../core/services/post_session_action_registry.dart';
 import '../../core/services/push_notification_service.dart';
 import '../../core/session/session_manager.dart';
 import '../../di.dart';
 import '../../features/home/widgets/home_screen_skeleton.dart';
 import '../theme/mallow_theme.dart';
+import '../utils/chain.dart';
 import '../utils/notification_link.dart';
 import 'mallow_button.dart';
 import 'mallow_svg_icon.dart';
@@ -26,6 +28,11 @@ import 'mallow_svg_icon.dart';
 /// - **Background tap**: a [ValueNotifier] listener fires [_onDeepLink]
 ///   whenever [PushNotificationService.pendingDeepLink] changes while the
 ///   app is running.
+///
+/// It also fires the [PostSessionTrigger]s that [PostSessionActionRegistry]
+/// actions run on: the session becoming ready, an app resume, and a signing
+/// Solana wallet entering the session. It is mounted once per tab page and can
+/// re-mount, so an action must be safe to run more than once.
 class SessionInitializer extends StatefulWidget {
   const SessionInitializer({required this.child, super.key});
 
@@ -35,15 +42,35 @@ class SessionInitializer extends StatefulWidget {
   State<SessionInitializer> createState() => _SessionInitializerState();
 }
 
-class _SessionInitializerState extends State<SessionInitializer> {
+class _SessionInitializerState extends State<SessionInitializer>
+    with WidgetsBindingObserver
+    implements PostSessionRunner {
   late Future<void> _initFuture;
   late final PushNotificationService _pushService;
+  late final PostSessionActionRegistry _postSession;
+  late final SessionManager _sessionManager;
   bool _sessionReady = false;
+
+  /// Addresses of the signing Solana wallets the session held when it last
+  /// settled, so a wallet joining it can be told from a repeat notification.
+  Set<String> _signingSolana = const {};
+
+  @override
+  BuildContext get runnerContext => context;
+
+  @override
+  bool get runnerReady => mounted && _sessionReady;
 
   @override
   void initState() {
     super.initState();
     _pushService = sl<PushNotificationService>();
+    _postSession = sl<PostSessionActionRegistry>();
+    _sessionManager = sl<SessionManager>();
+    _postSession.attach(this);
+    _postSession.runRequests.addListener(_onRunRequested);
+    WidgetsBinding.instance.addObserver(this);
+    _sessionManager.addListener(_onSessionChanged);
 
     // Listen for background notification taps (app was backgrounded, user taps
     // a notification, onMessageOpenedApp fires and sets pendingDeepLink).
@@ -55,7 +82,44 @@ class _SessionInitializerState extends State<SessionInitializer> {
   @override
   void dispose() {
     _pushService.pendingDeepLink.removeListener(_onDeepLink);
+    _postSession.runRequests.removeListener(_onRunRequested);
+    _postSession.detach(this);
+    WidgetsBinding.instance.removeObserver(this);
+    _sessionManager.removeListener(_onSessionChanged);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed || !_sessionReady) return;
+    _postSession.dispatch(context, PostSessionTrigger.resumed);
+  }
+
+  void _onRunRequested() {
+    if (!_sessionReady || !mounted) return;
+    _postSession.dispatch(context, PostSessionTrigger.requested);
+  }
+
+  /// The signing Solana wallets in the session's scope, by address.
+  Set<String> _currentSigningSolana() => {
+    for (final wallet in _sessionManager.sessionWallets)
+      if (wallet.chainEnum == Chain.solana &&
+          wallet.canSign &&
+          wallet.address.isNotEmpty)
+        wallet.address,
+  };
+
+  void _onSessionChanged() {
+    if (!_sessionReady || !mounted) return;
+    final now = _currentSigningSolana();
+    final joined = now.difference(_signingSolana).isNotEmpty;
+    _signingSolana = now;
+    if (joined) {
+      _postSession.dispatch(
+        context,
+        PostSessionTrigger.signingSolanaWalletAdded,
+      );
+    }
   }
 
   Future<void> _initializeSession() async {
@@ -98,6 +162,11 @@ class _SessionInitializerState extends State<SessionInitializer> {
     }
 
     _sessionReady = true;
+    _signingSolana = _currentSigningSolana();
+    if (mounted) {
+      _postSession.sessionReady(this);
+      _postSession.dispatch(context, PostSessionTrigger.ready);
+    }
   }
 
   /// Called when [PushNotificationService.pendingDeepLink] changes value.

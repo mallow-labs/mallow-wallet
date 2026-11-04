@@ -28,6 +28,7 @@ ArtworkDetails _auctionArtwork({
   required String currentBidder,
   required DateTime endsAt,
   int bidCount = 1,
+  DateTime? startsAt,
 }) {
   return ArtworkDetails(
     mintAccount: 'MINT1',
@@ -39,6 +40,7 @@ ArtworkDetails _auctionArtwork({
     listingType: ListingType.auction,
     auctionMetadata: AuctionMetadata(
       auctionAccount: 'AUCPDA',
+      startsAt: startsAt,
       currentBidAmount: currentBidAmount,
       currentBidder: currentBidder,
       bidCount: bidCount,
@@ -94,6 +96,7 @@ AccountUpdate _auctionConfigAccount({
   required String reservePrice,
   String? highestBidAmount,
   String? highestBidder,
+  bool? cnftRefunded,
   int endTime = 0,
   int slot = 500,
 }) => AccountUpdate.fromJson({
@@ -106,6 +109,7 @@ AccountUpdate _auctionConfigAccount({
   'reservePrice': reservePrice,
   'highestBidAmount': highestBidAmount ?? '0',
   'highestBidder': highestBidder ?? '11111111111111111111111111111111',
+  'cnftRefunded': ?cnftRefunded,
   'minBidIncrementBps': 250,
   'minBidIncrement': '0',
   'timeExtPeriod': 900,
@@ -214,6 +218,138 @@ void main() {
     return bloc;
   }
 
+  test(
+    'refund clears stale winning bid and survives refresh and late bids',
+    () async {
+      final detail = _auctionArtwork(
+        currentBidAmount: 1000000000,
+        currentBidder: 'WINNER',
+        endsAt: DateTime.utc(2028),
+        startsAt: DateTime.utc(2027),
+      );
+      final bloc = await loaded(detail);
+      final refunded = bloc.stream.firstWhere(
+        (s) => s is ArtworkLoaded && s.artwork.auctionMetadata!.refunded,
+      );
+      bloc.add(
+        const ArtworkEvent.auctionLiveUpdate(
+          auctionAccount: 'AUCPDA',
+          refunded: true,
+        ),
+      );
+      await refunded;
+      var metadata = (bloc.state as ArtworkLoaded).artwork.auctionMetadata!;
+      expect(metadata.currentBidder, isNull);
+      expect(metadata.currentBidAmount, isNull);
+      expect(metadata.bidCount, 0);
+      bloc.add(
+        const ArtworkEvent.auctionLiveUpdate(
+          auctionAccount: 'AUCPDA',
+          currentBidAmount: 2000000000,
+          currentBidder: 'LATE',
+        ),
+      );
+      final reloaded = bloc.stream.firstWhere(
+        (s) => s is ArtworkLoaded && s.revision > 0,
+      );
+      bloc.add(const ArtworkEvent.refresh());
+      await reloaded;
+      metadata = (bloc.state as ArtworkLoaded).artwork.auctionMetadata!;
+      expect(metadata.refunded, isTrue);
+      expect(metadata.currentBidder, isNull);
+      expect(metadata.bidCount, 0);
+      // Drain the mocked refresh reconciliation before closing its event sink.
+      await Future<void>(() {});
+      await bloc.close();
+    },
+  );
+
+  test('legacy account refund fallback overrides an indexed auction', () async {
+    final detail = _auctionArtwork(
+      currentBidAmount: 1000000000,
+      currentBidder: 'WINNER',
+      endsAt: DateTime.utc(2028),
+    );
+    when(() => marketAccounts.readAuctionConfig(any())).thenAnswer(
+      (_) async => (
+        status: OnChainReadStatus.present,
+        account: AccountUpdate.fromJson({
+          'pubkey': 'AUCPDA',
+          'accountType': 'auctionConfig',
+          'seller': 'SELLER',
+          'highestBidAmount': '0',
+          'highestBidder': 'WINNER',
+        }),
+        pda: 'AUCPDA',
+        viewSlot: 500,
+      ),
+    );
+    when(() => repo.getArtworkDetail(any())).thenAnswer((_) async => detail);
+    final bloc = build();
+    final refunded = bloc.stream.firstWhere(
+      (s) => s is ArtworkLoaded && s.artwork.auctionMetadata!.refunded,
+    );
+    bloc.add(const ArtworkEvent.load(mintAccount: 'MINT1'));
+    await refunded;
+    final metadata = (bloc.state as ArtworkLoaded).artwork.auctionMetadata!;
+    expect(metadata.currentBidder, isNull);
+    expect(metadata.currentBidAmount, isNull);
+    await bloc.close();
+  });
+
+  test(
+    'refund parsing supports the old decoder without mislabeling no-bid auctions',
+    () {
+      AccountUpdate account(Map<String, dynamic> fields) =>
+          AccountUpdate.fromJson({
+            'pubkey': 'AUCPDA',
+            'accountType': 'auctionConfig',
+            ...fields,
+          });
+      expect(account({'cnftRefunded': true}).cnftRefunded, isTrue);
+      for (final bidder in ['WINNER', '11111111111111111111111111111111']) {
+        expect(
+          account({
+            'cnftRefunded': true,
+            'highestBidAmount': '0',
+            'highestBidder': bidder,
+          }).cnftRefunded,
+          isTrue,
+        );
+      }
+      expect(
+        account({
+          'highestBidAmount': '0',
+          'highestBidder': 'WINNER',
+        }).cnftRefunded,
+        isTrue,
+      );
+      expect(
+        account({
+          'highestBidAmount': '0',
+          'highestBidder': '11111111111111111111111111111111',
+        }).cnftRefunded,
+        isFalse,
+      );
+      expect(
+        account({
+          'highestBidAmount': '1',
+          'highestBidder': 'WINNER',
+        }).cnftRefunded,
+        isFalse,
+      );
+      expect(account({'highestBidder': 'WINNER'}).cnftRefunded, isFalse);
+      expect(
+        account({
+          'cnftRefunded': false,
+          'highestBidAmount': '0',
+          'highestBidder': 'WINNER',
+        }).cnftRefunded,
+        isFalse,
+      );
+    },
+  );
+
   void stubReads({MarketAccountRead? listing, MarketAccountRead? auction}) {
     when(() => marketAccounts.readListing(any())).thenAnswer(
       (_) async =>
@@ -234,6 +370,526 @@ void main() {
             pda: 'AUCPDA',
             viewSlot: null,
           ),
+    );
+  }
+
+  ArtworkDetails refundedArtwork() => _unlistedArtwork().copyWith(
+    auctionMetadata: AuctionMetadata(
+      auctionAccount: 'AUCPDA',
+      refunded: true,
+      startsAt: DateTime.utc(2026, 10),
+    ),
+  );
+
+  Future<void> refreshWith(ArtworkBloc bloc, ArtworkDetails detail) async {
+    when(() => repo.getArtworkDetail(any())).thenAnswer((_) async => detail);
+    final revision = (bloc.state as ArtworkLoaded).revision;
+    final refreshed = bloc.stream.firstWhere(
+      (s) => s is ArtworkLoaded && s.revision > revision,
+    );
+    bloc.add(const ArtworkEvent.refresh());
+    await refreshed;
+    // Drain the mocked account reads and the reconcile they dispatch.
+    await Future<void>(() {});
+  }
+
+  test('an absent cold read clears an unlisted refunded auction', () async {
+    stubReads(
+      auction: (
+        status: OnChainReadStatus.absent,
+        account: null,
+        pda: 'AUCPDA',
+        viewSlot: 600,
+      ),
+    );
+    final bloc = await loaded(refundedArtwork());
+    addTearDown(bloc.close);
+    await Future<void>(() {});
+    final artwork = (bloc.state as ArtworkLoaded).artwork;
+    expect(artwork.listingType, ListingType.unlisted);
+    expect(artwork.auctionMetadata, isNull);
+  });
+
+  test(
+    'an auction-close tombstone clears unlisted refunded metadata',
+    () async {
+      final frames = StreamController<AccountUpdate>.broadcast();
+      addTearDown(frames.close);
+      when(
+        () => accountRealtime.watchAccount('AUCPDA'),
+      ).thenAnswer((_) => frames.stream);
+      final bloc = await loaded(refundedArtwork());
+      addTearDown(bloc.close);
+      frames.add(_closedAccount('AUCPDA'));
+      await Future<void>(() {});
+      final artwork = (bloc.state as ArtworkLoaded).artwork;
+      expect(artwork.listingType, ListingType.unlisted);
+      expect(artwork.auctionMetadata, isNull);
+    },
+  );
+
+  test(
+    'refund then close allows a live relist on the same auction PDA',
+    () async {
+      final frames = StreamController<AccountUpdate>.broadcast();
+      addTearDown(frames.close);
+      when(
+        () => accountRealtime.watchAccount('AUCPDA'),
+      ).thenAnswer((_) => frames.stream);
+      final bloc = await loaded(refundedArtwork());
+      addTearDown(bloc.close);
+      frames.add(_auctionConfigAccount(reservePrice: '0', cnftRefunded: true));
+      await Future<void>(() {});
+      frames.add(_closedAccount('AUCPDA'));
+      await Future<void>(() {});
+      final relisted = _auctionArtwork(
+        currentBidAmount: 2000000000,
+        currentBidder: 'NEW_BIDDER',
+        endsAt: endsAt,
+      );
+      await refreshWith(bloc, relisted);
+      final artwork = (bloc.state as ArtworkLoaded).artwork;
+      expect(artwork.listingType, ListingType.auction);
+      expect(artwork.auctionMetadata!.refunded, isFalse);
+      expect(artwork.auctionMetadata!.currentBidder, 'NEW_BIDDER');
+      expect(artwork.auctionMetadata!.bidCount, 1);
+    },
+  );
+
+  test(
+    'a close retires the refund overlay even during local-action grace',
+    () async {
+      final frames = StreamController<AccountUpdate>.broadcast();
+      addTearDown(frames.close);
+      when(
+        () => accountRealtime.watchAccount('AUCPDA'),
+      ).thenAnswer((_) => frames.stream);
+      final original = refundedArtwork();
+      final bloc = await loaded(original);
+      addTearDown(bloc.close);
+      bloc.add(
+        const ArtworkEvent.auctionLiveUpdate(
+          auctionAccount: 'AUCPDA',
+          refunded: true,
+        ),
+      );
+      bloc.add(
+        const ArtworkEvent.optimisticListingUpdate(
+          cancelled: true,
+          signature: 'LOCAL_ACTION',
+        ),
+      );
+      await Future<void>(() {});
+      frames.add(_closedAccount('AUCPDA'));
+      await Future<void>(() {});
+      // Grace still protects the displayed metadata, but the closed account's
+      // cached overlay must be retired independently of that guard.
+      expect(
+        (bloc.state as ArtworkLoaded).artwork.auctionMetadata?.refunded,
+        isTrue,
+      );
+      await refreshWith(bloc, _unlistedArtwork());
+      final relisted = _auctionArtwork(
+        currentBidAmount: 2000000000,
+        currentBidder: 'NEW_BIDDER',
+        endsAt: endsAt,
+      );
+      await refreshWith(bloc, relisted);
+      expect(
+        (bloc.state as ArtworkLoaded).artwork.auctionMetadata,
+        relisted.auctionMetadata,
+      );
+    },
+  );
+
+  test(
+    'a newer indexed auction supersedes a refund overlay after a missed close',
+    () async {
+      final original = refundedArtwork();
+      final bloc = await loaded(original);
+      addTearDown(bloc.close);
+      bloc.add(
+        const ArtworkEvent.auctionLiveUpdate(
+          auctionAccount: 'AUCPDA',
+          refunded: true,
+        ),
+      );
+      await Future<void>(() {});
+      final relisted = _auctionArtwork(
+        currentBidAmount: 2000000000,
+        currentBidder: 'NEW_BIDDER',
+        endsAt: endsAt,
+      );
+      final newer = relisted.copyWith(
+        auctionMetadata: relisted.auctionMetadata!.copyWith(
+          startsAt: original.auctionMetadata!.startsAt!.add(
+            const Duration(days: 1),
+          ),
+        ),
+      );
+      await refreshWith(bloc, newer);
+      expect(
+        (bloc.state as ArtworkLoaded).artwork.auctionMetadata,
+        newer.auctionMetadata,
+      );
+      // The stale refund must also be gone from the cache for later refreshes.
+      await refreshWith(bloc, newer);
+      expect(
+        (bloc.state as ArtworkLoaded).artwork.auctionMetadata,
+        newer.auctionMetadata,
+      );
+    },
+  );
+
+  for (final missingStart in ['indexed', 'overlay']) {
+    test(
+      'unknown $missingStart start retires refund overlay after a missed close',
+      () async {
+        var original = refundedArtwork();
+        if (missingStart == 'overlay') {
+          original = original.copyWith(
+            auctionMetadata: original.auctionMetadata!.copyWith(startsAt: null),
+          );
+        }
+        final bloc = await loaded(original);
+        addTearDown(bloc.close);
+        bloc.add(
+          const ArtworkEvent.auctionLiveUpdate(
+            auctionAccount: 'AUCPDA',
+            refunded: true,
+          ),
+        );
+        await Future<void>(() {});
+        var relisted = _auctionArtwork(
+          currentBidAmount: 2000000000,
+          currentBidder: 'NEW',
+          endsAt: endsAt,
+        );
+        if (missingStart == 'overlay') {
+          relisted = relisted.copyWith(
+            auctionMetadata: relisted.auctionMetadata!.copyWith(
+              startsAt: DateTime.utc(2026, 10, 2),
+            ),
+          );
+        }
+        await refreshWith(bloc, relisted);
+        expect(
+          (bloc.state as ArtworkLoaded).artwork.auctionMetadata,
+          relisted.auctionMetadata,
+        );
+        await refreshWith(bloc, relisted);
+        expect(
+          (bloc.state as ArtworkLoaded).artwork.auctionMetadata,
+          relisted.auctionMetadata,
+        );
+      },
+    );
+  }
+
+  test(
+    'present non-refunded account replaces terminal metadata and cached overlay',
+    () async {
+      final original = refundedArtwork();
+      final bloc = await loaded(original);
+      addTearDown(bloc.close);
+      bloc.add(
+        const ArtworkEvent.auctionLiveUpdate(
+          auctionAccount: 'AUCPDA',
+          refunded: true,
+        ),
+      );
+      await Future<void>(() {});
+      stubReads(
+        auction: (
+          status: OnChainReadStatus.present,
+          account: _auctionConfigAccount(
+            reservePrice: '1000000000',
+            highestBidAmount: '2000000000',
+            highestBidder: 'NEW',
+            cnftRefunded: false,
+          ),
+          pda: 'AUCPDA',
+          viewSlot: 500,
+        ),
+      );
+      // The indexer still serves terminal metadata; the account read is authoritative.
+      await refreshWith(bloc, original);
+      var auction = (bloc.state as ArtworkLoaded).artwork.auctionMetadata!;
+      expect(auction.refunded, isFalse);
+      expect(auction.currentBidder, 'NEW');
+      expect(auction.currentBidAmount, 2000000000);
+      final live = (bloc.state as ArtworkLoaded).artwork;
+      stubReads();
+      await refreshWith(bloc, live);
+      auction = (bloc.state as ArtworkLoaded).artwork.auctionMetadata!;
+      expect(auction.refunded, isFalse);
+      expect(auction.currentBidder, 'NEW');
+    },
+  );
+
+  for (final viewSlot in <int?>[null, 400, 600]) {
+    test(
+      'unlisted refunded auction respects non-refunded account view $viewSlot',
+      () async {
+        final frames = StreamController<AccountUpdate>.broadcast();
+        addTearDown(frames.close);
+        when(
+          () => accountRealtime.watchAccount('AUCPDA'),
+        ).thenAnswer((_) => frames.stream);
+        final original = refundedArtwork();
+        final bloc = await loaded(original);
+        addTearDown(bloc.close);
+        frames.add(
+          _auctionConfigAccount(
+            reservePrice: '0',
+            cnftRefunded: true,
+            slot: 500,
+          ),
+        );
+        await Future<void>(() {});
+        stubReads(
+          auction: (
+            status: OnChainReadStatus.present,
+            account: _auctionConfigAccount(
+              reservePrice: '1000000000',
+              highestBidAmount: '2000000000',
+              highestBidder: 'OLD',
+              cnftRefunded: false,
+            ),
+            pda: 'AUCPDA',
+            viewSlot: viewSlot,
+          ),
+        );
+        await refreshWith(bloc, original);
+        final artwork = (bloc.state as ArtworkLoaded).artwork;
+        if (viewSlot == 600) {
+          expect(artwork.listingType, ListingType.auction);
+          expect(artwork.auctionMetadata!.refunded, isFalse);
+          expect(artwork.auctionMetadata!.currentBidder, 'OLD');
+        } else {
+          expect(artwork.listingType, ListingType.unlisted);
+          expect(artwork.auctionMetadata!.refunded, isTrue);
+          expect(artwork.auctionMetadata!.currentBidder, isNull);
+          expect(artwork.auctionMetadata!.bidCount, 0);
+        }
+      },
+    );
+  }
+
+  test(
+    'refund overlay survives a stale indexed auction with the same start',
+    () async {
+      final original = refundedArtwork();
+      final bloc = await loaded(original);
+      addTearDown(bloc.close);
+      bloc.add(
+        const ArtworkEvent.auctionLiveUpdate(
+          auctionAccount: 'AUCPDA',
+          refunded: true,
+        ),
+      );
+      await Future<void>(() {});
+      await refreshWith(
+        bloc,
+        original.copyWith(
+          listingType: ListingType.auction,
+          auctionMetadata: original.auctionMetadata!.copyWith(
+            refunded: false,
+            currentBidAmount: 1000000000,
+            currentBidder: 'STALE',
+            bidCount: 1,
+          ),
+        ),
+      );
+      final metadata = (bloc.state as ArtworkLoaded).artwork.auctionMetadata!;
+      expect(metadata.refunded, isTrue);
+      expect(metadata.currentBidder, isNull);
+      expect(metadata.bidCount, 0);
+    },
+  );
+
+  for (final viewSlot in <int?>[null, 400, 600]) {
+    test(
+      'refunded metadata respects auction presence for absent view $viewSlot',
+      () async {
+        final frames = StreamController<AccountUpdate>.broadcast();
+        addTearDown(frames.close);
+        when(
+          () => accountRealtime.watchAccount('AUCPDA'),
+        ).thenAnswer((_) => frames.stream);
+        final bloc = await loaded(refundedArtwork());
+        addTearDown(bloc.close);
+        frames.add(
+          _auctionConfigAccount(reservePrice: '0', cnftRefunded: true),
+        );
+        await Future<void>(() {});
+        stubReads(
+          auction: (
+            status: OnChainReadStatus.absent,
+            account: null,
+            pda: 'AUCPDA',
+            viewSlot: viewSlot,
+          ),
+        );
+        await refreshWith(bloc, refundedArtwork());
+        final metadata = (bloc.state as ArtworkLoaded).artwork.auctionMetadata;
+        if (viewSlot == 600) {
+          expect(metadata, isNull);
+          stubReads();
+          await refreshWith(
+            bloc,
+            _auctionArtwork(
+              currentBidAmount: 2000000000,
+              currentBidder: 'NEW_BIDDER',
+              endsAt: endsAt,
+            ),
+          );
+          expect(
+            (bloc.state as ArtworkLoaded).artwork.auctionMetadata!.refunded,
+            isFalse,
+          );
+        } else {
+          expect(metadata?.refunded, isTrue);
+        }
+      },
+    );
+  }
+
+  test(
+    'auction absence preserves a fixed-price relist while clearing its old refund',
+    () async {
+      stubReads(
+        auction: (
+          status: OnChainReadStatus.absent,
+          account: null,
+          pda: 'AUCPDA',
+          viewSlot: 600,
+        ),
+      );
+      final detail = _buyNowArtwork().copyWith(
+        auctionMetadata: refundedArtwork().auctionMetadata,
+      );
+      final bloc = await loaded(detail);
+      addTearDown(bloc.close);
+      await Future<void>(() {});
+      final artwork = (bloc.state as ArtworkLoaded).artwork;
+      expect(artwork.auctionMetadata, isNull);
+      expect(artwork.listingType, ListingType.buyNow);
+      expect(artwork.price, detail.price);
+      expect(artwork.buyNowMetadata, detail.buyNowMetadata);
+    },
+  );
+
+  for (final hasBids in [false, true]) {
+    final bidder = hasBids ? 'WINNER' : '11111111111111111111111111111111';
+    for (final indexed in [false, true]) {
+      test('explicit account refund is terminal with bids=$hasBids, '
+          'indexed=$indexed', () async {
+        stubReads(
+          auction: (
+            status: OnChainReadStatus.present,
+            account: _auctionConfigAccount(
+              reservePrice: '500000000',
+              highestBidAmount: '0',
+              highestBidder: bidder,
+              cnftRefunded: true,
+            ),
+            pda: 'AUCPDA',
+            viewSlot: 500,
+          ),
+        );
+        when(() => repo.getArtworkDetail(any())).thenAnswer(
+          (_) async => indexed
+              ? _auctionArtwork(
+                  currentBidAmount: 1000000000,
+                  currentBidder: 'STALE',
+                  endsAt: endsAt,
+                )
+              : _unlistedArtwork(),
+        );
+        final bloc = build();
+        addTearDown(bloc.close);
+        final refunded = bloc.stream.firstWhere(
+          (s) =>
+              s is ArtworkLoaded && s.artwork.auctionMetadata?.refunded == true,
+        );
+        bloc.add(const ArtworkEvent.load(mintAccount: 'MINT1'));
+        final state = await refunded as ArtworkLoaded;
+        expect(state.artwork.auctionMetadata!.currentBidAmount, isNull);
+        expect(state.artwork.auctionMetadata!.currentBidder, isNull);
+        expect(state.artwork.auctionMetadata!.bidCount, 0);
+      });
+    }
+
+    test(
+      'websocket explicit refund clears stale bids with bids=$hasBids',
+      () async {
+        final frames = StreamController<AccountUpdate>.broadcast();
+        addTearDown(frames.close);
+        when(
+          () => accountRealtime.watchAccount('AUCPDA'),
+        ).thenAnswer((_) => frames.stream);
+        final bloc = await loaded(
+          _auctionArtwork(
+            currentBidAmount: 1000000000,
+            currentBidder: 'STALE',
+            endsAt: endsAt,
+          ),
+        );
+        addTearDown(bloc.close);
+        final refunded = bloc.stream.firstWhere(
+          (s) =>
+              s is ArtworkLoaded && s.artwork.auctionMetadata?.refunded == true,
+        );
+        frames.add(
+          _auctionConfigAccount(
+            reservePrice: '500000000',
+            highestBidAmount: '0',
+            highestBidder: bidder,
+            cnftRefunded: true,
+          ),
+        );
+        final state = await refunded as ArtworkLoaded;
+        expect(state.artwork.auctionMetadata!.currentBidAmount, isNull);
+        expect(state.artwork.auctionMetadata!.currentBidder, isNull);
+        expect(state.artwork.auctionMetadata!.bidCount, 0);
+      },
+    );
+
+    test(
+      'live snapshot explicit refund clears stale bids with bids=$hasBids',
+      () async {
+        when(() => auctionLive.getState(any())).thenAnswer(
+          (_) async => AuctionLiveState.fromJson({
+            'auctionAccount': 'AUCPDA',
+            'seller': 'SELLER',
+            'bidMint': 'SOL',
+            'reservePrice': 500000000,
+            'refunded': true,
+            'currentBidAmount': 0,
+            'currentBidder': bidder,
+            'bidCount': hasBids ? 1 : 0,
+          }),
+        );
+        when(() => repo.getArtworkDetail(any())).thenAnswer(
+          (_) async => _auctionArtwork(
+            currentBidAmount: 1000000000,
+            currentBidder: 'STALE',
+            endsAt: endsAt,
+          ),
+        );
+        final bloc = build();
+        addTearDown(bloc.close);
+        final refunded = bloc.stream.firstWhere(
+          (s) =>
+              s is ArtworkLoaded && s.artwork.auctionMetadata?.refunded == true,
+        );
+        bloc.add(const ArtworkEvent.load(mintAccount: 'MINT1'));
+        final state = await refunded as ArtworkLoaded;
+        expect(state.artwork.auctionMetadata!.currentBidAmount, isNull);
+        expect(state.artwork.auctionMetadata!.currentBidder, isNull);
+        expect(state.artwork.auctionMetadata!.bidCount, 0);
+      },
     );
   }
 
@@ -691,6 +1347,51 @@ void main() {
   );
 
   // ── On-chain existence reconciliation (synthesize / clear) ───────────────
+
+  test(
+    'absent Mallow listing PDA preserves an external buy-now listing',
+    () async {
+      stubReads(
+        listing: (
+          status: OnChainReadStatus.absent,
+          account: null,
+          pda: 'LISTPDA',
+          viewSlot: null,
+        ),
+      );
+      final bloc = await loaded(
+        _buyNowArtwork().copyWith(lastSource: MarketSource.magicEden),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final artwork = (bloc.state as ArtworkLoaded).artwork;
+      expect(artwork.listingType, ListingType.buyNow);
+      expect(artwork.lastSource, MarketSource.magicEden);
+      expect(artwork.price, 1000000000);
+      await bloc.close();
+    },
+  );
+
+  test(
+    'a live Mallow listing outranks stale external marketplace provenance',
+    () async {
+      stubReads(
+        listing: (
+          status: OnChainReadStatus.present,
+          account: _listingAccount(price: '1500000000'),
+          pda: 'LISTPDA',
+          viewSlot: null,
+        ),
+      );
+      final bloc = await loaded(
+        _buyNowArtwork().copyWith(lastSource: MarketSource.magicEden),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final artwork = (bloc.state as ArtworkLoaded).artwork;
+      expect(artwork.lastSource, MarketSource.mallow);
+      expect(artwork.price, 1500000000);
+      await bloc.close();
+    },
+  );
 
   test(
     'an on-chain listing the indexer missed is synthesized into a buy CTA',

@@ -17,7 +17,7 @@ Agent-facing entry point. Humans read [CONTRIBUTING.md](CONTRIBUTING.md), which 
    - **Per-transaction step-up auth is opt-in and OFF by default.** `TransactionAuthGate.authorize` returns `allowed` immediately when `SecureWalletStorage.loadTransactionAuthEnabled()` is false, which is the default. Biometrics are *not* required per signature, and no document may say they are.
    - 🛑 Do not "simplify" the `usdValue == null` branch of `_exceedsThreshold`. Unknown value counts as over-threshold: the gate fails **closed** when a price is unavailable, which is the one case an attacker can arrange.
    - 🛑 Keep all three flow gates — the local `AppFlow.isImplemented` arm, then the remote kill-switch lookup, then the compile-time store gate (`kShowNftCommerce` × `AppFlow.isStoreCommerce`, `lib/core/config/store_build.dart`) — **above every other statement** in `authorize`. Both early returns below them return `allowed`, so a check placed after either is inert for every user with step-up auth off — that is, most of them.
-   - **Store-build flags are compile-time and default-hidden** (`store_build.dart`), with one deliberate exception: `kShowNftCommerce` defaults to shown and only the iOS release lane passes `SHOW_NFT_COMMERCE=false`. Never gate a store-policy surface on remote config (Apple 2.3.1), and never add an escape hatch (`*-cancel`, settle, claim, unstake, withdraw) to `kStoreCommerceFlows`.
+   - **Store-build flags are compile-time and default-hidden** (`store_build.dart`), with two deliberate exceptions: `kShowNftCommerce` and `kShowSwap` default to shown, and only the iOS release lane passes `SHOW_NFT_COMMERCE=false` and `SHOW_SWAP=false`. Never gate a store-policy surface on remote config (Apple 2.3.1), and never add an escape hatch (`*-cancel`, settle, claim, unstake, withdraw) to `kStoreCommerceFlows`.
 
 ---
 
@@ -103,14 +103,14 @@ MallowNetworkImage(
 
 A security-first Solana / Ethereum / Tezos mobile wallet. Flutter, Clean Architecture, BLoC.
 
-`lib/core/` holds cross-cutting machinery (crypto and derivation, secure storage, networking, router, config); `lib/features/<feature>/` holds each feature as `data/` `services/` `screens/` `widgets/` `models/`; `lib/shared/` holds the theme and reusable widgets; `packages/` holds the standalone Dart packages (`ledger_*`, `jupiter_aggregator`, `mallow_api`).
+`lib/core/` holds cross-cutting machinery (crypto and derivation, secure storage, networking, router, config); `lib/features/<feature>/` holds each feature as `data/` `services/` `screens/` `widgets/` `models/`; `lib/shared/` holds the theme and reusable widgets; `packages/` holds the standalone Dart packages (`ledger_*`, `keystone_ur`, `jupiter_aggregator`, `mallow_api`).
 
 Read before touching anything that talks to the backend:
 
 - [docs/architecture.md](docs/architecture.md) — file structure, naming, state management.
 - [docs/api.md](docs/api.md) — the `/v1` vs `/v2` split. Different services with different wire conventions; picking the wrong one is the common first mistake.
 
-Also in `docs/`: [security.md](docs/security.md), [backend.md](docs/backend.md) (every external service and what breaks without it), [artwork_state.md](docs/artwork_state.md), [keystone.md](docs/keystone.md), [workflow.md](docs/workflow.md) (CLI, adding features, testing).
+Also in `docs/`: [security.md](docs/security.md), [backend.md](docs/backend.md) (every external service and what breaks without it), [keystone.md](docs/keystone.md) (QR hardware-wallet signing), [workflow.md](docs/workflow.md) (CLI, adding features, testing).
 
 ### Theme colors
 
@@ -154,3 +154,5 @@ flutter test
 1. Neither file needs to exist for `flutter analyze` or `flutter test` — nothing reads config from disk at runtime. ⚠️ But when you *do* pass one, a **missing** path is a hard build error and an **empty** file is fine — the exact inverse of the old `flutter_dotenv` rule. Prefer `./run.sh` over a hand-written `flutter run`: it wires both files and creates an empty `.env.local` placeholder.
 2. **Never add `.env*` back to the `assets:` list in `pubspec.yaml`.** That is the regression this guards against.
 3. Tests vary a `Config` value through `Config.debugOverrides` (`--dart-define` is const, so it cannot change per-test). Clear it in `tearDown`.
+
+🛑 **Never run an on-device command without naming an emulator.** For `flutter test integration_test/…` and `flutter drive` that means `-d emulator-<port>`, plus `--flavor play` on Android. For `adb uninstall` and `adb install` it means `-s emulator-<port>`. A developer's real phone may be plugged into the same host. With no `-d`, Flutter picks the only attached device, and the teardown of `flutter test integration_test/` and `flutter drive` force-stops and **uninstalls** the app. That happens on Ctrl-C too, even mid-build. On a real phone the uninstall deletes the wallet keys for good: `allowBackup` is false, so there is nothing to restore. Prefer `test/e2e/run_one.sh` / `run_e2e.sh`, which refuse a non-emulator target and pin `adb` with `ANDROID_SERIAL`. `flutter run` never uninstalls on exit, but it **does** uninstall when an install fails: it prints `Uninstalling old version...` and reinstalls. A build signed by a different key than the installed copy, or with a lower versionCode, is enough. So run a real phone through `./run.sh` only, never a bare `flutter run`. Its install guard checks the device first and refuses on either mismatch. Never pass `--allow-uninstall` to get past it unless the keys on that phone are backed up.

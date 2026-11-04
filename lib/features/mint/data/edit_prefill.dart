@@ -6,6 +6,9 @@ import 'package:mallow_api/mallow_api.dart';
 import '../../../core/network/das_api_service.dart';
 import '../../artwork/data/artwork_repository.dart';
 import '../../artwork/services/artwork_bloc.dart';
+import '../../artwork/models/on_chain_asset.dart'
+    show DigitalAsset, OnChainCreator;
+import '../../sale/services/direct_proceeds.dart';
 
 /// Snapshot of an asset's current metadata, ready to seed the mint form
 /// for an edit. Mirrors the webapp's `onEditAssetFetched` in
@@ -246,11 +249,42 @@ class EditNftPrefillService {
     final isTokenMetadata =
         asset.tokenStandard == TokenStandard.nft ||
         asset.tokenStandard == TokenStandard.pnft ||
-        asset.tokenStandard == TokenStandard.cnft;
+        asset.tokenStandard == TokenStandard.cnft ||
+        asset.tokenStandard == TokenStandard.cnftV2;
 
     int sellerFeeBps;
     List<MintCreator> creators;
-    if (isTokenMetadata && asset.tokenMetadataCreators.isNotEmpty) {
+    if (asset.tokenStandard == TokenStandard.cnftV2) {
+      DigitalAsset? parent;
+      if (asset.collectionKey != null &&
+          (asset.sellerFeeBasisPoints == 65535 ||
+              asset.tokenMetadataCreators.isEmpty)) {
+        try {
+          parent = await _dasApi.getAsset(asset.collectionKey!);
+        } catch (_) {
+          // Unresolved inherited royalties must never seed the sentinel as a rate.
+        }
+      }
+      final royalties = resolveOnChainRoyalties(asset, collection: parent);
+      sellerFeeBps = royalties.royaltyBps;
+      final source =
+          asset.sellerFeeBasisPoints != 65535 &&
+              asset.tokenMetadataCreators.isNotEmpty
+          ? asset.tokenMetadataCreators
+          : (parent?.id == asset.collectionKey &&
+                    parent?.tokenStandard == TokenStandard.coreCollection
+                ? parent!.royaltiesPluginCreators
+                : const <OnChainCreator>[]);
+      creators = source
+          .map(
+            (c) => MintCreator(
+              address: c.address,
+              share: c.share,
+              verified: c.verified,
+            ),
+          )
+          .toList(growable: false);
+    } else if (isTokenMetadata && asset.tokenMetadataCreators.isNotEmpty) {
       sellerFeeBps = asset.sellerFeeBasisPoints ?? 0;
       creators = asset.tokenMetadataCreators
           .map(
@@ -269,6 +303,7 @@ class EditNftPrefillService {
     } else {
       final pct = double.tryParse(artwork?.royaltyPercent ?? '') ?? 0;
       sellerFeeBps = (pct * 100).round();
+      if (sellerFeeBps == 65535) sellerFeeBps = 0;
       creators =
           artwork?.royaltySplits
               .map(

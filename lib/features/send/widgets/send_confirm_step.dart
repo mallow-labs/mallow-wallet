@@ -42,6 +42,7 @@ class SendConfirmStep extends StatelessWidget {
     this.onSwitch,
     this.recipientAdvisory,
     this.previousSendCount,
+    this.requestNote,
     bool intrinsicHeight = false,
     super.key,
   }) : _intrinsicHeight = intrinsicHeight;
@@ -85,6 +86,8 @@ class SendConfirmStep extends StatelessWidget {
       recipientAdvisory = null,
       // Occupies the recipient label's row, so it never changes the height.
       previousSendCount = null,
+      // Rare, like the advisory, so the floor does not reserve room for it.
+      requestNote = null,
       _intrinsicHeight = true;
 
   final String amountText;
@@ -96,8 +99,8 @@ class SendConfirmStep extends StatelessWidget {
   final String feeText;
   final String feeFiatText;
 
-  /// Network the send routes over, shown in the "Network" pill (e.g. 'Solana',
-  /// 'Tezos').
+  /// Network the send routes over, shown in the "Network" pill (e.g.
+  /// 'Solana Mainnet', 'Tezos Mainnet'), from `Chain.networkLabel`.
   final String networkName;
 
   /// Symbol + mint of the token the fee is denominated in — 'SOL'/[solMint] on
@@ -143,6 +146,10 @@ class SendConfirmStep extends StatelessWidget {
   /// worth a second look.
   final int? previousSendCount;
 
+  /// Shown under the header for a send that pays a request; see
+  /// [SendRequestNote].
+  final Widget? requestNote;
+
   final SimulationBannerState? simulation;
   final bool isSending;
   final VoidCallback? onBack;
@@ -163,6 +170,10 @@ class SendConfirmStep extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         SendStepHeader(title: 'Confirm Send', onBack: onBack),
+        if (requestNote != null) ...[
+          const SizedBox(height: MallowTheme.spacingSm),
+          requestNote!,
+        ],
         const SizedBox(height: MallowTheme.spacingLg),
         _summaryRow(context),
         const SizedBox(height: MallowTheme.spacingLg),

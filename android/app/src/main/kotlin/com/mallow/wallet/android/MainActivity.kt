@@ -17,6 +17,7 @@ class MainActivity : FlutterFragmentActivity() {
         // receiving their insets. Running this after super is important:
         // FlutterFragmentActivity creates and configures the window there.
         WindowCompat.enableEdgeToEdge(window)
+        WebViewInsetFitter.install(window.decorView)
         createNotificationChannel()
     }
 

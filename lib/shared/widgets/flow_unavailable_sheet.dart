@@ -53,7 +53,7 @@ String? flowDisabledMessage(FlowKey flow) => sl<RemoteConfigService>()
     .value
     .disabledMessage(flow.chain, flow.flow);
 
-/// item 1 — every flow entry point nudges the config, fire-and-forget, so
+/// Every flow entry point nudges the config, fire-and-forget, so
 /// an hours-old foreground session still picks up a kill within one TTL of
 /// touching a gated flow. Never awaited: the tap path reads the cached value
 /// and a network round trip on tap would be a dead-feeling button.

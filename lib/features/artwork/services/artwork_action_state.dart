@@ -23,8 +23,7 @@ export '../widgets/sheets/artwork_unclaimed_raffle_sheet.dart'
 
 /// Discriminated state for the artwork detail screen's persistent
 /// bottom-sheet slot. Mirrors the variants in
-/// `lib/features/artwork/widgets/sheets/` and the matrix in
-/// `docs/artwork_state.md`.
+/// `lib/features/artwork/widgets/sheets/`.
 sealed class ArtworkActionState {
   const ArtworkActionState();
 }
@@ -36,6 +35,38 @@ final class ArtworkConnectWalletAction extends ArtworkActionState {
   const ArtworkConnectWalletAction({required this.label, this.subtitle});
   final String label;
   final String? subtitle;
+}
+
+/// Import-wallet CTA: the session holds no wallet that can sign the Solana
+/// transaction behind the CTA the artwork would otherwise show. A profile whose
+/// only key is Tezos or Ethereum, with its Solana wallets linked watch-only, is
+/// the usual case. [action] names what importing unlocks ("buy", "place bid").
+final class ArtworkImportWalletAction extends ArtworkActionState {
+  const ArtworkImportWalletAction({
+    required this.action,
+    required this.watchOnly,
+  });
+
+  /// Verb phrase for the subtitle, or null when the build hides commerce and
+  /// the CTA must not name a paid action.
+  final String? action;
+
+  /// The session links a Solana wallet but holds no key for it (as opposed to
+  /// linking no Solana wallet at all). Only changes the copy.
+  final bool watchOnly;
+}
+
+/// Whether the session can sign a Solana transaction — the input that turns a
+/// signing CTA into [ArtworkImportWalletAction].
+enum ArtworkSolanaSigner {
+  /// A signable Solana wallet is in the session, or the session isn't known yet.
+  available,
+
+  /// Solana wallets are linked, but every one is watch-only.
+  watchOnly,
+
+  /// No Solana wallet in the session at all.
+  missing,
 }
 
 /// Why the Buy CTA must not be offered, or null when the listing is buyable.
@@ -64,13 +95,31 @@ enum ArtworkBuyBlock {
 
 /// Existing buy sheet — viewer × buyNow × (1/1 ∨ editionPrint).
 final class ArtworkBuyAction extends ArtworkActionState {
-  const ArtworkBuyAction({this.userOwnOffer = false, this.block});
+  const ArtworkBuyAction({
+    this.userOwnOffer = false,
+    this.block,
+    this.canMakeOffer = true,
+  });
+
+  final bool canMakeOffer;
 
   /// True when the connected wallet already has a live offer on this
   /// artwork — toggles the secondary "Make offer" CTA to "Cancel offer".
   final bool userOwnOffer;
 
   /// Non-null when Buy must render disabled with an explanation.
+  final ArtworkBuyBlock? block;
+}
+
+/// Buys one ERC-721 or ERC-1155 copy through a fresh OpenSea quote.
+final class ArtworkOpenSeaBuyAction extends ArtworkActionState {
+  const ArtworkOpenSeaBuyAction({this.block});
+  final ArtworkBuyBlock? block;
+}
+
+/// Buys the existing asset through a fresh Magic Eden quote.
+final class ArtworkMagicEdenBuyAction extends ArtworkActionState {
+  const ArtworkMagicEdenBuyAction({this.block});
   final ArtworkBuyBlock? block;
 }
 
@@ -95,20 +144,28 @@ final class ArtworkOwnerUnlistedAction extends ArtworkActionState {
   const ArtworkOwnerUnlistedAction({
     required this.canList,
     required this.canSend,
+    this.canAcceptOffer = true,
   });
 
   final bool canList;
   final bool canSend;
+  final bool canAcceptOffer;
 }
 
 /// Owner viewing their own active buy-now listing.
 final class ArtworkOwnerListedAction extends ArtworkActionState {
-  const ArtworkOwnerListedAction();
+  const ArtworkOwnerListedAction({this.canAcceptOffer = true});
+  final bool canAcceptOffer;
 }
 
 /// Non-owner viewing an unlisted artwork — make-offer flow.
 final class ArtworkUnlistedViewerAction extends ArtworkActionState {
-  const ArtworkUnlistedViewerAction({this.userOwnOffer = false});
+  const ArtworkUnlistedViewerAction({
+    this.userOwnOffer = false,
+    this.canMakeOffer = true,
+  });
+
+  final bool canMakeOffer;
 
   /// True when the connected wallet already has a live offer on this
   /// artwork — toggles the primary "Make offer" CTA to "Cancel offer".
@@ -128,6 +185,11 @@ final class ArtworkAuctionBidAction extends ArtworkActionState {
 /// Owner viewing their own active auction.
 final class ArtworkAuctionOwnerAction extends ArtworkActionState {
   const ArtworkAuctionOwnerAction();
+}
+
+/// Refunded auction awaiting authorized recovery of the escrowed asset.
+final class ArtworkAuctionRefundedAction extends ArtworkActionState {
+  const ArtworkAuctionRefundedAction();
 }
 
 /// Auction has ended — settle / claim / reclaim depending on [role].
@@ -180,8 +242,105 @@ final class ArtworkNoAction extends ArtworkActionState {
 }
 
 /// Resolve which sheet variant the artwork detail screen should pin to the
-/// bottom. The decision tree matches `docs/artwork_state.md` 1:1.
+/// bottom. This function is the decision tree; the sheet widgets only render
+/// the variant it picks.
+///
+/// [solanaSigner] is applied last: when the session cannot sign on Solana,
+/// every CTA that would build a Solana transaction becomes
+/// [ArtworkImportWalletAction]. Informational sheets (refunded auction, raffle
+/// awaiting its draw, external-link listings) stay as resolved. Without this a
+/// Tezos-only session saw Buy, and the tap sent its `tz1…` address as the
+/// buyer of a Solana listing.
 ArtworkActionState resolveArtworkActionState({
+  required ArtworkDetails artwork,
+  required String? currentAddress,
+  required Set<String> creatorLinkedAddresses,
+  required ArtworkPermissions? permissions,
+  Set<String> sessionAddresses = const {},
+  bool userOwnOffer = false,
+  EditionLiveState? editionState,
+  RaffleLiveState? raffleState,
+  TokenMetadataStatus currencyStatus = TokenMetadataStatus.resolved,
+  ArtworkSolanaSigner solanaSigner = ArtworkSolanaSigner.available,
+  DateTime? now,
+}) {
+  final resolved = _resolveArtworkActionState(
+    artwork: artwork,
+    currentAddress: currentAddress,
+    creatorLinkedAddresses: creatorLinkedAddresses,
+    permissions: permissions,
+    sessionAddresses: sessionAddresses,
+    userOwnOffer: userOwnOffer,
+    editionState: editionState,
+    raffleState: raffleState,
+    currencyStatus: currencyStatus,
+    now: now,
+  );
+  if (solanaSigner == ArtworkSolanaSigner.available) return resolved;
+  final action = _solanaSigningAction(resolved);
+  if (action == null) return resolved;
+  return ArtworkImportWalletAction(
+    action: action.commerce && !showNftCommerce ? null : action.verb,
+    watchOnly: solanaSigner == ArtworkSolanaSigner.watchOnly,
+  );
+}
+
+/// What the CTA of [state] would sign on Solana, or null when [state] signs
+/// nothing (or signs on another chain — OpenSea settles on Ethereum).
+/// [commerce] marks the paid side that a store build must not name.
+({String verb, bool commerce})? _solanaSigningAction(
+  ArtworkActionState state,
+) => switch (state) {
+  ArtworkBuyAction() ||
+  ArtworkMagicEdenBuyAction() ||
+  ArtworkBuyEditionAction() => (verb: 'buy', commerce: true),
+  ArtworkUnlistedViewerAction() => (verb: 'make an offer', commerce: true),
+  ArtworkAuctionBidAction() => (verb: 'place a bid', commerce: true),
+  ArtworkAuctionOwnerAction() => (verb: 'manage this auction', commerce: false),
+  ArtworkAuctionClaimAction(:final role) => switch (role) {
+    AuctionEndedRole.seller => (verb: 'settle this auction', commerce: false),
+    AuctionEndedRole.winner => (verb: 'claim this artwork', commerce: false),
+    AuctionEndedRole.observer => (verb: 'make an offer', commerce: true),
+  },
+  ArtworkOwnerListedAction() => (verb: 'manage this listing', commerce: false),
+  ArtworkOwnerUnlistedAction(:final canList) =>
+    canList
+        ? (verb: 'list this artwork', commerce: true)
+        : (verb: 'send this artwork', commerce: false),
+  ArtworkRaffleAction(:final role, :final subState) => _raffleSigningAction(
+    role,
+    subState,
+  ),
+  ArtworkUnclaimedRaffleAction() => (verb: 'claim', commerce: false),
+  ArtworkConnectWalletAction() ||
+  ArtworkOpenSeaBuyAction() ||
+  ArtworkAuctionRefundedAction() ||
+  ArtworkExternalLinkAction() ||
+  ArtworkImportWalletAction() ||
+  ArtworkNoAction() => null,
+};
+
+/// The raffle sheet's CTA per role and phase, or null for the phases it
+/// renders as status only — those keep the raffle sheet.
+({String verb, bool commerce})? _raffleSigningAction(
+  RaffleRole role,
+  RaffleSubState subState,
+) {
+  if (subState == RaffleSubState.awaitingDraw) return null;
+  return switch (role) {
+    RaffleRole.buyer || RaffleRole.observer =>
+      subState == RaffleSubState.selling
+          ? (verb: 'buy tickets', commerce: true)
+          : null,
+    RaffleRole.winner =>
+      subState == RaffleSubState.drawnUnclaimed
+          ? (verb: 'claim your prize', commerce: false)
+          : null,
+    RaffleRole.owner => (verb: 'manage this raffle', commerce: false),
+  };
+}
+
+ArtworkActionState _resolveArtworkActionState({
   required ArtworkDetails artwork,
   required String? currentAddress,
   required Set<String> creatorLinkedAddresses,
@@ -222,6 +381,10 @@ ArtworkActionState resolveArtworkActionState({
 }) {
   final clock = now ?? DateTime.now();
   final listingType = artwork.listingType;
+  final canTrade =
+      (permissions?.tokenStandard != TokenStandard.cnftV2 &&
+          artwork.tokenStandard != 'cnft-v2') ||
+      (permissions?.canTrade ?? false);
 
   // The edition marketplace acts on a selected real print. This database-only
   // container has no account and must never enter an asset transaction path.
@@ -229,18 +392,32 @@ ArtworkActionState resolveArtworkActionState({
     return const ArtworkNoAction();
   }
 
-  // Every CTA below builds a **Solana** marketplace transaction — the buy,
-  // offer, bid, cancel, settle and raffle-claim builders are all Solana-only
-  // cells (`AppFlow.chains`). An EVM or Tezos artwork can still arrive here
-  // carrying `listingType != unlisted` (an indexed objkt / OpenSea listing),
-  // which would otherwise resolve to a Buy / Make offer / Cancel listing /
-  // Settle auction CTA that signs against a mint account that is not a Solana
-  // mint. Suppress the sheet instead: the owner actions that genuinely work
-  // cross-chain (transfer, download) live in the context menu and are
-  // permission-driven, so nothing usable is lost.
-  //
-  // Placed ahead of the disconnected check on purpose — a connect-wallet CTA
-  // for a listing this app cannot transact is the same dead end one step later.
+  // OpenSea settles on Ethereum; all remaining marketplace builders below
+  // are Solana-only. Cross-chain transfer stays in the artwork menu.
+  if (artwork.chain == 'ethereum' &&
+      artwork.lastSource == MarketSource.opensea &&
+      listingType == ListingType.buyNow &&
+      (artwork.tokenStandard == 'erc721' ||
+          artwork.tokenStandard == 'erc1155')) {
+    final owners = {
+      artwork.ownerAddress,
+      ...artwork.ownerAddresses,
+    }.whereType<String>().map((a) => a.toLowerCase()).toSet();
+    final mine = {
+      ?currentAddress,
+      ...sessionAddresses,
+    }.map((a) => a.toLowerCase());
+    if (mine.any(owners.contains)) return const ArtworkNoAction();
+    if (currentAddress == null) {
+      return ArtworkConnectWalletAction(
+        label: showNftCommerce ? 'Sign in to buy' : 'Sign in to view',
+      );
+    }
+    return ArtworkOpenSeaBuyAction(
+      block: _buyBlock(artwork, clock, TokenMetadataStatus.resolved),
+    );
+  }
+
   if (isEvmOrTezosArtwork(
     mintAccount: artwork.mintAccount,
     chain: artwork.chain,
@@ -248,38 +425,48 @@ ArtworkActionState resolveArtworkActionState({
     return const ArtworkNoAction();
   }
 
-  // Listings that live on someone else's marketplace program. Every CTA this
-  // dispatcher can produce — buy, bid, make/accept offer, update listing,
-  // cancel listing, settle, claim — is built against `mallow_market`,
-  // `mallow-auction` or `rafffle`, so offering any of them on a
-  // magic-eden / exchange-art / objkt / opensea listing produces a
-  // transaction that cannot touch that listing. The webapp refuses the same
-  // way, throwing "Unsupported market source"
-  // (`useCancelListing`) and passing
-  // `nftRender.lastSource ?? MarketSource.mallow` into every listing action
-  // (`UpdateListingModal`); auctions read the
-  // same single field (`useListingState`,
-  // `listingStateDerivation`).
-  //
-  // Null / `unknown` mean mallow — see [MarketSourceX.isForeignMarketplace].
-  // Transfer is unaffected: it lives in the context menu and is
-  // permission-driven, which is deliberately all an owner keeps here until
-  // external marketplaces are integrated properly.
-  //
-  // Scoped to artwork that is *currently* listed elsewhere. `lastSource`
-  // records the last marketplace the piece **traded** on, not where it lives
-  // now, so an unlisted artwork that once sold on magic-eden still carries a
-  // foreign source. Suppressing on that alone would strip the List CTA from a
-  // piece its owner holds outright — a mallow listing built for it is
-  // perfectly valid, and the webapp's `deriveCanList` never consults
-  // `lastSource` for exactly this reason.
+  if (listingType == ListingType.buyNow &&
+      artwork.lastSource == MarketSource.magicEden) {
+    final relationship = artworkRelationshipOf(
+      currentAddress: currentAddress ?? '',
+      sessionAddresses: sessionAddresses,
+      artwork: artwork,
+      creatorLinkedAddresses: creatorLinkedAddresses,
+    );
+    if (relationship == ArtworkRelationship.owner) {
+      return const ArtworkNoAction();
+    }
+    if (currentAddress == null) {
+      return ArtworkConnectWalletAction(
+        label: showNftCommerce ? 'Sign in to buy' : 'Sign in to view',
+      );
+    }
+    // The purchase review resolves its own currency and exact amounts.
+    return ArtworkMagicEdenBuyAction(
+      block: _buyBlock(artwork, clock, TokenMetadataStatus.resolved),
+    );
+  }
+
+  // The remaining actions target Mallow programs and cannot manage external
+  // listings. Historical provenance on an unlisted asset must still allow its
+  // owner to create a new Mallow listing.
   if (listingType != ListingType.unlisted &&
       artwork.lastSource.isForeignMarketplace) {
     return const ArtworkNoAction();
   }
 
+  // The indexer marks refunded auctions unlisted while retaining terminal
+  // metadata until the escrow account is recovered or closed.
+  if ((listingType == ListingType.auction ||
+          listingType == ListingType.unlisted) &&
+      artwork.auctionMetadata?.refunded == true) {
+    return const ArtworkAuctionRefundedAction();
+  }
+
   // Disconnected — connect-wallet variant for whatever listing type is live.
   if (currentAddress == null) {
+    if (listingType == ListingType.unlisted && !canTrade)
+      return const ArtworkNoAction();
     return ArtworkConnectWalletAction(
       label: _connectLabel(listingType, artwork.auctionMetadata, clock),
     );
@@ -376,14 +563,25 @@ ArtworkActionState resolveArtworkActionState({
 
   if (listingType == ListingType.buyNow) {
     if (relationship == ArtworkRelationship.owner) {
-      return const ArtworkOwnerListedAction();
+      return ArtworkOwnerListedAction(
+        canAcceptOffer:
+            canTrade &&
+            permissions?.tokenStandard != TokenStandard.cnft &&
+            permissions?.tokenStandard != TokenStandard.cnftV2 &&
+            artwork.tokenStandard != 'cnft' &&
+            artwork.tokenStandard != 'cnft-v2',
+      );
     }
     final printsEdition = _isEditionMaster(artwork, editionState);
     final block = _buyBlock(artwork, clock, currencyStatus);
     if (printsEdition) {
       return ArtworkBuyEditionAction(block: block);
     }
-    return ArtworkBuyAction(userOwnOffer: userOwnOffer, block: block);
+    return ArtworkBuyAction(
+      userOwnOffer: userOwnOffer,
+      block: block,
+      canMakeOffer: canTrade,
+    );
   }
 
   // Remaining: ListingType.unlisted (collections collapse here too — they
@@ -399,7 +597,7 @@ ArtworkActionState resolveArtworkActionState({
     // Accept-offer down with List — leaving an owner unable to move their own
     // flagged artwork out of the app. The webapp gates only the listing CTA
     // (`ActionBox`: `!creator?.isFlagged &&
-    // !isFlagged` wraps "List for sale"; Transfer at `:200-217` is outside it).
+    // !isFlagged` wraps "List for sale"; Transfer is outside it).
     //
     // `creatorIsFlagged` is the second half of that `&&`. It gates the List
     // CTA and *only* the List CTA — letting it reach `canSend` would rebuild
@@ -414,18 +612,29 @@ ArtworkActionState resolveArtworkActionState({
     // and the Accept CTA is hidden on that build anyway.
     final canList =
         showNftCommerce &&
+        canTrade &&
         (permissions?.canList ?? false) &&
         !artwork.isFlagged &&
         !artwork.creatorIsFlagged &&
         !_isSoldOutMaster(artwork);
     if (!canList && !canSend) return const ArtworkNoAction();
-    return ArtworkOwnerUnlistedAction(canList: canList, canSend: canSend);
+    return ArtworkOwnerUnlistedAction(
+      canList: canList,
+      canSend: canSend,
+      canAcceptOffer: canTrade,
+    );
+  }
+  if (!canTrade && !userOwnOffer) {
+    return const ArtworkNoAction();
   }
   // TODO: show make offer when edition offers are live
   if (_isEditionMaster(artwork, editionState)) {
     return const ArtworkNoAction();
   }
-  return ArtworkUnlistedViewerAction(userOwnOffer: userOwnOffer);
+  return ArtworkUnlistedViewerAction(
+    userOwnOffer: userOwnOffer,
+    canMakeOffer: canTrade,
+  );
 }
 
 /// Why (if at all) a buy-now listing must not be bought right now.

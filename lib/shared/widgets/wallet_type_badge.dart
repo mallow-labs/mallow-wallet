@@ -6,8 +6,8 @@ import 'mallow_svg_icon.dart';
 
 /// Small provenance icon shown 8px to the right of a wallet/account name,
 /// indicating where the wallet comes from: watch-only (eye), Ledger (the
-/// Ledger mark), Seed Vault (a half shield), or a social provider
-/// (Google / Apple). Centralised so every name surface renders the badge
+/// Ledger mark), Seed Vault (a half shield), Keystone (the Keystone mark), or a
+/// social provider (Google / Apple). Centralised so every name surface renders the badge
 /// identically. Renders nothing for a plain HD/imported account (a null
 /// [badge]).
 class WalletTypeBadge extends StatelessWidget {
@@ -40,6 +40,11 @@ class WalletTypeBadge extends StatelessWidget {
         'assets/icons/shield_half.svg',
         context.mallowColors.textSecondary,
         1.0,
+      ),
+      WalletBadge.keystone => (
+        'assets/icons/brand_keystone.svg',
+        context.mallowColors.textSecondary,
+        0.9,
       ),
       WalletBadge.apple => (
         'assets/icons/apple.svg',

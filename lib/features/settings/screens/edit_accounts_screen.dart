@@ -7,6 +7,7 @@ import '../../../core/network/auth_service.dart';
 import '../../../core/observability/app_logger.dart';
 import '../../../core/router/app_router.dart';
 import '../../../core/router/auth_state_notifier.dart';
+import '../../../core/security/reauth_gate.dart';
 import '../../../core/services/wallet_repository.dart';
 import '../../../core/session/session_manager.dart';
 import '../../../di.dart';
@@ -108,8 +109,9 @@ class _EditAccountsScreenState extends State<EditAccountsScreen> {
   /// session: a Profile that just lost its last held wallet drops back to
   /// Account mode (so its now-orphaned identity leaves the drawer header),
   /// otherwise we re-activate a survivor. When the removed account is unrelated
-  /// to the active session we leave the session — and its re-auth — untouched
-  /// and just broadcast a data change so the drawer drops the deleted row.
+  /// to the active session we leave the session — and its session re-auth —
+  /// untouched and just broadcast a data change so the drawer drops the
+  /// deleted row.
   Future<void> _onRemoveAccount(Account account) async {
     if (_removing) return;
     _removing = true;
@@ -123,7 +125,8 @@ class _EditAccountsScreenState extends State<EditAccountsScreen> {
   /// Ask before the swipe completes, naming what the removal destroys — an
   /// imported key, or a recovery phrase whose last wallets this account holds.
   /// Both leave the device with the account and cannot be recovered from the
-  /// app.
+  /// app. Then [requireReauthForRemoval], when the account holds a key stored
+  /// here.
   Future<bool> _confirmRemoveAccount(Account account) async {
     // A removal already in flight owns the list. Letting a second swipe
     // through would dismiss a row this screen has not removed yet, and the
@@ -142,7 +145,11 @@ class _EditAccountsScreenState extends State<EditAccountsScreen> {
       confirmLabel: 'Remove',
       destructive: true,
     );
-    return confirmed == true;
+    if (confirmed != true || !mounted) return false;
+    return requireReauthForRemoval(
+      context,
+      account.wallets.map((w) => w.walletType),
+    );
   }
 
   /// Rebuild the rows under a new key so the one the swipe already dismissed
@@ -206,7 +213,7 @@ class _EditAccountsScreenState extends State<EditAccountsScreen> {
       await sl<SessionManager>().reconcileAfterRemoval(replacementId);
     } else {
       // Session untouched — broadcast so the live drawer reloads its account
-      // list (and any newly-unheld profile group) without a re-auth.
+      // list (and any newly-unheld profile group) without a session re-auth.
       await sl<WalletManager>().notifyWalletDataChanged();
     }
   }

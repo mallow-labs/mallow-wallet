@@ -947,7 +947,7 @@ void main() {
     expect(find.text('2.5 XTZ'), findsNothing);
     // The *network* is still Tezos and the fee is still quoted in XTZ — only
     // the sent asset changed.
-    expect(find.text('Tezos'), findsWidgets);
+    expect(find.text('Tezos Mainnet'), findsWidgets);
   });
 
   testWidgets(

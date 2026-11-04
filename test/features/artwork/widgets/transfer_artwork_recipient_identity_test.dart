@@ -8,6 +8,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_api/mallow_api.dart' show UserPreview;
 import 'package:mallow_wallet/core/analytics/analytics_service.dart';
+import 'package:mallow_wallet/core/config/environment.dart';
 import 'package:mallow_wallet/core/config/remote_config.dart';
 import 'package:mallow_wallet/core/config/remote_config_service.dart';
 import 'package:mallow_wallet/core/crypto/wallet_manager.dart';
@@ -290,6 +291,22 @@ void main() {
 
     expect(find.text('alice'), findsWidgets);
     expect(find.text('Account 2'), findsNothing);
+  });
+
+  testWidgets('the Network pill names the Solana cluster, not just the chain', (
+    tester,
+  ) async {
+    Config.debugOverrides['ENV'] = 'staging';
+    addTearDown(Config.debugOverrides.clear);
+    await setUpFlow();
+    await open(
+      tester,
+      initial: const TransferArtworkState.input(),
+      then: const TransferArtworkState.ready(recipient: _solRecipient),
+    );
+
+    expect(find.text('Solana Devnet'), findsOneWidget);
+    expect(find.text('Solana'), findsNothing);
   });
 
   testWidgets('the recents list shows local account names', (tester) async {

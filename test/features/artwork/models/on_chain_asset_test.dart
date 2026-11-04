@@ -8,6 +8,83 @@ import 'package:mallow_wallet/features/artwork/models/on_chain_asset.dart';
 // regressions, so the parser is worth its own coverage.
 
 void main() {
+  group('Bubblegum v2 flags', () {
+    test('absent flags remain unresolved and block escrow eligibility', () {
+      final asset = DigitalAsset.fromJson({
+        'id': 'leaf',
+        'interface': 'MplBubblegumV2',
+        'compression': {'compressed': true},
+      });
+      expect(asset.compressionFlags, isNull);
+      expect(asset.isCnftV2TradeEligible(), isFalse);
+    });
+    for (final flags in [0, 1, 2, 3, 4, 7, 8]) {
+      test('flags $flags preserve restrictions and escrow eligibility', () {
+        final asset = DigitalAsset.fromJson({
+          'id': 'leaf',
+          'interface': 'MplBubblegumV2',
+          'compression': {'compressed': true, 'flags': flags},
+        });
+        expect(asset.tokenStandard, TokenStandard.cnftV2);
+        expect(asset.compressionFlags, flags);
+        expect(asset.frozen, (flags & 3) != 0);
+        expect(asset.nonTransferable, (flags & 4) != 0);
+        expect(asset.isCnftV2TradeEligible(), flags == 0);
+      });
+    }
+    test('ownership non_transferable is independent of compression flags', () {
+      final asset = DigitalAsset.fromJson({
+        'id': 'leaf',
+        'interface': 'MplBubblegumV2',
+        'compression': {'compressed': true, 'flags': 0},
+        'ownership': {'non_transferable': true},
+      });
+      expect(asset.nonTransferable, isTrue);
+      expect(asset.isCnftV2TradeEligible(), isFalse);
+    });
+    test(
+      'all permanent delegate plugin types block escrow even without an address',
+      () {
+        final asset = DigitalAsset.fromJson({
+          'id': 'leaf',
+          'interface': 'MplBubblegumV2',
+          'compression': {'compressed': true, 'flags': 0},
+          'grouping': [
+            {'group_key': 'collection', 'group_value': 'collection'},
+          ],
+        });
+        DigitalAsset collection(
+          Map<String, dynamic> plugins, {
+          String id = 'collection',
+        }) => DigitalAsset.fromJson({
+          'id': id,
+          'interface': 'MplCoreCollection',
+          'plugins': plugins,
+        });
+        expect(asset.isCnftV2TradeEligible(), isFalse);
+        expect(asset.isCnftV2TradeEligible(collection: collection({})), isTrue);
+        expect(
+          asset.isCnftV2TradeEligible(collection: collection({}, id: 'wrong')),
+          isFalse,
+        );
+        for (final plugin in [
+          'permanent_freeze_delegate',
+          'permanent_transfer_delegate',
+          'permanent_burn_delegate',
+        ]) {
+          final parent = collection({
+            plugin: {
+              'data': {'frozen': false},
+              'authority': {'type': 'UpdateAuthority'},
+            },
+          });
+          expect(parent.hasPermanentDelegate, isTrue);
+          expect(asset.isCnftV2TradeEligible(collection: parent), isFalse);
+        }
+      },
+    );
+  });
+
   group('DigitalAsset.fromJson - interface mapping', () {
     test('MplCoreAsset → TokenStandard.core', () {
       final a = DigitalAsset.fromJson({

@@ -36,6 +36,15 @@ abstract class MallowApiV2Client {
   factory MallowApiV2Client(Dio dio, {String baseUrl, ParseErrorLogger? errorLogger}) =
       _MallowApiV2Client;
 
+  @GET('/magic-eden/quote')
+  Future<ApiResponse<MagicEdenBuyQuoteResponse>> quoteMagicEdenBuy(
+    @Query('mintAccount') String mintAccount,
+    @Query('buyer') String buyer,
+  );
+
+  @POST('/tx/magic-eden/buy')
+  Future<ApiResponse<MagicEdenBuyTxResponse>> buyMagicEdenTx(@Body() MagicEdenBuyTxRequest request);
+
   /// Build an unsigned burn transaction. The backend branches on
   /// [BurnTxRequest.tokenStandard] (`mpl_token_metadata::BurnV1`
   /// for Nft/Pnft singles, `BurnEditionNft` for print editions,
@@ -151,6 +160,12 @@ abstract class MallowApiV2Client {
   @GET('/auctions/{mint}')
   Future<ApiResponse<RawAccountRecord?>> getAuctionState(@Path() String mint);
 
+  /// Average time between Solana slots, measured by the backend from the
+  /// RPC's performance samples at most once a day. Turns a blockhash's
+  /// remaining blocks into seconds for the transaction-review countdown.
+  @GET('/solana/slot-time')
+  Future<ApiResponse<SolanaSlotTime>> getSolanaSlotTime();
+
   /// Read a single decoded on-chain program account directly from the chain
   /// (server derives nothing — pass the account's own address/PDA). Returns
   /// `{ result: { viewSlot, account } }` where `account` is the flat
@@ -210,6 +225,40 @@ abstract class MallowApiV2Client {
   /// SPL-token (e.g. USDC) offers.
   @POST('/tx/offers/create')
   Future<ApiResponse<UnsignedTxResponse>> createOfferTx(@Body() CreateOfferTxRequest request);
+
+  /// Read the bidder's available currency refunds.
+  @GET('/auctions/bid-refunds/{bidder}')
+  Future<ApiResponse<BidRefundsResponse>> getBidRefunds(@Path('bidder') String bidder);
+
+  /// Read the refund claims whose account deposits this wallet paid.
+  @GET('/auctions/bid-refund-claims/{rentPayer}')
+  Future<ApiResponse<BidRefundClaimsResponse>> getBidRefundClaims(
+    @Path('rentPayer') String rentPayer,
+  );
+
+  /// Build an unsigned bid-refund withdrawal transaction.
+  @POST('/tx/auctions/withdraw-bid-refund')
+  Future<ApiResponse<UnsignedTxResponse>> withdrawBidRefundTx(
+    @Body() WithdrawBidRefundTxRequest request,
+  );
+
+  /// Build an unsigned transaction releasing a SOL refund to its recorded bidder.
+  @POST('/tx/auctions/push-sol-bid-refund')
+  Future<ApiResponse<UnsignedTxResponse>> pushSolBidRefundTx(
+    @Body() PushSolBidRefundTxRequest request,
+  );
+
+  /// Release a token refund to a bidder-owned account without their signature.
+  @POST('/tx/auctions/push-bid-refund')
+  Future<ApiResponse<UnsignedTxResponse>> pushBidRefundTx(
+    @Body(nullToAbsent: true) PushBidRefundTxRequest request,
+  );
+
+  /// Build an unsigned transaction returning an empty claim's deposit to its payer.
+  @POST('/tx/auctions/close-bid-refund-claim')
+  Future<ApiResponse<UnsignedTxResponse>> closeBidRefundClaimTx(
+    @Body() CloseBidRefundClaimTxRequest request,
+  );
 
   /// Build an unsigned cancel-offer transaction.
   @POST('/tx/offers/cancel')
@@ -362,6 +411,16 @@ abstract class MallowApiV2Client {
     @Body() PortfolioGroupsRequest request,
   );
 
+  /// Ask the backend to refresh the tokens a landed transaction delivered to
+  /// [PortfolioReceivedRequest.address]. The backend verifies the transaction
+  /// against the chain's indexer, so a purchase reaches the portfolio reads
+  /// above in seconds instead of at the next login import. `pending` means
+  /// the indexer has not seen the transaction yet.
+  @POST('/portfolio/received')
+  Future<ApiResponse<PortfolioReceivedResult>> postPortfolioReceived(
+    @Body() PortfolioReceivedRequest request,
+  );
+
   // --- Mobile feeds (public, multi-address) ---
   //
   // Ported from nodejs v1 /v1/mobile/*. Public — no auth. [addresses] is a
@@ -407,9 +466,11 @@ abstract class MallowApiV2Client {
   /// parameter, so the caller must be logged in as the account being deleted.
   ///
   /// Scope is the **profile document**: username, display name, bio, avatar,
-  /// banner, website, Twitter link and roles are cleared. Wallets, artworks,
-  /// curations, listings, offers and on-chain history are untouched and stay
-  /// indexed against the raw address. Not reversible.
+  /// banner, website, Twitter link and roles are cleared. One role is kept: a
+  /// marketplace restriction placed on the account, which deleting the profile
+  /// must not lift. Wallets, artworks, curations, listings, offers and on-chain
+  /// history are untouched and stay indexed against the raw address. Not
+  /// reversible.
   ///
   /// The backend also clears the `login-token` cookie on the response, so the
   /// caller must drop its own session state (see `AuthService.logout`) rather

@@ -40,7 +40,7 @@ class _MockTokenBalanceBloc
     extends MockBloc<TokenBalanceEvent, TokenBalanceState>
     implements TokenBalanceBloc {}
 
-/// Permissive kill-switch config. The entry gates added in Phase 4c read
+/// Permissive kill-switch config. The flow entry gates read
 /// [RemoteConfigService] before dispatching, so it must be in GetIt; nothing
 /// is killed here, which keeps behaviour identical to the pre-kill-switch
 /// baseline these tests were written against.

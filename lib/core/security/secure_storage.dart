@@ -682,7 +682,7 @@ class SecureWalletStorage {
     } catch (e) {
       AppLogger.warn(
         'SecureStorage',
-        'Failed to migrate a legacy item into the vault: $e',
+        'Failed to migrate a legacy item into the vault: ${e.runtimeType}',
       );
     }
     return legacy;
@@ -702,7 +702,7 @@ class SecureWalletStorage {
     } catch (e) {
       AppLogger.warn(
         'SecureStorage',
-        'Failed to drop the legacy plugin-store copy: $e',
+        'Failed to drop the legacy plugin-store copy: ${e.runtimeType}',
       );
     }
   }
@@ -718,6 +718,56 @@ class SecureWalletStorage {
   /// The recovery graph, the PIN hash and the biometric flag were moved to the
   /// vault for exactly that reason. What stays here is re-creatable by a fresh
   /// login, onboarding or sync.
+  /// Encrypted device-wide browser bookmarks and safe tab restoration records.
+  Future<String?> loadBrowserMetadata() => _read('mallow_browser_metadata_v1');
+
+  Future<void> storeBrowserMetadata(String value) =>
+      _write('mallow_browser_metadata_v1', value);
+
+  Future<void> deleteBrowserMetadata() => _delete('mallow_browser_metadata_v1');
+
+  /// HTTP authentication details, kept separately from browser metadata so
+  /// restoring or closing tabs cannot discard saved passwords.
+  Future<String?> loadBrowserHttpCredentials() =>
+      _read('browser.http_credentials.v1');
+
+  Future<void> storeBrowserHttpCredentials(String value) =>
+      _write('browser.http_credentials.v1', value);
+
+  Future<void> deleteBrowserHttpCredentials() =>
+      _delete('browser.http_credentials.v1');
+
+  /// Re-creatable Beacon transport identity and origin-bound public peers.
+  /// These keys never derive or sign a wallet operation.
+  Future<String?> loadBrowserBeaconState() => _read('browser.beacon.v1');
+  Future<void> storeBrowserBeaconState(String value) =>
+      _write('browser.beacon.v1', value);
+  Future<void> deleteBrowserBeaconState() => _delete('browser.beacon.v1');
+
+  Future<String?> loadPendingOpenSeaPurchase() => _storage.read(
+    key: 'mallow.opensea.pending_purchase.v1',
+    iOptions: _iosOptions,
+    aOptions: _androidOptionsNoReset,
+  );
+
+  Future<void> storePendingOpenSeaPurchase(String value) =>
+      _write('mallow.opensea.pending_purchase.v1', value);
+
+  Future<void> deletePendingOpenSeaPurchase() =>
+      _delete('mallow.opensea.pending_purchase.v1');
+
+  Future<String?> loadPendingMagicEdenPurchase() => _storage.read(
+    key: 'mallow.magic_eden.pending_purchase.v1',
+    iOptions: _iosOptions,
+    aOptions: _androidOptionsNoReset,
+  );
+
+  Future<void> storePendingMagicEdenPurchase(String value) =>
+      _write('mallow.magic_eden.pending_purchase.v1', value);
+
+  Future<void> deletePendingMagicEdenPurchase() =>
+      _delete('mallow.magic_eden.pending_purchase.v1');
+
   Future<void> _write(String key, String value) => _storage.write(
     key: key,
     value: value,
@@ -963,7 +1013,7 @@ class SecureWalletStorage {
       // reads the backup again.
       AppLogger.warn(
         'SecureStorage',
-        'Failed to re-write the DB key to the primary store: $e',
+        'Failed to re-write the DB key to the primary store: ${e.runtimeType}',
       );
     }
     return backup;
@@ -981,7 +1031,10 @@ class SecureWalletStorage {
         await _vault.write(_dbEncryptionKeyKey, hexKey);
       }
     } catch (e) {
-      AppLogger.warn('SecureStorage', 'DB key backup maintenance failed: $e');
+      AppLogger.warn(
+        'SecureStorage',
+        'DB key backup maintenance failed: ${e.runtimeType}',
+      );
     }
   }
 
@@ -1055,6 +1108,12 @@ class SecureWalletStorage {
       deletePin(),
       deleteLoginToken(),
       deleteSessionExpiry(),
+      deleteBrowserMetadata(),
+      deleteBrowserHttpCredentials(),
+      deleteBrowserBeaconState(),
+      _delete('browser.dapp_grants.v1'),
+      _delete('browser.certificate_exceptions.v1'),
+      _delete('browser.certificate_exceptions.v2'),
       deleteSelectedWallet(),
       deleteSelectedAccountId(),
       deleteSelectedWalletId(),

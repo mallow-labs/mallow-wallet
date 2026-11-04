@@ -3,8 +3,10 @@ import 'dart:typed_data';
 
 import 'package:ledger_flutter_plus/ledger_flutter_plus.dart';
 
+import 'eip712/eip712_ledger_frames.dart';
 import 'ethereum_apdu.dart';
 import 'models/ethereum_derivation_path.dart';
+import 'operations/ethereum_frame_operation.dart';
 import 'operations/ethereum_get_address_operation.dart';
 import 'operations/ethereum_sign_personal_message_operation.dart';
 import 'operations/ethereum_sign_transaction_operation.dart';
@@ -109,6 +111,52 @@ class EthereumLedgerApp {
 
     return signature;
   }
+
+  /// EIP-712 `eth_signTypedData_v4` of [message] at `m/44'/60'/0'/0/{account}`,
+  /// hashed on the device (Ethereum app 1.9.19 or later).
+  ///
+  /// Streams every struct definition and value, one APDU per operation (see
+  /// [eip712LedgerFrames]); with the app's Raw messages setting on, the
+  /// device shows the domain and message fields as they arrive, so a value
+  /// APDU can wait on the user, and a rejection can come back on any of them. Returns the 65-byte `r‖s‖v` (v normalized to
+  /// {27, 28}) once the user approves.
+  Future<Uint8List> signTypedData(
+    LedgerConnection connection, {
+    required Eip712LedgerMessage message,
+    int account = 0,
+  }) async {
+    final frames = eip712LedgerFrames(
+      message,
+      EthereumDerivationPath(account: account).toBytes(),
+    );
+    var signature = Uint8List(0);
+    for (final frame in frames) {
+      final result = await connection.sendOperation(
+        EthereumFrameOperation(frame),
+      );
+      if (frame.returnsSignature) signature = result;
+    }
+    return signature;
+  }
+
+  /// EIP-712 signature over a host-computed [domainSeparator] and
+  /// [messageHash], for Ethereum app versions before 1.9.19. The device
+  /// shows the two hashes rather than the fields. Returns `r‖s‖v`.
+  Future<Uint8List> signTypedDataHashes(
+    LedgerConnection connection, {
+    required Uint8List domainSeparator,
+    required Uint8List messageHash,
+    int account = 0,
+  }) =>
+      connection.sendOperation(
+        EthereumFrameOperation(
+          eip712LedgerHashesFrame(
+            EthereumDerivationPath(account: account).toBytes(),
+            domainSeparator: domainSeparator,
+            messageHash: messageHash,
+          ),
+        ),
+      );
 
   /// Sign the RLP-serialized unsigned [rawTx] at `m/44'/60'/0'/0/{account}`.
   ///

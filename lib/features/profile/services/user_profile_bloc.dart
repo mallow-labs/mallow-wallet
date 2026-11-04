@@ -13,7 +13,6 @@ import 'package:mallow_api/mallow_api.dart' show $ExploreFilterCopyWith;
 
 import '../../../core/models/account.dart';
 import '../../../core/network/auth_service.dart';
-import '../../../core/network/hardware_verify_controller.dart';
 import '../../../core/result/app_failure.dart';
 import '../../../core/result/result.dart';
 import '../../../core/session/session_manager.dart';
@@ -187,12 +186,8 @@ sealed class UserProfileState with _$UserProfileState {
 /// BLoC for the user profile screen.
 @injectable
 class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
-  UserProfileBloc(
-    this._repository,
-    this._curationRepository,
-    this._authService,
-    this._hardwareVerifyController,
-  ) : super(const UserProfileState.initial()) {
+  UserProfileBloc(this._repository, this._curationRepository, this._authService)
+    : super(const UserProfileState.initial()) {
     on<UserProfileLoad>(_onLoad);
     on<UserProfileLoadByUsername>(_onLoadByUsername);
     on<UserProfileChangeTab>(_onChangeTab);
@@ -256,7 +251,6 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
   final UserProfileRepository _repository;
   final CurationRepository _curationRepository;
   final AuthService _authService;
-  final HardwareVerifyController _hardwareVerifyController;
 
   StreamSubscription<void>? _curationsSignalSub;
   StreamSubscription<String>? _editedSignalSub;
@@ -291,6 +285,12 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
   // load-more captures it before its await and drops its page if it changed —
   // a replacing fetch (reopen, refresh, filter change) then owns the slice.
   int _listedGen = 0;
+
+  // Staleness guard for the private-curations gate. A completed hardware
+  // verify bumps it; a load captures it before resolving the gate and, if it
+  // changed, leaves the curation groups and the CTA to the verify — the load's
+  // own answers were computed before the wallet-sig existed.
+  int _curationsVerifyGen = 0;
 
   String? _currentAddress;
 
@@ -554,6 +554,7 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
         linkedAddresses: profile.linkedAddresses,
       );
       final collectionsF = _repository.getUserCollections(addresses);
+      final verifyGen = _curationsVerifyGen;
       // Resolve the own-profile private-curation gate first: it silently
       // verifies a locally-signable session wallet when none is verified yet,
       // so the curation fetch below authorizes via the freshly-attached cookie
@@ -581,7 +582,19 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
         final curationResult = await curationsF;
         final needsVerify = await needsVerifyF;
         if (isClosed) return;
-        final result = [...collections, ...curationResult.groups];
+        // A verify that completed while this load was in flight already
+        // refetched the curations with its wallet-sig and took the CTA down.
+        // The gate answer and the curation list held here predate that sig, so
+        // applying them would re-raise the CTA and drop the private curations
+        // the user just unlocked.
+        final verifiedMeanwhile = _curationsVerifyGen != verifyGen;
+        final result = [
+          ...collections,
+          if (verifiedMeanwhile)
+            ..._allGroups.where((g) => g.type == ArtGroupType.curation)
+          else
+            ...curationResult.groups,
+        ];
         freshGroups = result;
         _allGroups = result;
 
@@ -590,8 +603,12 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
           emit(
             currentState.copyWith(
               groups: _sortGroups(result, currentState.activeSort),
-              curationsError: curationResult.error,
-              showVerifyPrivateCurationsCta: needsVerify,
+              curationsError: verifiedMeanwhile
+                  ? currentState.curationsError
+                  : curationResult.error,
+              showVerifyPrivateCurationsCta: verifiedMeanwhile
+                  ? currentState.showVerifyPrivateCurationsCta
+                  : needsVerify,
             ),
           );
         }
@@ -731,9 +748,14 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
     // Scope to the session wallets that are part of the VIEWED profile — only
     // those can unlock its private curations (the backend requires the proof to
     // be for one of the viewed profile's wallets, not any session wallet).
-    final profileAddrs = <String>{ownerAddress, ...linkedAddresses};
+    // Compared as backend owner keys: an EVM wallet is stored checksummed,
+    // while the profile's linked EVM addresses can arrive lowercased.
+    final profileAddrs = <String>{
+      ownerAddress,
+      ...linkedAddresses,
+    }.map(apiOwnerAddress).toSet();
     final scopedWallets = session.sessionWallets
-        .where((w) => profileAddrs.contains(w.address))
+        .where((w) => profileAddrs.contains(apiOwnerAddress(w.address)))
         .toList();
     final scopedAddrs = scopedWallets.map((w) => w.address).toSet();
     if (scopedAddrs.isEmpty) return false;
@@ -833,15 +855,17 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
     // necessarily the active signer): only such a wallet's sig unlocks this
     // profile's private curations, and the CTA only shows when hardware wallets
     // are all that remain. No active switch.
+    // Owner keys on both sides, as in [_resolvePrivateCurationsGate].
     final profileAddrs = <String>{
       currentState.profile.address,
       ...currentState.profile.linkedAddresses,
-    };
+    }.map(apiOwnerAddress).toSet();
     final hardwareWallet = sl.isRegistered<SessionManager>()
         ? sl<SessionManager>().sessionWallets
               .where(
                 (w) =>
-                    w.walletType.isHardware && profileAddrs.contains(w.address),
+                    w.walletType.isHardware &&
+                    profileAddrs.contains(apiOwnerAddress(w.address)),
               )
               .firstOrNull
         : null;
@@ -856,15 +880,20 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
       }
       return;
     }
+    // Sign, not just ask: Seed Vault's and Keystone's verify sheets collect
+    // consent and sign nothing, so treating that sheet's answer as "verified"
+    // refetched without a wallet-sig. signAndVerifyForWallet runs each device's
+    // whole handshake — Ledger's sheet, the Seed Vault approval, the Keystone
+    // QR exchange — straight from this tap, and caches the sig.
     var verified = false;
     try {
-      // The wallet is in hand, so name its device rather than making the
-      // controller re-resolve it: the sheet's copy has to match the device the
-      // user actually holds.
-      verified = await _hardwareVerifyController.requestVerification(
+      await _authService.signAndVerifyForWallet(
+        hardwareWallet.id,
         hardwareWallet.address,
-        walletType: hardwareWallet.walletType,
       );
+      verified = true;
+    } on HardwareVerificationCancelledException {
+      // The device's own sheet already said why.
     } catch (e) {
       debugPrint('[UserProfileBloc] Hardware verification failed: $e');
     }
@@ -887,6 +916,10 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
       ),
     );
     if (isClosed) return;
+    // Supersede a load of this same profile that is still in flight. A load
+    // of a different profile keeps its own answers: these curations are not
+    // that profile's.
+    if (_currentAddress == ownerAddress) _curationsVerifyGen++;
     _allGroups = [
       ..._allGroups.where((g) => g.type != ArtGroupType.curation),
       ...curationResult.groups,

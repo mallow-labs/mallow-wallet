@@ -48,6 +48,7 @@ class SeedVaultAccountPickerView extends StatelessWidget {
                 accounts: state.accounts,
                 selectedKeys: selectedKeys,
                 baseCounter: state.baseCounter,
+                customNames: state.customNames,
               );
 
               return Column(
@@ -84,6 +85,9 @@ class SeedVaultAccountPickerView extends StatelessWidget {
                           onToggleAccount: (i) => context
                               .read<SeedVaultConnectBloc>()
                               .add(SeedVaultToggleAccount(i)),
+                          onRename: (name) => context
+                              .read<SeedVaultConnectBloc>()
+                              .add(SeedVaultRenameAccount(account.index, name)),
                         );
                       },
                     ),

@@ -86,12 +86,22 @@ class PortfolioRepository {
   /// [sort] is applied by the backend across the whole verified set before the
   /// page is cut, so alphabetical order spans every page — not just the ones
   /// already scrolled, which is all a client-side sort could reach.
+  ///
+  /// [chain] asks only the session's wallets on that chain, so the page holds
+  /// that chain's artworks alone. Filtering an unscoped page instead would
+  /// miss the ones the server put on a later page.
   Future<PortfolioArtworksResult> getOwnedArtworks({
     int page = 0,
     api.ExploreFilter? filter,
     PortfolioSortOption sort = PortfolioSortOption.recent,
+    Chain? chain,
   }) async {
-    final owners = _sessionAddresses();
+    final owners = [
+      for (final address in _sessionAddresses())
+        // Session addresses are wallet addresses, so the shape names the
+        // chain; this is not the guess it would be for arbitrary text.
+        if (chain == null || Chain.fromAddress(address) == chain) address,
+    ];
     if (owners.isEmpty) {
       return const PortfolioArtworksResult(artworks: [], total: 0);
     }
@@ -136,7 +146,10 @@ class PortfolioRepository {
     // on the cache write.
     // A re-ordered page 0 is a query session too: caching it would make the
     // next cold start paint alphabetically under a "Recent" label.
-    if (page == 0 && filter == null && sort == PortfolioSortOption.recent) {
+    if (page == 0 &&
+        filter == null &&
+        chain == null &&
+        sort == PortfolioSortOption.recent) {
       unawaited(_cacheSection(_artworksSection, response.toJson()));
     }
 

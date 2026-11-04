@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:get_it/get_it.dart';
+import 'package:keystone_ur/keystone_ur.dart';
 import 'package:mallow_api/mallow_api.dart';
 import 'package:mallow_wallet/core/config/remote_config.dart';
 import 'package:mallow_wallet/core/crypto/wallet_manager.dart';
@@ -9,6 +11,7 @@ import 'package:mallow_wallet/core/network/solana_rpc_service.dart';
 import 'package:mallow_wallet/core/result/app_failure.dart';
 import 'package:mallow_wallet/core/result/result.dart';
 import 'package:mallow_wallet/core/security/transaction_auth_gate.dart';
+import 'package:mallow_wallet/core/services/keystone_sign_service.dart';
 import 'package:mallow_wallet/core/services/ledger_service.dart';
 import 'package:mallow_wallet/core/services/stale_tx_tracker.dart';
 import 'package:mallow_wallet/core/services/transaction_executor.dart';
@@ -47,6 +50,47 @@ class _DenyAuthGate implements TransactionAuthGate {
     required double? usdValue,
     required FlowKey flow,
   }) async => TransactionAuthOutcome.cancelled;
+}
+
+/// Exercise the real signing primitive without waiting ten seconds per prompt.
+/// Only the duration threshold changes; signing, validity checks and broadcast
+/// still run against the same dependencies as the production pipeline.
+class _CheckEverySignaturePipeline extends TransactionPipeline {
+  _CheckEverySignaturePipeline(
+    this.wallet,
+    this.rpc,
+    MallowApiClient api,
+    LedgerService ledger,
+  ) : super(wallet, rpc, _AllowAllAuthGate(), api, ledger);
+
+  final WalletManager wallet;
+  final SolanaRpcService rpc;
+
+  @override
+  Future<Result<String, AppFailure>> signAndBroadcast({
+    required String unsignedTxBase64,
+    required double? usdValue,
+    required FlowKey flow,
+    List<Ed25519HDKeyPair> additionalSigners = const [],
+    void Function()? onSigned,
+    void Function(LedgerSigningState)? onLedgerSigning,
+    bool useLedger = true,
+    SolanaRpcService? rpcOverride,
+    bool Function()? discardSignatureIf,
+  }) => Result.guard(
+    () => signSendConfirm(
+      unsignedTxBase64,
+      walletManager: wallet,
+      rpcService: rpcOverride ?? rpc,
+      authGate: _AllowAllAuthGate(),
+      usdValue: usdValue,
+      flow: flow,
+      additionalSigners: additionalSigners,
+      onSigned: onSigned,
+      discardSignatureIf: discardSignatureIf,
+      slowSigningThreshold: Duration.zero,
+    ),
+  );
 }
 
 String get _placeholderBlockhash => base58encode(Uint8List(32));
@@ -141,6 +185,9 @@ void main() {
     signer = signerKp.publicKey;
     recipient = recipientKp.publicKey;
     when(() => ledger.signingState).thenAnswer((_) => const Stream.empty());
+    // Non-Keystone by default: only its QR round trip uses the post-sign
+    // staleness discard, and only the tests about it turn that on.
+    when(() => wallet.activeSignerIsKeystone()).thenAnswer((_) async => false);
   });
 
   TransactionExecutor buildExecutor({TransactionAuthGate? authGate}) {
@@ -174,6 +221,231 @@ void main() {
   }
 
   group('TransactionExecutor.execute', () {
+    group('client-refreshed Keystone expiry', () {
+      late KeystoneSignController controller;
+      late List<KeystoneSignPrompt> prompts;
+      late List<String> signedBlockhashes;
+      late List<String> sentBlockhashes;
+      late String txBase64;
+
+      setUp(() {
+        controller = KeystoneSignController();
+        GetIt.instance.registerSingleton<KeystoneSignController>(controller);
+        addTearDown(() async {
+          await GetIt.instance.unregister<KeystoneSignController>();
+          controller.dispose();
+        });
+        prompts = [];
+        final sub = controller.requests.listen((prompt) {
+          prompts.add(prompt);
+          prompt.completer.complete(prompt.request);
+        });
+        addTearDown(sub.cancel);
+        signedBlockhashes = [];
+        sentBlockhashes = [];
+        txBase64 = _buildSignedTx(
+          blockhash: _placeholderBlockhash,
+          signer: signer,
+          recipient: recipient,
+        ).encode();
+        var refreshes = 0;
+        when(() => rpc.getLatestBlockhash()).thenAnswer(
+          (_) async =>
+              base58encode(Uint8List(32)..fillRange(0, 32, ++refreshes)),
+        );
+        when(
+          () => wallet.activeSignerIsKeystone(),
+        ).thenAnswer((_) async => true);
+        when(
+          () => wallet.signCompiledTx(
+            unsignedTx: any(named: 'unsignedTx'),
+            additionalSigners: any(named: 'additionalSigners'),
+          ),
+        ).thenAnswer((inv) async {
+          final tx = inv.namedArguments[#unsignedTx] as SignedTx;
+          signedBlockhashes.add(tx.compiledMessage.recentBlockhash);
+          await controller.present(
+            KeystoneSignPrompt(
+              request: SolSignRequest(
+                requestId: SolSignRequest.newRequestId(),
+                signData: Uint8List.fromList(
+                  tx.compiledMessage.toByteArray().toList(),
+                ),
+                path: KeystoneKeypath.parse(
+                  "m/44'/501'/0'/0'",
+                  sourceFingerprint: 0x12121212,
+                ),
+              ).toUr(),
+              purpose: KeystoneSignPurpose.transaction,
+              address: signer.toBase58(),
+              validate: (_) async => null,
+            ),
+          );
+          return SignedTx(
+            signatures: [Signature(List<int>.filled(64, 7), publicKey: signer)],
+            compiledMessage: tx.compiledMessage,
+          );
+        });
+        when(() => rpc.sendTransaction(any())).thenAnswer((inv) async {
+          final tx = inv.positionalArguments.first as SignedTx;
+          sentBlockhashes.add(tx.compiledMessage.recentBlockhash);
+          return 'sig';
+        });
+        when(
+          () => rpc.awaitConfirmationOrThrow(
+            any(),
+            rebroadcast: any(named: 'rebroadcast'),
+          ),
+        ).thenAnswer((_) async {});
+      });
+
+      TransactionExecutor executor() => TransactionExecutor(
+        _CheckEverySignaturePipeline(wallet, rpc, api, ledger),
+      );
+
+      test(
+        'expired co-signed mint stops without retrying the same bytes',
+        () async {
+          final coSigned = _buildSignedTx(
+            blockhash: _placeholderBlockhash,
+            signer: signer,
+            recipient: recipient,
+            preAttachedSignature: true,
+          ).encode();
+          when(
+            () => rpc.isBlockhashStillValid(_placeholderBlockhash),
+          ).thenAnswer((_) async => false);
+
+          final result = await executor().execute(
+            txsBase64: [coSigned],
+            usdValue: null,
+            flow: const FlowKey.solana(AppFlow.nftMint),
+            useLedger: false,
+          );
+
+          expect(result.errorOrNull?.cause, isA<SignedTooLateException>());
+          expect(
+            result.errorOrNull?.message,
+            'That took too long, so the transaction expired. Try again.',
+          );
+          expect(signedBlockhashes, [_placeholderBlockhash]);
+          expect(prompts, hasLength(1));
+          expect(sentBlockhashes, isEmpty);
+          verifyNever(() => rpc.getLatestBlockhash());
+        },
+      );
+
+      test(
+        'co-signed edit expires after LUT setup without repeating either tx',
+        () async {
+          final setup = _lutSetupTxBase64(payer: signer, table: recipient);
+          final edit = _buildSignedTx(
+            blockhash: _placeholderBlockhash,
+            signer: signer,
+            recipient: recipient,
+            preAttachedSignature: true,
+          ).encode();
+          when(() => rpc.isBlockhashStillValid(any())).thenAnswer(
+            (inv) async =>
+                inv.positionalArguments.single != _placeholderBlockhash,
+          );
+
+          final result = await executor().execute(
+            txsBase64: [setup, edit],
+            usdValue: null,
+            flow: const FlowKey.solana(AppFlow.nftEdit),
+            useLedger: false,
+          );
+
+          expect(result.errorOrNull?.cause, isA<SignedTooLateException>());
+          expect(signedBlockhashes, hasLength(2));
+          expect(sentBlockhashes, [signedBlockhashes.first]);
+          expect(prompts.map((p) => p.index), [0, 1]);
+          expect(prompts.map((p) => p.total), [2, 2]);
+          verify(() => rpc.getLatestBlockhash()).called(1);
+          verify(
+            () => rpc.isBlockhashStillValid(_placeholderBlockhash),
+          ).called(1);
+          verify(
+            () => rpc.awaitConfirmationOrThrow(
+              'sig',
+              rebroadcast: any(named: 'rebroadcast'),
+            ),
+          ).called(1);
+        },
+      );
+
+      test(
+        'refreshes again after expiry and shows a scoped retry notice',
+        () async {
+          var validityChecks = 0;
+          when(
+            () => rpc.isBlockhashStillValid(any()),
+          ).thenAnswer((_) async => ++validityChecks > 1);
+
+          final result = await executor().execute(
+            txsBase64: [txBase64, txBase64],
+            usdValue: null,
+            flow: const FlowKey.solana(AppFlow.nftTransfer),
+            useLedger: false,
+          );
+
+          expect(result.valueOrNull, 'sig');
+          expect(signedBlockhashes, hasLength(3));
+          expect(signedBlockhashes.toSet(), hasLength(3));
+          expect(sentBlockhashes, signedBlockhashes.sublist(1));
+          expect(prompts.map((p) => p.index), [0, 0, 1]);
+          expect(prompts.map((p) => p.total), [2, 2, 2]);
+          expect(prompts.map((p) => p.notice), [
+            null,
+            'That took too long, so the transaction expired before it was sent. '
+                'Approve it again on your Keystone.',
+            null,
+          ]);
+          verify(() => rpc.getLatestBlockhash()).called(3);
+          verify(() => rpc.isBlockhashStillValid(any())).called(3);
+        },
+      );
+
+      test(
+        'stops after two retries without sending an expired signature',
+        () async {
+          when(
+            () => rpc.isBlockhashStillValid(any()),
+          ).thenAnswer((_) async => false);
+
+          final result = await executor().execute(
+            txsBase64: [txBase64],
+            usdValue: null,
+            flow: const FlowKey.solana(AppFlow.nftTransfer),
+            useLedger: false,
+          );
+
+          expect(result.errorOrNull?.cause, isA<SignedTooLateException>());
+          expect(
+            result.errorOrNull?.message,
+            'That took too long, so the transaction expired. Try again.',
+          );
+          expect(signedBlockhashes, hasLength(3));
+          expect(prompts, hasLength(3));
+          expect(prompts.first.notice, isNull);
+          expect(prompts.skip(1).every((p) => p.notice != null), isTrue);
+          expect(
+            prompts.every((p) => p.index == null && p.total == null),
+            isTrue,
+          );
+          expect(sentBlockhashes, isEmpty);
+          verify(() => rpc.getLatestBlockhash()).called(3);
+          verifyNever(
+            () => rpc.awaitConfirmationOrThrow(
+              any(),
+              rebroadcast: any(named: 'rebroadcast'),
+            ),
+          );
+        },
+      );
+    });
+
     test('returns failure when txsBase64 is empty', () async {
       final executor = buildExecutor();
       final result = await executor.execute(
@@ -535,6 +807,276 @@ void main() {
     // rewrite the blockhash: without a rebuild inside the loop chunk k dies
     // with "Blockhash not found" and the collection edit is left HALF
     // APPLIED, with nothing on screen saying which artworks moved.
+    // A Keystone signature is a QR round trip that can outlast the tracker's
+    // window. The pre-sign refresh only sees the age when signing starts, so
+    // a co-signed tx would otherwise be broadcast after it had expired.
+    group('a signature that arrives too late', () {
+      late String stale;
+      late String fresh;
+      late DateTime now;
+
+      setUp(() {
+        now = DateTime.utc(2026, 1, 1);
+        stale = _buildSignedTx(
+          blockhash: _placeholderBlockhash,
+          signer: signer,
+          recipient: recipient,
+          preAttachedSignature: true,
+        ).encode();
+        fresh = _buildSignedTx(
+          blockhash: base58encode(Uint8List(32)..fillRange(0, 32, 9)),
+          signer: signer,
+          recipient: recipient,
+          preAttachedSignature: true,
+        ).encode();
+      });
+
+      /// Advances time by [delays] (one per call, the last repeating) and records
+      /// what was signed and what was broadcast.
+      ({List<String> signed, List<String> sent}) stubSlowSigner(
+        List<Duration> delays, {
+        KeystoneSignController? controller,
+      }) {
+        // Only Keystone discards a signature after crossing this window.
+        when(
+          () => wallet.activeSignerIsKeystone(),
+        ).thenAnswer((_) async => true);
+        final signed = <String>[];
+        final sent = <String>[];
+        var call = 0;
+        when(
+          () => rpc.getLatestBlockhash(),
+        ).thenAnswer((_) async => _placeholderBlockhash);
+        when(
+          () => wallet.signCompiledTx(
+            unsignedTx: any(named: 'unsignedTx'),
+            additionalSigners: any(named: 'additionalSigners'),
+          ),
+        ).thenAnswer((inv) async {
+          final delay = delays[call < delays.length ? call : delays.length - 1];
+          call++;
+          final tx = inv.namedArguments[#unsignedTx] as SignedTx;
+          if (controller != null) {
+            await controller.present(
+              KeystoneSignPrompt(
+                request: SolSignRequest(
+                  requestId: SolSignRequest.newRequestId(),
+                  signData: Uint8List.fromList(
+                    tx.compiledMessage.toByteArray().toList(),
+                  ),
+                  path: KeystoneKeypath.parse(
+                    "m/44'/501'/0'/0'",
+                    sourceFingerprint: 0x12121212,
+                  ),
+                ).toUr(),
+                purpose: KeystoneSignPurpose.transaction,
+                address: signer.toBase58(),
+                validate: (_) async => null,
+              ),
+            );
+          }
+          now = now.add(delay);
+          signed.add(tx.encode());
+          return tx;
+        });
+        when(() => rpc.sendTransaction(any())).thenAnswer((inv) async {
+          sent.add((inv.positionalArguments.first as SignedTx).encode());
+          return 'sig';
+        });
+        when(
+          () => rpc.awaitConfirmationOrThrow(
+            any(),
+            rebroadcast: any(named: 'rebroadcast'),
+          ),
+        ).thenAnswer((_) async {});
+        return (signed: signed, sent: sent);
+      }
+
+      test('discards it unsent, rebuilds, and signs the fresh tx', () async {
+        final calls = stubSlowSigner([
+          const Duration(milliseconds: 80),
+          Duration.zero,
+        ]);
+        var builds = 0;
+        final tracker = StaleTxTracker<List<String>>(
+          now: () => now,
+          staleAfter: const Duration(milliseconds: 40),
+        );
+        await tracker.buildAndTrack(
+          () async => builds++ == 0 ? [stale] : [fresh],
+        );
+
+        final result = await buildExecutor().execute(
+          txsBase64: [stale],
+          usdValue: null,
+          flow: const FlowKey.solana(AppFlow.editionBuy),
+          tracker: tracker,
+        );
+
+        expect(result.valueOrNull, 'sig');
+        expect(calls.signed, [stale, fresh]);
+        expect(calls.sent, [
+          fresh,
+        ], reason: 'the late signature must never reach the network');
+      });
+
+      test(
+        'rebuilt Keystone prompts explain expiry and retain batch position',
+        () async {
+          final controller = KeystoneSignController();
+          GetIt.instance.registerSingleton<KeystoneSignController>(controller);
+          addTearDown(() async {
+            await GetIt.instance.unregister<KeystoneSignController>();
+            controller.dispose();
+          });
+          final prompts = <KeystoneSignPrompt>[];
+          final sub = controller.requests.listen((prompt) {
+            prompts.add(prompt);
+            prompt.completer.complete(prompt.request);
+          });
+          addTearDown(sub.cancel);
+          final calls = stubSlowSigner([
+            const Duration(milliseconds: 80),
+            Duration.zero,
+          ], controller: controller);
+          var builds = 0;
+          final tracker = StaleTxTracker<List<String>>(
+            now: () => now,
+            staleAfter: const Duration(milliseconds: 40),
+          );
+          await tracker.buildAndTrack(
+            () async => builds++ == 0 ? [stale, stale] : [fresh, fresh],
+          );
+
+          final executor = buildExecutor();
+          final result = await executor.execute(
+            txsBase64: [stale, stale],
+            usdValue: null,
+            flow: const FlowKey.solana(AppFlow.editionBuy),
+            tracker: tracker,
+          );
+
+          expect(result.valueOrNull, 'sig');
+          expect(calls.signed, [stale, fresh, fresh]);
+          expect(calls.sent, [fresh, fresh]);
+          expect(prompts.map((p) => p.index), [0, 0, 1]);
+          expect(prompts.map((p) => p.total), [2, 2, 2]);
+          expect(prompts.map((p) => p.notice), [
+            null,
+            'That took too long, so the transaction expired before it was sent. '
+                'Approve it again on your Keystone.',
+            null,
+          ]);
+
+          final later = await executor.execute(
+            txsBase64: [fresh],
+            usdValue: null,
+            flow: const FlowKey.solana(AppFlow.editionBuy),
+          );
+          expect(later.valueOrNull, 'sig');
+          expect(prompts.last.notice, isNull);
+          expect(prompts.last.index, isNull);
+          expect(prompts.last.total, isNull);
+        },
+      );
+
+      test('gives up after two rebuilds with a readable error', () async {
+        final calls = stubSlowSigner([const Duration(milliseconds: 60)]);
+        final tracker = StaleTxTracker<List<String>>(
+          now: () => now,
+          staleAfter: const Duration(milliseconds: 20),
+        );
+        await tracker.buildAndTrack(() async => [stale]);
+
+        final result = await buildExecutor().execute(
+          txsBase64: [stale],
+          usdValue: null,
+          flow: const FlowKey.solana(AppFlow.editionBuy),
+          tracker: tracker,
+        );
+
+        expect(result.errorOrNull?.cause, isA<SignedTooLateException>());
+        expect(calls.signed, hasLength(3));
+        expect(calls.sent, isEmpty);
+      });
+
+      test(
+        'a Ledger signature that crosses the stale window is broadcast',
+        () async {
+          final calls = stubSlowSigner([const Duration(seconds: 40)]);
+          when(
+            () => wallet.activeSignerIsKeystone(),
+          ).thenAnswer((_) async => false);
+          when(() => wallet.isLocalSigner()).thenAnswer((_) async => false);
+          final tracker = StaleTxTracker<List<String>>(now: () => now);
+          await tracker.buildAndTrack(() async => [stale]);
+
+          final result = await buildExecutor().execute(
+            txsBase64: [stale],
+            usdValue: null,
+            flow: const FlowKey.solana(AppFlow.editionBuy),
+            tracker: tracker,
+          );
+
+          expect(result.valueOrNull, 'sig');
+          expect(calls.signed, [stale]);
+          expect(calls.sent, [stale]);
+        },
+      );
+
+      test('a local signer is not second-guessed', () async {
+        // Even if signing crosses the window, local signing must not loop.
+        final calls = stubSlowSigner([const Duration(milliseconds: 1)]);
+        when(
+          () => wallet.activeSignerIsKeystone(),
+        ).thenAnswer((_) async => false);
+        final tracker = StaleTxTracker<List<String>>(
+          now: () => now,
+          staleAfter: Duration.zero,
+        );
+        await tracker.buildAndTrack(() async => [stale]);
+
+        final result = await buildExecutor().execute(
+          txsBase64: [stale],
+          usdValue: null,
+          flow: const FlowKey.solana(AppFlow.editionBuy),
+          tracker: tracker,
+        );
+
+        expect(result.valueOrNull, 'sig');
+        expect(calls.sent, hasLength(1));
+      });
+
+      test(
+        'a tx the client can freshen itself is not second-guessed',
+        () async {
+          final unsigned = _buildSignedTx(
+            blockhash: _placeholderBlockhash,
+            signer: signer,
+            recipient: recipient,
+          ).encode();
+          final calls = stubSlowSigner([const Duration(milliseconds: 60)]);
+          final tracker = StaleTxTracker<List<String>>(
+            now: () => now,
+            staleAfter: const Duration(milliseconds: 20),
+          );
+          await tracker.buildAndTrack(() async => [unsigned]);
+
+          final result = await buildExecutor().execute(
+            txsBase64: [unsigned],
+            usdValue: null,
+            flow: const FlowKey.solana(AppFlow.tokenSend),
+            tracker: tracker,
+          );
+
+          // Its blockhash was refreshed just before signing, so the age the
+          // tracker reports says nothing about it.
+          expect(result.valueOrNull, 'sig');
+          expect(calls.sent, hasLength(1));
+        },
+      );
+    });
+
     group('mid-batch staleness (rebuildsRemainingWork)', () {
       late List<String> chunks;
       late String freshRemainder;

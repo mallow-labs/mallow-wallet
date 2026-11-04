@@ -1,8 +1,11 @@
+import 'dart:convert';
 import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mallow_wallet/core/analytics/analytics_events.dart';
 import 'package:mallow_wallet/core/config/remote_config.dart';
+import 'package:mallow_wallet/core/crypto/solana_v1_transaction.dart';
 import 'package:mallow_wallet/core/crypto/wallet_manager.dart';
 import 'package:mallow_wallet/core/network/solana_rpc_service.dart';
 import 'package:mallow_wallet/core/security/transaction_auth_gate.dart';
@@ -13,6 +16,9 @@ import 'package:solana/base58.dart';
 import 'package:solana/encoder.dart';
 import 'package:solana/solana.dart';
 
+import '../../support/recording_analytics.dart';
+import '../../support/solana_v1_fixture.dart';
+
 class _MockWalletManager extends Mock implements WalletManager {}
 
 class _MockSolanaRpcService extends Mock implements SolanaRpcService {}
@@ -20,6 +26,8 @@ class _MockSolanaRpcService extends Mock implements SolanaRpcService {}
 class _MockLedgerService extends Mock implements LedgerService {}
 
 class _FakeSignedTx extends Fake implements SignedTx {}
+
+class _FakeV1Tx extends Fake implements SolanaV1Transaction {}
 
 /// Auth gate that always allows — these tests focus on the sign/broadcast
 /// pipeline, not the gate itself (see transaction_auth_gate_test.dart).
@@ -133,6 +141,7 @@ SignedTx _unsignedTxWith(
 void main() {
   setUpAll(() {
     registerFallbackValue(_FakeSignedTx());
+    registerFallbackValue(_FakeV1Tx());
   });
 
   late _MockWalletManager wallet;
@@ -238,6 +247,297 @@ void main() {
         ).compiledMessage,
       );
       expect(hasPreAttachedSignature(tx), isFalse);
+    });
+  });
+
+  group('signSendConfirm — Keystone staleness discard', () {
+    for (final stale in <bool?>[null, false, true]) {
+      test('consults the signer only when discard verdict is $stale', () async {
+        final tx = _buildSignedTx(
+          blockhash: _placeholderBlockhash,
+          signer: signer,
+          recipient: recipient,
+          preSigned: true,
+        );
+        when(
+          () => wallet.signCompiledTx(
+            unsignedTx: any(named: 'unsignedTx'),
+            additionalSigners: any(named: 'additionalSigners'),
+          ),
+        ).thenAnswer((_) async => tx);
+        when(
+          () => wallet.activeSignerIsKeystone(),
+        ).thenAnswer((_) async => true);
+        when(() => rpc.sendTransaction(any())).thenAnswer((_) async => 'sig');
+        when(
+          () => rpc.awaitConfirmationOrThrow(
+            any(),
+            rebroadcast: any(named: 'rebroadcast'),
+          ),
+        ).thenAnswer((_) async {});
+        var signedNotice = false;
+
+        final result = signSendConfirm(
+          tx.encode(),
+          walletManager: wallet,
+          rpcService: rpc,
+          authGate: authGate,
+          usdValue: null,
+          flow: const FlowKey.solana(AppFlow.editionBuy),
+          discardSignatureIf: stale == null ? null : () => stale,
+          onSigned: () => signedNotice = true,
+        );
+
+        if (stale == true) {
+          await expectLater(result, throwsA(isA<SignedTooLateException>()));
+          verify(() => wallet.activeSignerIsKeystone()).called(1);
+          verifyNever(() => rpc.sendTransaction(any()));
+          verifyNever(
+            () => rpc.awaitConfirmationOrThrow(
+              any(),
+              rebroadcast: any(named: 'rebroadcast'),
+            ),
+          );
+          expect(signedNotice, isFalse);
+        } else {
+          expect(await result, 'sig');
+          verifyNever(() => wallet.activeSignerIsKeystone());
+          verify(() => rpc.sendTransaction(any())).called(1);
+          expect(signedNotice, isTrue);
+        }
+        verifyNever(() => wallet.isLocalSigner());
+      });
+    }
+  });
+
+  group('signSendConfirm — slow signing validity', () {
+    late SignedTx unsigned;
+    var onSignedFired = false;
+
+    setUp(() {
+      unsigned = _buildSignedTx(
+        blockhash: _placeholderBlockhash,
+        signer: signer,
+        recipient: recipient,
+        preSigned: false,
+      );
+      onSignedFired = false;
+      when(
+        () => rpc.getLatestBlockhash(),
+      ).thenAnswer((_) async => _freshBlockhash);
+      when(
+        () => wallet.signCompiledTx(
+          unsignedTx: any(named: 'unsignedTx'),
+          additionalSigners: any(named: 'additionalSigners'),
+        ),
+      ).thenAnswer((invocation) async {
+        final tx = invocation.namedArguments[#unsignedTx] as SignedTx;
+        return SignedTx(
+          signatures: [Signature(List<int>.filled(64, 7), publicKey: signer)],
+          compiledMessage: tx.compiledMessage,
+        );
+      });
+      when(() => wallet.activeSignerIsKeystone()).thenAnswer((_) async => true);
+      when(() => rpc.sendTransaction(any())).thenAnswer((_) async => 'sig');
+      when(
+        () => rpc.awaitConfirmationOrThrow(
+          any(),
+          rebroadcast: any(named: 'rebroadcast'),
+        ),
+      ).thenAnswer((_) async {});
+    });
+
+    Future<String> sign({
+      Duration threshold = Duration.zero,
+      bool Function()? discardSignatureIf,
+    }) => signSendConfirm(
+      unsigned.encode(),
+      walletManager: wallet,
+      rpcService: rpc,
+      authGate: authGate,
+      usdValue: 0,
+      flow: const FlowKey.solana(AppFlow.nftTransfer),
+      slowSigningThreshold: threshold,
+      discardSignatureIf: discardSignatureIf,
+      onSigned: () => onSignedFired = true,
+    );
+
+    test(
+      'expired blockhash after slow Keystone signing is discarded unsent',
+      () async {
+        when(
+          () => rpc.isBlockhashStillValid(_freshBlockhash),
+        ).thenAnswer((_) async => false);
+
+        await expectLater(sign(), throwsA(isA<SignedTooLateException>()));
+
+        verify(() => rpc.isBlockhashStillValid(_freshBlockhash)).called(1);
+        verifyNever(() => rpc.sendTransaction(any()));
+        verifyNever(
+          () => rpc.awaitConfirmationOrThrow(
+            any(),
+            rebroadcast: any(named: 'rebroadcast'),
+          ),
+        );
+        expect(onSignedFired, isFalse);
+      },
+    );
+
+    test(
+      'slow Keystone signing with a still-valid blockhash broadcasts',
+      () async {
+        when(
+          () => rpc.isBlockhashStillValid(_freshBlockhash),
+        ).thenAnswer((_) async => true);
+
+        expect(await sign(), 'sig');
+
+        verify(() => rpc.isBlockhashStillValid(_freshBlockhash)).called(1);
+        verify(() => rpc.sendTransaction(any())).called(1);
+        expect(onSignedFired, isTrue);
+      },
+    );
+
+    test(
+      'fast signing never consults the signer type or validity RPC',
+      () async {
+        expect(await sign(threshold: const Duration(seconds: 10)), 'sig');
+
+        verifyNever(() => wallet.activeSignerIsKeystone());
+        verifyNever(() => rpc.isBlockhashStillValid(any()));
+        verify(() => rpc.sendTransaction(any())).called(1);
+      },
+    );
+
+    test(
+      'slow non-Keystone signing never queries blockhash validity',
+      () async {
+        when(
+          () => wallet.activeSignerIsKeystone(),
+        ).thenAnswer((_) async => false);
+
+        expect(await sign(), 'sig');
+
+        verify(() => wallet.activeSignerIsKeystone()).called(1);
+        verifyNever(() => rpc.isBlockhashStillValid(any()));
+        verify(() => rpc.sendTransaction(any())).called(1);
+      },
+    );
+
+    test(
+      'validity RPC failure still broadcasts and waits for confirmation',
+      () async {
+        when(
+          () => rpc.isBlockhashStillValid(_freshBlockhash),
+        ).thenThrow(StateError('RPC unavailable'));
+
+        expect(await sign(), 'sig');
+
+        verify(() => rpc.isBlockhashStillValid(_freshBlockhash)).called(1);
+        verify(() => rpc.sendTransaction(any())).called(1);
+        verify(
+          () => rpc.awaitConfirmationOrThrow(
+            'sig',
+            rebroadcast: any(named: 'rebroadcast'),
+          ),
+        ).called(1);
+      },
+    );
+
+    group('pre-attached signatures', () {
+      setUp(() {
+        unsigned = _buildSignedTx(
+          blockhash: _placeholderBlockhash,
+          signer: signer,
+          recipient: recipient,
+          preSigned: true,
+        );
+      });
+
+      test('expired untracked co-signature is discarded unsent', () async {
+        when(
+          () => rpc.isBlockhashStillValid(_placeholderBlockhash),
+        ).thenAnswer((_) async => false);
+
+        await expectLater(sign(), throwsA(isA<SignedTooLateException>()));
+
+        verify(
+          () => rpc.isBlockhashStillValid(_placeholderBlockhash),
+        ).called(1);
+        verifyNever(() => rpc.getLatestBlockhash());
+        verifyNever(() => rpc.sendTransaction(any()));
+        expect(onSignedFired, isFalse);
+      });
+
+      test(
+        'valid co-signature broadcasts without changing its message',
+        () async {
+          when(
+            () => rpc.isBlockhashStillValid(_placeholderBlockhash),
+          ).thenAnswer((_) async => true);
+
+          expect(await sign(), 'sig');
+
+          verifyNever(() => rpc.getLatestBlockhash());
+          verify(
+            () => rpc.isBlockhashStillValid(_placeholderBlockhash),
+          ).called(1);
+          final sent =
+              verify(() => rpc.sendTransaction(captureAny())).captured.single
+                  as SignedTx;
+          expect(
+            sent.compiledMessage.toByteArray(),
+            unsigned.compiledMessage.toByteArray(),
+          );
+        },
+      );
+
+      test('validity probe failure still broadcasts and confirms', () async {
+        when(
+          () => rpc.isBlockhashStillValid(_placeholderBlockhash),
+        ).thenThrow(StateError('RPC unavailable'));
+
+        expect(await sign(), 'sig');
+
+        verify(
+          () => rpc.isBlockhashStillValid(_placeholderBlockhash),
+        ).called(1);
+        verify(() => rpc.sendTransaction(any())).called(1);
+        verify(
+          () => rpc.awaitConfirmationOrThrow(
+            'sig',
+            rebroadcast: any(named: 'rebroadcast'),
+          ),
+        ).called(1);
+      });
+
+      test(
+        'tracked co-signature leaves staleness to the builder path',
+        () async {
+          expect(await sign(discardSignatureIf: () => false), 'sig');
+
+          verifyNever(() => wallet.activeSignerIsKeystone());
+          verifyNever(() => rpc.isBlockhashStillValid(any()));
+          verify(() => rpc.sendTransaction(any())).called(1);
+        },
+      );
+
+      test('fast co-signing makes no validity probe', () async {
+        expect(await sign(threshold: const Duration(seconds: 10)), 'sig');
+
+        verifyNever(() => wallet.activeSignerIsKeystone());
+        verifyNever(() => rpc.isBlockhashStillValid(any()));
+      });
+
+      test('slow non-Keystone co-signing makes no validity probe', () async {
+        when(
+          () => wallet.activeSignerIsKeystone(),
+        ).thenAnswer((_) async => false);
+
+        expect(await sign(), 'sig');
+
+        verifyNever(() => rpc.isBlockhashStillValid(any()));
+      });
     });
   });
 
@@ -621,6 +921,175 @@ void main() {
       expect(received, isEmpty);
 
       await controller.close();
+    });
+  });
+
+  // Every flow on the executor reaches the analytics transaction ledger only
+  // through here, so this is where a missing or double report would hide.
+  group('signSendConfirm — transaction ledger', () {
+    late RecordingAnalytics analytics;
+
+    setUp(() async {
+      analytics = await RecordingAnalytics.install();
+      when(
+        () => rpc.getLatestBlockhash(),
+      ).thenAnswer((_) async => _freshBlockhash);
+      when(
+        () => wallet.signCompiledTx(
+          unsignedTx: any(named: 'unsignedTx'),
+          additionalSigners: any(named: 'additionalSigners'),
+        ),
+      ).thenAnswer(
+        (invocation) async =>
+            invocation.namedArguments[#unsignedTx] as SignedTx,
+      );
+      when(() => wallet.getAddress()).thenAnswer((_) async => 'walletAddr');
+      when(() => rpc.sendTransaction(any())).thenAnswer((_) async => 'sig1');
+    });
+
+    tearDown(RecordingAnalytics.uninstall);
+
+    Future<void> run() => signSendConfirm(
+      _buildSignedTx(
+        blockhash: _placeholderBlockhash,
+        signer: signer,
+        recipient: recipient,
+        preSigned: false,
+      ).encode(),
+      walletManager: wallet,
+      rpcService: rpc,
+      authGate: authGate,
+      usdValue: 0,
+      flow: const FlowKey.solana(AppFlow.raffleBuyTickets),
+    );
+
+    void stubConfirmation(Future<void> Function() answer) => when(
+      () => rpc.awaitConfirmationOrThrow(
+        any(),
+        rebroadcast: any(named: 'rebroadcast'),
+      ),
+    ).thenAnswer((_) => answer());
+
+    test('a confirmed tx is reported once, with its flow and signer', () async {
+      stubConfirmation(() async {});
+
+      await run();
+      await pumpEventQueue();
+
+      final event = analytics.submitted.single;
+      expect(event[AnalyticsProp.flow], 'solana:raffle-buy-tickets');
+      expect(event[AnalyticsProp.signature], 'sig1');
+      expect(event[AnalyticsProp.walletAddress], 'walletAddr');
+      expect(event[AnalyticsProp.confirmation], 'confirmed');
+    });
+
+    test(
+      'an unconfirmed tx is reported as pending — it may still land',
+      () async {
+        stubConfirmation(
+          () async => throw const SolanaTransactionUnconfirmedException('sig1'),
+        );
+
+        await expectLater(
+          run(),
+          throwsA(isA<SolanaTransactionUnconfirmedException>()),
+        );
+        await pumpEventQueue();
+
+        expect(
+          analytics.submitted.single[AnalyticsProp.confirmation],
+          'pending',
+        );
+      },
+    );
+
+    test('a tx that failed on-chain is not reported', () async {
+      stubConfirmation(
+        () async => throw const SolanaTransactionFailedException('sig1', 'x'),
+      );
+
+      await expectLater(
+        run(),
+        throwsA(isA<SolanaTransactionFailedException>()),
+      );
+      await pumpEventQueue();
+
+      expect(analytics.submitted, isEmpty);
+    });
+  });
+
+  // The `solana` package cannot decode a v1 transaction, so one that reached
+  // the `SignedTx` path would throw before the wallet ever saw it. A v1 tx is
+  // recognised by its 0x81 prefix and goes through as bytes from end to end.
+  group('signSendConfirm — v1 transactions', () {
+    late List<SolanaV1Transaction> signedInputs;
+
+    setUp(() {
+      signedInputs = [];
+      when(
+        () => rpc.getLatestBlockhash(),
+      ).thenAnswer((_) async => _freshBlockhash);
+      when(
+        () => wallet.signV1Tx(
+          unsignedTx: any(named: 'unsignedTx'),
+          additionalSigners: any(named: 'additionalSigners'),
+        ),
+      ).thenAnswer((invocation) async {
+        final tx =
+            invocation.namedArguments[#unsignedTx] as SolanaV1Transaction;
+        signedInputs.add(tx);
+        return tx.withSignature(v1Payer, List<int>.filled(64, 7));
+      });
+      when(
+        () => rpc.sendWireTransaction(any()),
+      ).thenAnswer((_) async => 'v1-sig');
+      when(
+        () => rpc.awaitWireConfirmationOrThrow(
+          any(),
+          rebroadcast: any(named: 'rebroadcast'),
+        ),
+      ).thenAnswer((_) async {});
+    });
+
+    Future<String> send(String hex) => signSendConfirm(
+      base64Encode(hexBytes(hex)),
+      walletManager: wallet,
+      rpcService: rpc,
+      authGate: authGate,
+      usdValue: null,
+      flow: const FlowKey.solana(AppFlow.nftTransfer),
+    );
+
+    test('signs, sends and confirms the bytes without SignedTx', () async {
+      expect(await send(v1Unsigned), 'v1-sig');
+
+      final sent =
+          verify(() => rpc.sendWireTransaction(captureAny())).captured.single
+              as SolanaV1Transaction;
+      expect(sent.signatures.first, List<int>.filled(64, 7));
+      verify(
+        () => rpc.awaitWireConfirmationOrThrow('v1-sig', rebroadcast: sent),
+      ).called(1);
+      verifyNever(() => rpc.sendTransaction(any()));
+      verifyNever(
+        () => wallet.signCompiledTx(
+          unsignedTx: any(named: 'unsignedTx'),
+          additionalSigners: any(named: 'additionalSigners'),
+        ),
+      );
+    });
+
+    test('refreshes the blockhash of a tx nobody has signed', () async {
+      await send(v1Unsigned);
+
+      expect(signedInputs.single.recentBlockhash, _freshBlockhash);
+    });
+
+    test('keeps the blockhash under an existing co-signature', () async {
+      await send(v1Signed);
+
+      expect(signedInputs.single.recentBlockhash, v1Blockhash);
+      verifyNever(() => rpc.getLatestBlockhash());
     });
   });
 }

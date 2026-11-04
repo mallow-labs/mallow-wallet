@@ -18,13 +18,11 @@ class _ArtworkDetailHeaderDelegate extends SliverPersistentHeaderDelegate {
   final VoidCallback onBack;
   final void Function(ArtworkDetails) onShowDotsMenu;
 
-  static const double _rowHeight = 48;
+  @override
+  double get minExtent => topPadding + PinnedTopBar.rowHeight;
 
   @override
-  double get minExtent => topPadding + _rowHeight;
-
-  @override
-  double get maxExtent => topPadding + _rowHeight;
+  double get maxExtent => topPadding + PinnedTopBar.rowHeight;
 
   @override
   Widget build(
@@ -32,7 +30,6 @@ class _ArtworkDetailHeaderDelegate extends SliverPersistentHeaderDelegate {
     double shrinkOffset,
     bool overlapsContent,
   ) {
-    final colors = context.mallowColors;
     final loaded = state is ArtworkLoaded
         ? (state as ArtworkLoaded).artwork
         : null;
@@ -45,61 +42,12 @@ class _ArtworkDetailHeaderDelegate extends SliverPersistentHeaderDelegate {
       );
     }
 
-    return Container(
-      color: backgroundColor,
-      padding: EdgeInsets.only(top: topPadding),
-      child: SizedBox(
-        height: _rowHeight,
-        child: Row(
-          children: [
-            GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: onBack,
-              child: const Padding(
-                padding: EdgeInsets.symmetric(
-                  horizontal: MallowTheme.spacing20,
-                  vertical: MallowTheme.spacingMd,
-                ),
-                child: MallowSvgIcon(
-                  'assets/icons/arrow_left.svg',
-                  width: 16,
-                  height: 16,
-                ),
-              ),
-            ),
-            Expanded(
-              child: centerText != null
-                  ? Text(
-                      centerText,
-                      textAlign: TextAlign.center,
-                      style: MallowTheme.uiCaption.copyWith(
-                        color: colors.textPrimary,
-                      ),
-                    )
-                  : const SizedBox.shrink(),
-            ),
-            if (loaded != null)
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () => onShowDotsMenu(loaded),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: MallowTheme.spacing20,
-                    vertical: MallowTheme.spacingMd,
-                  ),
-                  child: MallowSvgIcon(
-                    'assets/icons/dots_vertical.svg',
-                    width: 16,
-                    height: 16,
-                    color: colors.textPrimary,
-                  ),
-                ),
-              )
-            else
-              const SizedBox(width: MallowTheme.spacing20 + 16),
-          ],
-        ),
-      ),
+    return PinnedTopBar(
+      topInset: topPadding,
+      backgroundColor: backgroundColor,
+      onBack: onBack,
+      title: centerText,
+      onMenuTap: loaded != null ? () => onShowDotsMenu(loaded) : null,
     );
   }
 

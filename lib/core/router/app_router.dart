@@ -1,3 +1,6 @@
+import '../../features/browser/services/browser_visibility.dart';
+import '../../features/browser/screens/browser_screen.dart';
+import '../../features/browser/models/browser_open_link.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mallow_api/mallow_api.dart';
@@ -8,6 +11,7 @@ import '../../shared/widgets/mallow_svg_icon.dart';
 import '../config/remote_config.dart';
 import '../../features/accounts/screens/add_account_screen.dart';
 import '../../features/accounts/screens/add_wallet_screen.dart';
+import '../../features/accounts/screens/hardware_wallet_chooser_screen.dart';
 import '../../features/accounts/screens/import_private_key_screen.dart';
 import '../../features/accounts/screens/import_wallets_from_phrase_screen.dart';
 import '../../features/accounts/screens/watch_address_screen.dart';
@@ -15,6 +19,7 @@ import '../../features/activity/screens/activity_screen.dart';
 import '../../features/offers/screens/offers_screen.dart';
 import '../../features/ledger/screens/ledger_scan_screen.dart';
 import '../../features/seed_vault/screens/seed_vault_import_screen.dart';
+import '../../features/keystone/screens/keystone_import_screen.dart';
 import '../../features/moderation/screens/blocked_accounts_screen.dart';
 import '../../features/notifications/screens/notifications_screen.dart';
 import '../../features/settings/screens/about_screen.dart';
@@ -65,6 +70,7 @@ import '../../features/mint/screens/mint_type_chooser_screen.dart';
 import '../../features/auction/screens/auction_form_screen.dart';
 import '../../features/fixed_price/screens/fixed_price_form_screen.dart';
 import '../../features/sell/screens/sell_type_chooser_screen.dart';
+import '../../features/send/models/recipient_address.dart';
 import 'auth_state_notifier.dart';
 import 'nav_bar_state.dart';
 import 'tab_navigator.dart';
@@ -73,6 +79,8 @@ import '../../shared/utils/chain.dart';
 
 /// Route paths used throughout the app.
 abstract class AppRoutes {
+  static const browser = '/browser';
+  static const browserOpen = '/browser/open';
   // Onboarding
   static const walletRecovery = '/wallet-recovery';
   static const welcome = '/welcome';
@@ -117,7 +125,7 @@ abstract class AppRoutes {
   static String deepLinkProfileByUsernamePath(String username) =>
       '/u/$username';
 
-  // Phase 2: Tokens/Wallet (confirmation via modal sheets)
+  // Tokens/Wallet (confirmation via modal sheets)
   static const tokenDetail = '/token/:mint';
 
   // Mint flow (NFT creation)
@@ -213,12 +221,19 @@ abstract class AppRoutes {
   static const importPrivateKeyGlobal = '/wallets/import-private-key';
   static const watchAddressGlobal = '/wallets/watch-address';
 
+  // Hardware wallet chooser (Ledger or Keystone), the shared target of every
+  // "hardware wallet" entry point
+  static const hardwareWalletImport = '/wallets/hardware';
+
   // Ledger hardware wallet
   static const ledgerScan = '/wallets/ledger-scan';
 
   // Solana Mobile Seed Vault (Android only — the entry points that push this
   // route are gated on the device actually having a Seed Vault implementation)
   static const seedVaultImport = '/wallets/seed-vault';
+
+  // Keystone air-gapped hardware wallet (QR)
+  static const keystoneImport = '/wallets/keystone';
 
   /// Generate import-from-phrase route for a seed phrase.
   static String importFromPhraseGlobalPath(String seedPhraseId) =>
@@ -289,8 +304,10 @@ abstract class AppRoutes {
 /// `/welcome` and the entry point simply appears to do nothing.
 bool isWalletImportLocation(String location) =>
     location == AppRoutes.importPrivateKeyGlobal ||
+    location == AppRoutes.hardwareWalletImport ||
     location == AppRoutes.ledgerScan ||
-    location == AppRoutes.seedVaultImport;
+    location == AppRoutes.seedVaultImport ||
+    location == AppRoutes.keystoneImport;
 
 /// Creates and configures the app router.
 ///
@@ -302,7 +319,7 @@ GoRouter createRouter({required AuthStateNotifier authStateNotifier}) {
     navigatorKey: AppRoutes.rootNavigatorKey,
     initialLocation: _getInitialLocation(authStateNotifier),
     refreshListenable: authStateNotifier,
-    observers: [navBarRouteObserver],
+    observers: [navBarRouteObserver, browserPageRouteObserver],
     redirect: (context, state) {
       // The push-permission step is the last screen of the first run, but it
       // is deliberately NOT an onboarding route: it opens only after
@@ -434,6 +451,25 @@ GoRouter createRouter({required AuthStateNotifier authStateNotifier}) {
         path: AppRoutes.tokens,
         pageBuilder: (context, state) =>
             const NoTransitionPage(child: TabNavigator(initialTab: 2)),
+      ),
+
+      GoRoute(
+        path: AppRoutes.browser,
+        pageBuilder: (context, state) =>
+            const NoTransitionPage(child: TabNavigator(initialTab: 3)),
+        routes: [
+          GoRoute(
+            path: 'open',
+            builder: (context, state) => BrowserScreen(
+              // Every handoff gets a fresh screen, even when its URL matches
+              // the previous share. The parent keeps Back inside the app.
+              key: ObjectKey(state.extra),
+              initialUrl: state.extra is BrowserOpenRequest
+                  ? (state.extra! as BrowserOpenRequest).url
+                  : null,
+            ),
+          ),
+        ],
       ),
 
       // Detail routes (outside shell, full screen)
@@ -771,10 +807,18 @@ GoRouter createRouter({required AuthStateNotifier authStateNotifier}) {
         // picked yet, so it closes only when neither chain can transfer. The
         // per-artwork cell is enforced inside `runTransferArtworkFlow`, which
         // knows the chain.
-        builder: (context, state) => flowGatedScreen(const [
-          FlowKey.solana(AppFlow.nftTransfer),
-          FlowKey(Chain.ethereum, AppFlow.nftTransfer),
-        ], () => const TransferArtworkChooserScreen()),
+        // `extra` is a scanned recipient, when there is one.
+        builder: (context, state) => flowGatedScreen(
+          const [
+            FlowKey.solana(AppFlow.nftTransfer),
+            FlowKey(Chain.ethereum, AppFlow.nftTransfer),
+          ],
+          () => TransferArtworkChooserScreen(
+            recipient: state.extra is RecipientAddress
+                ? state.extra! as RecipientAddress
+                : null,
+          ),
+        ),
       ),
 
       // Sell flow (sale creation)
@@ -917,6 +961,12 @@ GoRouter createRouter({required AuthStateNotifier authStateNotifier}) {
         builder: (context, state) => const WatchAddressScreen(accountId: ''),
       ),
 
+      // Hardware wallet chooser
+      GoRoute(
+        path: AppRoutes.hardwareWalletImport,
+        builder: (context, state) => const HardwareWalletChooserScreen(),
+      ),
+
       // Ledger hardware wallet
       GoRoute(
         path: AppRoutes.ledgerScan,
@@ -927,6 +977,12 @@ GoRouter createRouter({required AuthStateNotifier authStateNotifier}) {
       GoRoute(
         path: AppRoutes.seedVaultImport,
         builder: (context, state) => const SeedVaultImportScreen(),
+      ),
+
+      // Keystone
+      GoRoute(
+        path: AppRoutes.keystoneImport,
+        builder: (context, state) => const KeystoneImportScreen(),
       ),
     ],
   );

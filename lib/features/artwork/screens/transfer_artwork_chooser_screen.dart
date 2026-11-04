@@ -10,6 +10,7 @@ import '../../../shared/widgets/mallow_header.dart';
 import '../../../shared/widgets/select_artwork_step.dart';
 import '../../portfolio/data/portfolio_repository.dart';
 import '../../portfolio/services/portfolio_bloc.dart';
+import '../../send/models/recipient_address.dart';
 import '../services/artwork_permission_service.dart';
 import '../services/transfer_artwork_bloc.dart';
 import '../widgets/transfer_artwork_flow.dart';
@@ -85,8 +86,14 @@ Future<String?> transferBlockedReason(PortfolioArtwork artwork) async {
 /// portfolio (`nonPrintableOnly: false`, so master editions, 1/1s, and prints
 /// are all eligible). On a confirmed transfer the artwork has left the wallet,
 /// so the screen pops back home.
+///
+/// With a [recipient], as when the user scanned an address first, it lists
+/// only the artworks on the recipient's chain, and the transfer flow opens
+/// with the address in its recipient field.
 class TransferArtworkChooserScreen extends StatefulWidget {
-  const TransferArtworkChooserScreen({super.key});
+  const TransferArtworkChooserScreen({this.recipient, super.key});
+
+  final RecipientAddress? recipient;
 
   @override
   State<TransferArtworkChooserScreen> createState() =>
@@ -125,7 +132,23 @@ class _TransferArtworkChooserScreenState
       AppSnackBar.show(context, blocked);
       return;
     }
-    final transferred = await runTransferArtworkFlow(context, artwork: artwork);
+    final recipient = widget.recipient;
+    final transferred = await runTransferArtworkFlow(
+      context,
+      artwork: artwork,
+      // The list holds only the recipient's chain, but a row the server
+      // tagged with another chain must still not be handed an address it
+      // cannot take.
+      initialRecipient:
+          recipient != null &&
+              nftTransferFlowKey(
+                    mintAccount: artwork.mintAccount,
+                    chain: artwork.chain,
+                  ).chain ==
+                  recipient.chain
+          ? recipient.address
+          : null,
+    );
     // The success pipeline already confirms the transfer; on a confirmed
     // send the artwork is gone, so return the user home. A cancelled flow
     // (false) leaves them here to pick another artwork.
@@ -135,6 +158,7 @@ class _TransferArtworkChooserScreenState
   @override
   Widget build(BuildContext context) {
     final colors = context.mallowColors;
+    final chain = widget.recipient?.chain;
     return Scaffold(
       backgroundColor: colors.bgPrimary,
       body: SafeArea(
@@ -152,8 +176,11 @@ class _TransferArtworkChooserScreenState
                   selectedMint: null,
                   nonPrintableOnly: false,
                   artworksLoader: () =>
-                      sl<PortfolioRepository>().getOwnedArtworks(),
-                  emptyStateMessage: "You don't own any transferrable artworks",
+                      sl<PortfolioRepository>().getOwnedArtworks(chain: chain),
+                  emptyStateMessage: chain == null
+                      ? "You don't own any transferrable artworks"
+                      : "You don't own any transferrable ${chain.label} "
+                            'artworks',
                   onSelected: _onSelected,
                 ),
               ),

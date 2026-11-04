@@ -79,5 +79,32 @@ void main() {
         expect(names, {2: 'Account 06', 4: 'Account 07'});
       },
     );
+
+    test('a custom name shows in place of the default, selected or not', () {
+      final names = previewAccountNames(
+        accounts: [_card(0), _card(1), _card(2), _card(3)],
+        selectedKeys: {_key(0), _key(1), _key(2)},
+        baseCounter: 6,
+        customNames: {1: 'Trading', 3: 'Savings'},
+      );
+      expect(names, {
+        0: 'Account 06',
+        // Selected and named: shows the name, but still takes 07 — the
+        // repository advances the counter for a named account too.
+        1: 'Trading',
+        2: 'Account 08',
+        3: 'Savings', // unselected, named
+      });
+    });
+
+    test('an already-imported card ignores a custom name', () {
+      final names = previewAccountNames(
+        accounts: [_card(0, importedName: 'Stored', imported: true)],
+        selectedKeys: const {},
+        baseCounter: 2,
+        customNames: {0: 'Typed'},
+      );
+      expect(names, {0: 'Stored'});
+    });
   });
 }

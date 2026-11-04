@@ -19,7 +19,7 @@ import '../../../../shared/widgets/token_amount_text.dart';
 /// No drag handle — these sheets are pinned to the artwork detail screen
 /// and can't be dismissed by gesture, so the affordance would mislead.
 ///
-/// Variants documented in `docs/artwork_state.md`.
+/// Which variant is pinned is decided by `resolveArtworkActionState`.
 class ArtworkSheetFrame extends StatelessWidget {
   const ArtworkSheetFrame({required this.child, super.key});
 

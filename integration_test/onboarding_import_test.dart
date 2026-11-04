@@ -541,7 +541,7 @@ void main() {
 
       await pumpUntil(
         tester,
-        find.text('Could not import this key.'),
+        find.text('A wallet with this address is already on this device.'),
         label: 'the duplicate-key error on the entry step',
         rounds: 200,
       );
@@ -1185,7 +1185,8 @@ Future<void> _setLegacySolanaToggle(
   );
 }
 
-/// Home -> drawer -> Settings -> re-auth -> Security & Privacy -> Reset app.
+/// Home -> drawer -> Settings -> re-auth -> Security & Privacy -> Reset app
+/// -> re-auth.
 Future<void> _resetAppFromSettings(WidgetTester tester) async {
   // The shared opener carries the whole Settings entry, including the
   // push-preference pre-empt this file used to do by hand: `_loadData`
@@ -1215,23 +1216,7 @@ Future<void> _resetAppFromSettings(WidgetTester tester) async {
     ),
     label: 're-auth PIN prompt',
   );
-  if (reauth.evaluate().isNotEmpty) {
-    await _typePinUntilPadCloses(tester);
-    // `PinPromptSheet` validates through the background-isolate PIN hash, and
-    // on this emulator under load the sheet has taken 6-8 s to pop afterwards.
-    // A 20 s wait was not enough in run 2; this one is 60 s.
-    await _waitForReauthToClear(tester, reauth);
-    if (reauth.evaluate().isNotEmpty) {
-      // Some taps were swallowed while the sheet was still sliding in. Top the
-      // buffer up rather than starting over: `_onNumber` appends until it holds
-      // six and only then validates, and every digit here is the same.
-      await _typePinUntilPadCloses(tester);
-      await _waitForReauthToClear(tester, reauth);
-    }
-    if (reauth.evaluate().isNotEmpty) {
-      fail('The re-auth PIN prompt stayed up after two PIN entries');
-    }
-  }
+  if (reauth.evaluate().isNotEmpty) await _clearReauthPrompt(tester, reauth);
 
   // The screen title and the confirm button share the string "Reset app", and
   // the row is the FIRST of the two in tree order.
@@ -1257,6 +1242,11 @@ Future<void> _resetAppFromSettings(WidgetTester tester) async {
       matching: find.text('Reset app'),
     ),
   );
+  // Reset app re-authenticates right before the wipe rather than trusting the
+  // Security & Privacy gate above. A PIN is always set here, so the sheet
+  // always comes up.
+  await _pumpUntilDraining(tester, reauth, label: 'Reset app PIN prompt');
+  await _clearReauthPrompt(tester, reauth);
   // Keep draining while the reset runs: the Settings screen's leaked future
   // (below) can still be in flight when the tree is torn down.
   for (var i = 0; i < 20; i++) {
@@ -1265,22 +1255,42 @@ Future<void> _resetAppFromSettings(WidgetTester tester) async {
   }
 }
 
+/// Enters the PIN into the open re-auth sheet ([reauth] marks it) and waits
+/// for the sheet to pop, failing the test if it will not.
+Future<void> _clearReauthPrompt(WidgetTester tester, Finder reauth) async {
+  await _typePinUntilPadCloses(tester);
+  // `PinPromptSheet` validates through the background-isolate PIN hash, and
+  // on this emulator under load the sheet has taken 6-8 s to pop afterwards.
+  // A 20 s wait was not always enough; this one is 60 s.
+  await _waitForReauthToClear(tester, reauth);
+  if (reauth.evaluate().isNotEmpty) {
+    // Some taps were swallowed while the sheet was still sliding in. Top the
+    // buffer up rather than starting over: `_onNumber` appends until it holds
+    // six and only then validates, and every digit here is the same.
+    await _typePinUntilPadCloses(tester);
+    await _waitForReauthToClear(tester, reauth);
+  }
+  if (reauth.evaluate().isNotEmpty) {
+    fail('The re-auth PIN prompt stayed up after two PIN entries');
+  }
+}
+
 /// Taps the PIN digit until the number pad goes away, up to [maxTaps] times.
 ///
-/// The harness's `enterPin` cannot drive the re-auth sheet, for two reasons
-/// this file paid for in full:
+/// This file's own loop predates the harness's `enterPin` learning to retry a
+/// swallowed digit, and it is kept because it is safe by construction against
+/// the two ways the re-auth sheet broke this file:
 ///
-///  * It taps each digit exactly once. At least one tap is swallowed while
-///    `PinPromptSheet` is still sliding in, so the buffer stops at five, never
-///    reaches `_pinLength`, and never validates - the sheet then sits there
-///    forever (60 s in run 4). Over-tapping is the fix and is safe:
-///    `_onNumber` returns early once the buffer holds six, and every digit of
-///    [kTestWalletPin] is the same, so extra taps cannot enter a wrong PIN.
-///  * It calls `tester.tap` on a finder it evaluated earlier. The sheet pops
-///    itself the instant the sixth digit lands, so the pad can vanish between
-///    the two - `Bad state: No element`, which is how ONB-106/107 died in
-///    run 3. The re-check below sits in the same synchronous block as the tap,
-///    so no frame can run in between.
+///  * A tap swallowed while `PinPromptSheet` is still sliding in leaves the
+///    buffer at five, so it never validates and the sheet sits there (for the
+///    full 60 s). Over-tapping cannot overshoot: `_onNumber` returns early once
+///    the buffer holds six, and every digit of [kTestWalletPin] is the same,
+///    so extra taps cannot enter a wrong PIN.
+///  * The sheet pops itself the instant the sixth digit lands, so a finder
+///    evaluated before the tap can be gone by the tap - `Bad state: No
+///    element`, which is how ONB-106/107 once failed. The re-check below
+///    sits in the same synchronous block as the tap, so no frame can run in
+///    between.
 Future<void> _typePinUntilPadCloses(
   WidgetTester tester, {
   int maxTaps = 12,

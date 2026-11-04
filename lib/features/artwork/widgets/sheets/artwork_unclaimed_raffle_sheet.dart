@@ -34,7 +34,6 @@ enum UnclaimedRaffleClaim {
 /// `unclaimedRaffles` down to raffles this wallet can act on
 /// (`/v1/artwork/byMint` returns **every** unclaimed raffle for the mint,
 /// user-agnostic — `raffleMetadataHelper`).
-/// See `docs/artwork_state.md`.
 class ArtworkUnclaimedRaffleSheet extends StatelessWidget {
   const ArtworkUnclaimedRaffleSheet({
     required this.raffle,

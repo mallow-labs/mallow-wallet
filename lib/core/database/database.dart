@@ -46,6 +46,10 @@ class SeedPhrases extends Table {
 ///  - `privateKey`: one Account holding a single imported-key wallet.
 ///  - `hardware`: one Account per Ledger `derivationIndex`, holding that index's
 ///    Solana wallets (standard + legacy/root rows if imported).
+///  - `seedVault`: the same shape for Seed Vault, kept apart from `hardware`.
+///  - `keystone`: one Account per Keystone `(masterFingerprint,
+///    derivationIndex)` — two Keystones both export index 0, so the index alone
+///    cannot tell their accounts apart.
 @DataClassName('AccountRow')
 class Accounts extends Table {
   /// UUID primary key
@@ -54,10 +58,15 @@ class Accounts extends Table {
   /// FK to SeedPhrases — only set for `seed` accounts.
   TextColumn get seedPhraseId => text().nullable()();
 
-  /// HD derivation index — set for `seed` and `hardware` accounts.
+  /// HD derivation index — set for `seed` and every hardware account.
   IntColumn get derivationIndex => integer().nullable()();
 
-  /// Account shape: 'seed', 'privateKey', or 'hardware'.
+  /// Keystone master fingerprint (uint32) — set for `keystone` accounts only,
+  /// and half of their identity together with [derivationIndex].
+  IntColumn get masterFingerprint => integer().nullable()();
+
+  /// Account shape: 'seed', 'privateKey', 'viewOnly', 'social', 'hardware',
+  /// 'seedVault' or 'keystone' (`AccountKind`).
   TextColumn get kind => text()();
 
   /// User-visible label (default "Account 1", user-editable).
@@ -95,14 +104,20 @@ class Wallets extends Table {
   /// User-visible wallet name
   TextColumn get name => text()();
 
-  /// Type: 'hd', 'imported_key', 'view_only', 'social', 'ledger'
+  /// Type: 'hd', 'imported_key', 'view_only', 'social', 'ledger',
+  /// 'seed_vault' or 'keystone' (`WalletType`)
   TextColumn get walletType => text()();
 
-  /// HD derivation index (null for non-HD wallets)
+  /// HD derivation index (null for imported-key, view-only and social rows)
   IntColumn get derivationIndex => integer().nullable()();
 
-  /// Ledger derivation scheme: 'standard' or 'legacy' (null for non-Ledger)
+  /// Solana derivation scheme: 'standard', 'legacy' or 'root' (null where the
+  /// chain has a single fixed path)
   TextColumn get derivationScheme => text().nullable()();
+
+  /// Keystone master fingerprint (uint32) — set for Keystone rows only. Every
+  /// sign request names it, and the device refuses one that is not its own.
+  IntColumn get masterFingerprint => integer().nullable()();
 
   /// Social-auth provider: 'google' or 'apple' (null for non-social wallets)
   TextColumn get socialProvider => text().nullable()();
@@ -633,7 +648,7 @@ class MallowDatabase extends _$MallowDatabase {
   }
 
   @override
-  int get schemaVersion => 22;
+  int get schemaVersion => 23;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -681,6 +696,11 @@ class MallowDatabase extends _$MallowDatabase {
         // to a day after the update. Clearing them makes the next
         // `ensureCached()` re-fetch and backfill.
         await delete(cachedJupiterTokenList).go();
+      }
+      if (from < 23) {
+        // Keystone identity. Both nullable, so existing rows need nothing.
+        await m.addColumn(accounts, accounts.masterFingerprint);
+        await m.addColumn(wallets, wallets.masterFingerprint);
       }
     },
   );
@@ -766,6 +786,24 @@ class MallowDatabase extends _$MallowDatabase {
     return (select(accounts)..where(
           (t) =>
               t.kind.equals('seedVault') &
+              t.derivationIndex.equals(derivationIndex),
+        ))
+        .getSingleOrNull();
+  }
+
+  /// Find the `keystone` account for one device's derivation index, or null.
+  ///
+  /// Keyed on the master fingerprint as well as the index — see
+  /// [getSeedVaultAccountByIndex] for why each device type has its own kind,
+  /// and `AccountKind.keystone` for why this one needs the fingerprint too.
+  Future<AccountRow?> getKeystoneAccount(
+    int masterFingerprint,
+    int derivationIndex,
+  ) {
+    return (select(accounts)..where(
+          (t) =>
+              t.kind.equals('keystone') &
+              t.masterFingerprint.equals(masterFingerprint) &
               t.derivationIndex.equals(derivationIndex),
         ))
         .getSingleOrNull();

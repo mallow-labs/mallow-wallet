@@ -1,181 +1,135 @@
-# Keystone Hardware Wallet Integration
+# Keystone
 
-> **Status: not implemented.** This is a design note, not a description of
-> shipped behaviour. Ledger hardware wallets work today; the Keystone QR path
-> below is planned. "Needs implementation" further down lists what is missing.
+mallow can hold Solana and Ethereum wallets whose keys live on a [Keystone](https://keyst.one), an air-gapped hardware wallet. The app and the device share no cable, no Bluetooth and no network: every exchange is a QR code shown on one screen and scanned by the other camera. The key never leaves the device, and nothing secret is stored in the app.
 
-## Overview
+## What works
 
-Keystone is an air-gapped hardware wallet that communicates exclusively via QR codes — no USB, Bluetooth, or NFC. The app and device exchange data using the **UR (Uniform Resources)** protocol, which encodes CBOR binary data as URI-safe strings optimized for QR codes.
+| | |
+|---|---|
+| Chains | Solana and Ethereum. **Tezos is not possible** — the firmware has no Tezos support. |
+| Import | Scan any code the device shows from **Connect Software Wallet**, and as many as needed: the app reads whatever Solana accounts and Ethereum key each one carries and adds them to one picker. All three Solana paths are accepted; Ethereum is accepted in the BIP-44 standard layout (see [Ethereum](#ethereum)). |
+| Signing | Every Keystone Solana transaction signs through `WalletManager.signCompiledTx` → `KeystoneSignService`, and every Ethereum transaction through `WalletManager.signEthereumTransaction` → `KeystoneSignService`. Client-built SOL/SPL sends, marketplace, mint, staking and swaps use `TransactionExecutor` → `TransactionPipeline.signAndBroadcast` → `signSendConfirm`; the in-app browser calls `signCompiledTx` directly with its pinned wallet. |
+| Login | The backend's ownership proof: the device signs the challenge text verbatim, as Seed Vault does. An Ethereum row signs it as an EIP-191 personal message. |
+| Browser | Solana: transactions and `solana:signMessage`. The device signs a site's message bytes as given, showing a `\xffsolana offchain` message structurally and anything else as UTF-8 or hex. Ethereum: EIP-1559 transactions, `personal_sign` and `eth_signTypedData_v4`. |
 
-## Protocol: UR (Uniform Resources)
+## Connecting a Keystone
 
-UR is a standard by Blockchain Commons (RFC 8949 CBOR + Bytewords encoding) for transmitting structured data via QR codes.
+1. On the Keystone, open **Connect Software Wallet**. For Solana, choose **Solflare** or **Backpack**; for Ethereum, **MetaMask** or **Backpack**. The import screen says just that.
+2. In mallow, choose **Connect hardware wallet** (or **Use a hardware wallet** during setup), then **Keystone**, and scan the animated code.
+3. To add the other chain, tap **Scan another code** in the picker and scan the other entry's code. Codes can come in either order.
+4. Pick the accounts to import.
 
-**Format:** `ur:<type>/<bytewords-encoded-cbor>` (single-part) or `ur:<type>:<seq>/<data>` (multi-part)
+Each code is read for what it holds (`crypto-multi-accounts`, `crypto-hdkey` or `crypto-account`), not for the entry that made it. Every code in one import must come from the same device; a code from another Keystone is refused until the user taps **Start over**.
 
-**Key properties:**
-- Self-describing type system
-- Fountain codes for large payloads (animated multi-frame QR)
-- ALL CAPS encoding for QR alphanumeric mode efficiency
-- No CBOR tags when using UR format (UR type replaces the tag)
+The device has no generic "other wallet" entry, but the export it shows for a named wallet is ordinary UR data any app can read, and its signing does not check which app is asking. Solflare's entry is named because it exports the **Sub-account Path**, `m/44'/501'/i'/0'` — the path most Solana wallets use and the one mallow calls `standard`. Other entries default to the **Account-based Path** (`m/44'/501'/i'`, `legacy`); those exports import too, as legacy accounts.
 
-**Dart library:** [`bc_ur_dart`](https://pub.dev/packages/bc_ur_dart) (v0.1.22, MIT) — handles UR encode/decode and fountain code segmentation.
+| Keystone's name | Path | `SolanaDerivationScheme` |
+|---|---|---|
+| Sub-account Path | `m/44'/501'/i'/0'` | `standard` |
+| Account-based Path | `m/44'/501'/i'` | `legacy` |
+| Single Account Path | `m/44'/501'` | `root` |
 
-## Solana UR Types
+The device keeps public keys for indexes 0–49 only, so the import refuses anything above 49.
 
-### 1. `crypto-multi-accounts` — Account Discovery
-
-Exported by Keystone when user selects "Export Accounts" in the Solana app.
-
-```
-CBOR structure:
-{
-  masterFingerprint: string    // 4-byte hex (e.g. "f23f9fd2")
-  keys: [
-    {
-      chain: "SOL"
-      path: "m/44'/501'/0'/0'"    // BIP44 derivation path
-      publicKey: string            // hex-encoded Ed25519 public key
-      name: string?                // optional account label
-      chainCode: string
-    }
-  ]
-  device: "Keystone"
-  deviceId: string?
-  deviceVersion: string?
-}
-```
-
-### 2. `sol-sign-request` — Transaction Signing Request
-
-Generated by the app, displayed as QR for the Keystone device to scan.
+## Signing
 
 ```
-CBOR structure:
-{
-  requestId: string              // UUID v4
-  signData: bytes                // unsigned transaction bytes (serialized Message)
-  dataType: enum                 // 1 = Transaction, 2 = Message
-  path: "m/44'/501'/0'/0'"       // derivation path for signing key
-  xfp: "F23F9FD2"               // master fingerprint (must match device)
-  origin: "mallow"               // requesting app name
-  address: string?               // optional signer address
-}
+SOL/SPL send, marketplace, mint, staking
+  → TransactionExecutor.execute
+  → TransactionPipeline.signAndBroadcast
+  → signSendConfirm
+  → WalletManager.signCompiledTx        also called directly by the browser
+  → KeystoneSignService.signSolana      builds sol-sign-request from the row
+  → KeystoneSignController              (no BuildContext) → app shell listener
+  → KeystoneSignSheet                   1. animated QR of the request
+                                        2. camera reads the device's sol-signature
+  → KeystoneSignService                 request id matches? Ed25519 verifies
+                                        against the row's address?
+  → 64-byte signature into the tx's signer slot
 ```
 
-### 3. `sol-signature` — Signed Response
+The request carries the compiled message bytes, a keypath built from the row's own derivation index and scheme, and the device's master fingerprint. Like Ledger and Seed Vault, the device returns a detached signature over the bytes as given, so a backend-built transaction keeps its blockhash, lookup tables and co-signatures.
 
-Displayed by Keystone after user confirms, scanned by the app.
+**Every reply is verified before it is used.** The device's reply does not say which key produced it, and a request that named the wrong path or the wrong device comes back with a perfectly valid signature — from a different address. The sheet passes every scanned code to `KeystoneSignService`, which accepts it only if its request id is the one just shown and it verifies with Ed25519 against the wallet's address over the exact bytes sent. A stale signature from an earlier request, or one from another Keystone, is refused on the sheet with the reason, and the scanner stays open.
 
-```
-CBOR structure:
-{
-  requestId: string              // matches the request UUID
-  signature: bytes               // 64-byte Ed25519 signature
-}
-```
+**Slow Keystone signatures are checked before broadcast.** A QR round trip can take longer than a transaction stays valid. A transaction with no pre-attached signature gets a fresh blockhash just before signing. If signing takes more than 10 seconds, `signSendConfirm` checks that blockhash's on-chain validity once the Keystone signature comes back. An expired signature is discarded unsent; a failed validity check still allows broadcast, with confirmation determining the outcome. Fast signing and other signer types make no extra validity query.
 
-## Integration Flow
+For a transaction only its builder can freshen — co-signed by the backend, or creating a lookup table — the executor checks a supplied builder staleness tracker after Keystone signing. If it aged past the 30-second window meanwhile, the signature is discarded unsent and the builder is asked again. The tracker covers the first transaction by default; later transactions are covered only when the caller asserts that rebuilding returns just the remaining work. For ordinary client-refreshable transactions, the executor instead retries the same transaction with another fresh blockhash. Either retry shows: "That took too long, so the transaction expired before it was sent. Approve it again on your Keystone." After two retries the flow stops with a readable error. Other signers still broadcast after crossing the conservative tracker window, which is shorter than the blockhash lifetime.
 
-### Account Import (Connect)
+Mint and edit use no builder tracker: each real build inserts an upload record, and subsidized builds reserve a subsidy slot before returning. Automatically replaying a build can lose the subsidy and change who pays. For co-signed transactions without a tracker, signing longer than 10 seconds instead checks the original blockhash's on-chain validity. Known-expired signatures are discarded unsent and the flow immediately reports "That took too long, so the transaction expired. Try again." The executor does not re-sign those same bytes. This also covers a co-signed cNFT edit after its lookup-table setup transaction has confirmed; the setup remains on-chain. A failed validity query still allows broadcast and confirmation to decide the outcome. Unsigned mints retain the client-refresh retry path. Mint/edit do not automatically rebuild lookup-table setup instructions or check their embedded slot's age; a blockhash refresh alone does not freshen that slot.
 
-```
-1. User opens Keystone → Solana → Export Accounts
-2. Keystone displays animated QR (crypto-multi-accounts)
-3. App scans QR → decodes UR → parses CBOR → extracts public keys
-4. User selects which accounts to import
-5. App stores the wallet with its address, master fingerprint and derivation path
-```
+The signing helper throws `SignedTooLateException` before broadcasting an expired Keystone signature; callers outside the executor must surface its user-facing message. Browser transactions use their own pinned `signCompiledTx` call and do not use these checks or retries.
 
-### Transaction Signing
+Each transaction in a batch is its own round trip. The device has no Solana batch request. For batches run through `TransactionExecutor`, the sheet shows "Transaction k of n" near the title. A rebuilt transaction keeps its position, and the expiry notice applies only to its retry; later transactions and unrelated signing requests do not inherit it.
 
-```
-1. App builds unsigned Solana transaction (Message + recentBlockhash)
-2. App serializes message bytes
-3. App encodes as sol-sign-request UR with wallet's xfp + derivationPath
-4. App displays animated QR code (fountain-coded, ~400 bytes/frame, 100ms interval)
-5. User scans QR with Keystone device
-6. User reviews + confirms transaction on Keystone touchscreen
-7. Keystone displays sol-signature as animated QR
-8. App scans signature QR → decodes UR → extracts 64-byte signature
-9. App attaches signature to transaction → broadcasts to Solana RPC
-```
+### Login
 
-### Message Signing (Auth)
+Keystone signs the login challenge bytes verbatim and shows the text, so the ordinary `{address, message, signature}` verify body works, as for Seed Vault. Background login never signs with a hardware wallet. The 401 retry asks for consent on the app's own sheet first, and only then opens the QR exchange.
 
-Same flow as transaction signing but with `dataType: Message` and raw message bytes instead of a serialized transaction.
+### Swaps
 
-## Animated QR Codes
+Other wallets swap through Jupiter Ultra, whose order is signed verbatim — it can carry a market maker's signature, so its blockhash cannot be refreshed — and is valid for seconds. A QR round trip is far longer, so an Ultra swap would fail after the user approved it on the device.
 
-Large payloads exceed single QR capacity (max ~2,953 bytes). Keystone uses **Luby Transform (fountain) codes**:
+A Keystone wallet therefore swaps on Jupiter's classic API instead. `SwapBloc` quotes a Keystone taker with `GET /swap/v1/quote`, and at execute time asks `POST /swap/v1/swap` for the unsigned transaction. That transaction needs only the user's signature, and the route and minimum output live in the swap instruction, so nothing about it expires but the blockhash. It runs through `TransactionExecutor` on the mainnet RPC: the blockhash is refreshed before the QR is shown, and a signature that comes back after it expired is retried on a fresh one, as for any client-refreshable transaction. The Ultra path keeps a backstop that refuses to sign an order with a Keystone.
 
-- Data split into parts, each independently decodable
-- Receiver can start from any frame
-- Need slightly more than K frames to reconstruct (K = source block count)
-- Default config: 400 bytes/frame capacity, 100ms frame interval
+mallow's swap fee follows the Keystone too. The classic API sends the fee to a token account of the input or output mint: the referral account's associated token account for that mint (classic token program, then Token-2022), where it already holds the fees Ultra collects. A missing account would fail the swap on-chain, where Ultra just skips the fee, so `SwapRepository` checks that one exists and quotes fee-free when none does.
 
-The `bc_ur_dart` library handles fountain encoding/decoding via `UR.next()` (encoder) and `UR.read(fragment)` (decoder).
+## Ethereum
 
-## Hardware Wallet Data Stored in App
+A Keystone Ethereum wallet lives on the same (fingerprint, index) account as its Solana wallet, at `m/44'/60'/0'/0/index` — the BIP-44 standard layout, the one `MultiChainDerivation` uses for seed phrases. Its address is derived in the app from the account xpub (`m/44'/60'/0'`) the device exports; the device never sends addresses.
 
-Per imported hardware wallet:
-- `address` — Solana public key (base58)
-- `masterFingerprint` — 4-byte hex identifying the Keystone device
-- `derivationPath` — BIP44 path used (e.g. `m/44'/501'/0'/0'`)
-- `walletType` — the hardware-wallet variant
-- No private keys or seeds are ever stored
+The Ethereum key says nothing about which account indexes the user holds, so the picker lists an Ethereum wallet at every index it knows for the device: the Solana accounts scanned in this import, and the device's Keystone accounts already in mallow (matched by master fingerprint). The key comes from **MetaMask → BIP44 Standard** (one `crypto-hdkey`) or from an entry whose code carries both chains (Backpack's does; it exports Solana at the Account-based `legacy` path).
 
-## Existing Codebase Support
+- **Ethereum code first, nothing to attach it to.** The key is kept and the scanner asks for a Solana code; the Ethereum rows appear once it is scanned.
+- **Ethereum for accounts already imported.** Scan the MetaMask code on its own: each of the device's accounts shows an Ethereum row. Importing rows that all join existing accounts leaves the active account where it is and re-reads it, so the new wallet shows without switching.
 
-Already in place:
-- `WalletType.ledger` in `lib/core/models/account.dart`, with `isHardware` and
-  `needsDeviceForSigning`. A Keystone value would be added alongside it — see the
-  `// Future: keystone` marker in that enum
-- `Account.hasHardwareWallet` getter
-- `WalletInfo.canSign` returns `true` for hardware (signing happens on device)
-- "Connect hardware wallet" menu item in `AddWalletScreen` (`add_wallet_screen.dart`) and in
-  `AddAccountScreen` / `WelcomeScreen` — all three push `AppRoutes.ledgerScan`, the **live Ledger BLE
-  flow**, not a "Coming soon" placeholder. Keystone would need either a second menu row or a
-  transport chooser on that route; the Keystone QR path below is genuinely unimplemented.
-- `mobile_scanner: ^7.1.4` dependency for QR scanning
-- `pretty_qr_code: ^3.6.0` dependency for QR display
+Exports in the Ledger Live or Ledger Legacy layouts are refused for Ethereum: their addresses sit at other paths.
 
-Needs implementation:
-- UR encode/decode layer (CBOR for Solana UR types)
-- Animated QR display/scan widgets
-- Account import screen + BLoC
-- Transaction signing QR exchange flow
-- DB schema: `masterFingerprint` and `derivationPath` columns on Wallets table
-- `WalletRepository.addHardwareWallet()` method
-- A Keystone branch in `WalletManager`'s signing switch. Hardware signing itself
-  already works — `WalletType.ledger` routes to on-device signing over BLE, and
-  only `WalletType.viewOnly` throws `ViewOnlyWalletException`
-- `SendBloc` hardware signing state (build unsigned tx → QR exchange → broadcast)
+Signing sends an `eth-sign-request` (tag 401) built from the row's fingerprint and index:
 
-## Dependencies Needed
+| What | Data type | Sent | Checked against |
+|---|---|---|---|
+| Transaction | 4, typed transaction | the `0x02`-prefixed unsigned EIP-1559 serialization | `keccak256` of what was sent |
+| `personal_sign`, login | 3, personal message | the raw message | the EIP-191 digest |
+| `eth_signTypedData_v4` | 2, typed data | JSON rebuilt from the canonical values the review hashed (integers as decimal strings, bytes and addresses as hex) | the EIP-712 digest the review computed |
 
-- `bc_ur_dart` — UR encoding/decoding with fountain codes
-- `cbor` — CBOR serialization for UR payloads
+**The device ignores the address field and signs by path**, so the reply proves nothing by arriving. `KeystoneSignService.signEthereum` recovers the signer from the `eth-signature` over the digest computed in the app and accepts it only when it is the row's address. The same check refuses a typed-data signature over JSON the device hashed differently. The device writes `v` as 0/1, 27/28 or in EIP-155 form; it is normalised to 27/28, and a transaction's envelope is reassembled exactly as for a Ledger. Legacy (pre-EIP-1559) transactions are refused.
 
-## External References
+## What is stored
 
-- [Keystone Developer Portal](https://dev.keyst.one/docs/intro)
-- [Keystone Solana Integration Guide](https://dev.keyst.one/docs/integration-tutorial-advanced/solana)
-- [Blockchain Commons UR Specification](https://developer.blockchaincommons.com/ur/)
-- [Animated QR / Fountain Codes](https://developer.blockchaincommons.com/animated-qrs/)
-- [bc_ur_dart on pub.dev](https://pub.dev/packages/bc_ur_dart)
-- [KeystoneHQ GitHub](https://github.com/KeystoneHQ)
-- [Keystone SDK (JS/TS)](https://www.npmjs.com/package/@keystonehq/keystone-sdk)
-- [Keystone SDK iOS](https://github.com/KeystoneHQ/keystone-sdk-ios)
-- [Keystone SDK Android (JitPack)](https://github.com/KeystoneHQ/keystone-sdk-android)
+| Where | What |
+|---|---|
+| `Wallets` row | address, `walletType = 'keystone'`, `chain`, `derivationIndex`, `derivationScheme`, `masterFingerprint` |
+| `Accounts` row | `kind = 'keystone'`, `derivationIndex`, `masterFingerprint` |
+| Recovery graph | the same fields, so a restored row can still build a request |
 
-## Solana Derivation Path
+Keystone accounts are keyed by (fingerprint, index), because two Keystones both export index 0. Nothing is written to either secret store, so removing a Keystone wallet deletes no secret.
 
-Standard BIP44: `m/44'/501'/{account}'/0'` (coin type 501 per SLIP-44)
+## The protocol
 
-Compatible with Phantom, Solflare, and other major Solana wallets.
+Keystone speaks Blockchain Commons **Uniform Resources** (UR): CBOR payloads in `ur:<type>/…` strings, split into fountain-coded parts when they do not fit one QR code. `packages/keystone_ur/` is a pure-Dart implementation of the parts mallow needs.
 
-## Firmware Requirements
+Keystone uses the **original** registry tags — `crypto-hdkey` 303, `crypto-keypath` 304, `uuid` 37 — not their 40303/40304 replacements.
 
-Users need Keystone firmware **M-6.8+** for Solana mobile wallet integration.
+| Type | Tag | Map |
+|---|---|---|
+| `sol-sign-request` | 1101 | 1: request id `#6.37(bytes16)` · 2: sign data · 3: `#6.304` keypath with the master fingerprint · 5: origin · 6: 1 transaction / 2 message |
+| `sol-signature` | 1102 | 1: request id · 2: 64-byte Ed25519 signature |
+| `crypto-multi-accounts` | 1103 | 1: master fingerprint · 2: `[#6.303 crypto-hdkey]` · 3: device · 4: device id · 5: version |
+| `eth-sign-request` | 401 | 1: request id · 2: sign data · 3: data type · 4: chain id · 5: keypath with the master fingerprint · 6: address (ignored by the firmware) · 7: origin |
+| `eth-signature` | 402 | 1: request id · 2: `r ‖ s ‖ v` |
+
+Key 4 of `sol-sign-request` (address) is never sent: the firmware ignores it, and Keystone's own SDKs disagree on its encoding. Key 6 is also ignored by the firmware, which works out for itself whether the bytes are a transaction or a message. Animated codes use 200-byte fragments at 150 ms per frame, in upper case so the QR uses alphanumeric mode.
+
+## Not yet
+
+- Ethereum accounts in the Ledger Live or Ledger Legacy layouts.
+- Verification of Ethereum signing on a physical Keystone 3 Pro, including how the device shows typed data and personal messages.
+- Key Derivation Call, where the app shows a request for the paths it wants and the device answers with an export.
+
+## References
+
+- [BCR-2020-005: Uniform Resources](https://github.com/BlockchainCommons/Research/blob/master/papers/bcr-2020-005-ur.md)
+- [BCR-2020-006: UR type registry](https://github.com/BlockchainCommons/Research/blob/master/papers/bcr-2020-006-urtypes.md)
+- [Keystone SDK (Rust registry)](https://github.com/KeystoneHQ/keystone-sdk-rust/tree/master/libs/ur-registry)
+- [Keystone 3 firmware](https://github.com/KeystoneHQ/keystone3-firmware)

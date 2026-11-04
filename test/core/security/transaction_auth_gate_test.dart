@@ -62,6 +62,116 @@ void main() {
     ).thenAnswer((_) async => null);
   });
 
+  group('browser flows', () {
+    tearDown(() {
+      debugShowSwapOverride = null;
+      debugShowNftCommerceOverride = null;
+    });
+
+    for (final flow in [AppFlow.browserTransaction, AppFlow.browserMessage]) {
+      test('${flow.wire} remains available in all store variants', () async {
+        debugShowSwapOverride = false;
+        debugShowNftCommerceOverride = false;
+        when(
+          () => storage.loadTransactionAuthEnabled(),
+        ).thenAnswer((_) async => false);
+        expect(
+          await gate.authorize(usdValue: null, flow: FlowKey.solana(flow)),
+          TransactionAuthOutcome.allowed,
+        );
+      });
+
+      for (final enabled in [false, true]) {
+        test('${flow.wire} kill switch precedes step-up $enabled', () async {
+          when(
+            () => storage.loadTransactionAuthEnabled(),
+          ).thenAnswer((_) async => enabled);
+          remoteConfig.notifier.value = RemoteConfig(
+            disabledMessages: {'solana:${flow.wire}': 'Browser signing paused'},
+          );
+          final outcome = await gate.authorize(
+            usdValue: 0,
+            flow: FlowKey.solana(flow),
+          );
+          expect(outcome.disabledMessage, 'Browser signing paused');
+          verifyNever(() => storage.loadTransactionAuthEnabled());
+        });
+      }
+
+      test('${flow.wire} unknown value requires enabled step-up', () async {
+        when(
+          () => storage.loadBiometricEnabled(),
+        ).thenAnswer((_) async => false);
+        when(() => storage.hasPin()).thenAnswer((_) async => false);
+        expect(
+          await gate.authorize(usdValue: null, flow: FlowKey.solana(flow)),
+          TransactionAuthOutcome.unavailable,
+        );
+      });
+
+      for (final chain in [Chain.ethereum, Chain.tezos]) {
+        test('${flow.wire} is implemented for the $chain provider', () async {
+          when(
+            () => storage.loadTransactionAuthEnabled(),
+          ).thenAnswer((_) async => false);
+          expect(
+            await gate.authorize(usdValue: null, flow: FlowKey(chain, flow)),
+            TransactionAuthOutcome.allowed,
+          );
+          expect(unsupportedReports, isEmpty);
+        });
+
+        for (final enabled in [false, true]) {
+          test(
+            '${flow.wire} $chain kill switch precedes step-up $enabled',
+            () async {
+              when(
+                () => storage.loadTransactionAuthEnabled(),
+              ).thenAnswer((_) async => enabled);
+              remoteConfig.notifier.value = RemoteConfig(
+                disabledMessages: {
+                  '${chain.toDbString()}:${flow.wire}':
+                      'Browser signing paused',
+                },
+              );
+              expect(
+                (await gate.authorize(
+                  usdValue: 0,
+                  flow: FlowKey(chain, flow),
+                )).disabledMessage,
+                'Browser signing paused',
+              );
+              verifyNever(() => storage.loadTransactionAuthEnabled());
+              verifyZeroInteractions(biometric);
+              expect(unsupportedReports, isEmpty);
+              when(
+                () => storage.loadTransactionAuthEnabled(),
+              ).thenAnswer((_) async => false);
+              expect(
+                await gate.authorize(usdValue: 0, flow: FlowKey.solana(flow)),
+                TransactionAuthOutcome.allowed,
+              );
+            },
+          );
+        }
+
+        test(
+          '${flow.wire} $chain unknown value requires enabled step-up',
+          () async {
+            when(
+              () => storage.loadBiometricEnabled(),
+            ).thenAnswer((_) async => false);
+            when(() => storage.hasPin()).thenAnswer((_) async => false);
+            expect(
+              await gate.authorize(usdValue: null, flow: FlowKey(chain, flow)),
+              TransactionAuthOutcome.unavailable,
+            );
+          },
+        );
+      }
+    }
+  });
+
   group('authorize (master switch)', () {
     test(
       'off by default: never prompts, ignores value and threshold',
@@ -263,6 +373,20 @@ void main() {
         // unimplemented-cell case rather than swallowed.
         expect(unsupportedReports, [buy]);
         verifyZeroInteractions(biometric);
+        verifyNever(() => storage.loadTransactionAuthEnabled());
+      },
+    );
+
+    test(
+      'Ethereum OpenSea buy respects the store gate with step-up off',
+      () async {
+        debugShowNftCommerceOverride = false;
+        when(
+          () => storage.loadTransactionAuthEnabled(),
+        ).thenAnswer((_) async => false);
+        const buy = FlowKey(Chain.ethereum, AppFlow.fixedPriceBuy);
+        final outcome = await gate.authorize(usdValue: null, flow: buy);
+        expect(outcome.disabledMessage, kStoreGatedFlowMessage);
         verifyNever(() => storage.loadTransactionAuthEnabled());
       },
     );

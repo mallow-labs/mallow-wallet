@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
@@ -38,6 +39,7 @@ import '../../../shared/widgets/mallow_refresh_indicator.dart';
 import '../../../shared/widgets/mallow_sheet.dart';
 import '../../../shared/widgets/mallow_underline_tab_bar.dart';
 import '../../../shared/widgets/new_curation_sheet.dart';
+import '../../../shared/widgets/pinned_top_bar.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
 import '../../../shared/widgets/user_handle_text.dart';
 import '../../../shared/widgets/verified_badge.dart';
@@ -323,8 +325,9 @@ class _CollectionScreenState extends State<CollectionScreen> {
     final ro = ctx.findRenderObject();
     if (ro is! RenderBox || !ro.attached) return;
     final dy = ro.localToGlobal(Offset.zero).dy;
-    final safeAreaTop = MediaQuery.of(context).padding.top;
-    final fade = ((dy - safeAreaTop) / _topFadeRange).clamp(0.0, 1.0);
+    // Pins below the [PinnedTopBar] that fades in with the floating overlay.
+    final pinTop = MediaQuery.of(context).padding.top + PinnedTopBar.rowHeight;
+    final fade = ((dy - pinTop) / _topFadeRange).clamp(0.0, 1.0);
     if ((fade - _topContentOpacity).abs() > 0.005) {
       setState(() => _topContentOpacity = fade);
     }
@@ -549,6 +552,8 @@ class _CollectionScreenState extends State<CollectionScreen> {
   }
 
   Future<void> _showArtworkContextMenu(PortfolioArtwork artwork) async {
+    // Long-press confirmation haptic, as in `showAndHandleArtworkContextMenu`.
+    unawaited(HapticFeedback.mediumImpact());
     final action = await showArtworkContextMenu(context, artwork: artwork);
     if (!mounted) return;
     final item = CastQueueItemFromArtwork.fromPortfolioArtwork(artwork);
@@ -981,8 +986,8 @@ class _CollectionScreenState extends State<CollectionScreen> {
               ),
             ),
 
-            // Floating sort/display bar with safe-area inset that fades in as
-            // the in-flow bar approaches the notch. Slides 20px into place
+            // Floating top bar + sort/display bar that fades in as the
+            // in-flow bar reaches the top bar's bottom edge. Slides 20px into place
             // during the fade so contents stay aligned during the cross-fade.
             Positioned(
               top: _topFadeRange * _topContentOpacity,
@@ -992,13 +997,23 @@ class _CollectionScreenState extends State<CollectionScreen> {
                 ignoring: _topContentOpacity > 0.5,
                 child: Opacity(
                   opacity: 1 - _topContentOpacity,
-                  child: _CollectionSortBar(
-                    sortLabel: _sortLabel,
-                    activeSort: _sort,
-                    viewModeIconAsset: _viewModeIcon,
-                    onSort: _applySort,
-                    onCycleViewMode: _cycleViewMode,
-                    topInset: safeAreaTop,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      PinnedTopBar(
+                        topInset: safeAreaTop,
+                        title: widget.group.name,
+                        onBack: () => Navigator.of(context).pop(),
+                        onMenuTap: _showOptionsSheet,
+                      ),
+                      _CollectionSortBar(
+                        sortLabel: _sortLabel,
+                        activeSort: _sort,
+                        viewModeIconAsset: _viewModeIcon,
+                        onSort: _applySort,
+                        onCycleViewMode: _cycleViewMode,
+                      ),
+                    ],
                   ),
                 ),
               ),

@@ -30,6 +30,7 @@ import '../../../shared/widgets/sheet_drag_handle.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
 import '../../portfolio/data/jupiter_verified_token_list_service.dart';
 import '../../portfolio/data/session_portfolio_aggregator.dart';
+import '../../portfolio/data/token_repository.dart';
 import '../../portfolio/models/token_balance.dart';
 import '../../portfolio/services/token_balance_bloc.dart';
 import '../../send/widgets/send_sheet_widgets.dart';
@@ -154,11 +155,31 @@ class _SwapSheetState extends State<SwapSheet> {
   /// case the picker falls back to the active signer's own balances.
   List<TokenBalance> _sessionTokens = const [];
 
+  /// Bumped by every [_loadSessionTokens] run so a slower, older run can't
+  /// overwrite the rows a newer one produced.
+  int _sessionTokensLoad = 0;
+
+  /// Re-reads [_sessionTokens] when a session wallet's cached balances change.
+  StreamSubscription<String>? _balancesInvalidatedSub;
+
   @override
   void initState() {
     super.initState();
     unawaited(_loadSourceAddress());
     unawaited(_loadSessionTokens());
+    // The sheet stays open after a swap, and its pickers read [_sessionTokens],
+    // not the per-signer bloc — without this a token just swapped out in full
+    // still lists at its pre-swap balance. The swap's reconcile writes the
+    // confirmed balances to the cache and then signals here.
+    if (sl.isRegistered<TokenRepository>()) {
+      _balancesInvalidatedSub = sl<TokenRepository>().balancesInvalidated
+          .listen((address) {
+            if (!mounted) return;
+            final session = sl<SessionPortfolioAggregator>()
+                .sessionSolanaAddresses();
+            if (session.contains(address)) unawaited(_loadSessionTokens());
+          });
+    }
     // Seed any pre-selected sides before the first balance push so
     // _onBalancesUpdated refreshes (rather than overwrites) them.
     final sell = widget.initialSellToken;
@@ -179,6 +200,7 @@ class _SwapSheetState extends State<SwapSheet> {
 
   @override
   void dispose() {
+    unawaited(_balancesInvalidatedSub?.cancel());
     _quoteDebounce?.cancel();
     _countdownTicker?.cancel();
     _amountController.dispose();
@@ -413,6 +435,7 @@ class _SwapSheetState extends State<SwapSheet> {
   /// the network, so a session wallet whose cache was never read still
   /// contributes its holdings.
   Future<void> _loadSessionTokens() async {
+    final load = ++_sessionTokensLoad;
     final aggregator = sl<SessionPortfolioAggregator>();
     // Cache first, then the network — sequentially, so a fast network pass
     // can't be clobbered by a slower cache read landing after it. An empty
@@ -426,7 +449,7 @@ class _SwapSheetState extends State<SwapSheet> {
         final tokens = await aggregator.signableSolanaBalances(
           refresh: refresh,
         );
-        if (!mounted) return;
+        if (!mounted || load != _sessionTokensLoad) return;
         if (tokens.isNotEmpty) setState(() => _sessionTokens = tokens);
       } catch (_) {
         // Try the next pass, or keep what the previous one produced.
@@ -437,8 +460,14 @@ class _SwapSheetState extends State<SwapSheet> {
   /// Both pickers' rows: everything the session's signable wallets hold — the
   /// same holdings the portfolio's Tokens tab lists — falling back to the
   /// active signer's own balances until that read lands.
-  List<TokenBalance> _sessionCandidates() =>
-      _sessionTokens.isEmpty ? _heldTokens() : _sessionTokens;
+  ///
+  /// Zero balances are dropped (native SOL excepted): a swap that sells a
+  /// token in full leaves its cached row at zero rather than deleting it, and
+  /// a token nobody holds is neither sellable nor "owned".
+  List<TokenBalance> _sessionCandidates() => [
+    for (final token in _sessionTokens.isEmpty ? _heldTokens() : _sessionTokens)
+      if (token.isNative || token.rawBalance > 0) token,
+  ];
 
   /// [selected] as the *signing* wallet holds it, at zero when it holds none.
   ///
@@ -792,7 +821,7 @@ class _SwapSheetState extends State<SwapSheet> {
     final colors = context.mallowColors;
     final sellToken = state.sellToken;
 
-    double? usd = state.quoteData?.order.inUsdValue?.toDouble();
+    double? usd = state.quoteData?.inUsdValue;
     if (usd == null && sellToken != null) {
       final raw = TokenAmount.toInt(
         TokenAmount.parseTokenAmount(state.amount, sellToken.decimals),
@@ -831,8 +860,8 @@ class _SwapSheetState extends State<SwapSheet> {
 
     String? meta;
     if (quote != null) {
-      final inUsd = quote.order.inUsdValue?.toDouble();
-      final outUsd = quote.order.outUsdValue?.toDouble();
+      final inUsd = quote.inUsdValue;
+      final outUsd = quote.outUsdValue;
       if (outUsd != null) {
         meta = '~\$${outUsd.toStringAsFixed(2)}';
         if (inUsd != null && inUsd > 0) {

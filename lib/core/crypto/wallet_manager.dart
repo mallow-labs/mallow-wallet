@@ -4,12 +4,18 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:get_it/get_it.dart';
 import 'package:injectable/injectable.dart';
+import 'package:ledger_ethereum/ledger_ethereum.dart'
+    show Eip712LedgerField, Eip712LedgerMessage;
+import 'package:keystone_ur/keystone_ur.dart' show EthDataType;
 import 'package:ledger_solana/ledger_solana.dart';
 import 'package:solana/base58.dart';
+import 'package:pointycastle/digests/blake2b.dart';
 import 'package:solana/encoder.dart';
 import 'package:solana/solana.dart';
-import 'package:web3dart/web3dart.dart' show Transaction;
+import 'package:web3dart/web3dart.dart'
+    show Transaction, bytesToHex, hexToBytes, keccak256;
 
+import '../config/environment.dart';
 import '../database/database.dart' hide Wallet;
 import '../database/database.dart' as db show Wallet;
 import '../models/account.dart';
@@ -17,18 +23,22 @@ import '../network/ledger_connect_controller.dart';
 import '../observability/app_logger.dart';
 import '../security/secure_storage.dart';
 import '../services/ledger_service.dart';
+import '../services/keystone_sign_service.dart';
 import '../services/seed_vault_service.dart';
 import '../services/social_auth_service.dart';
 import '../services/wallet_repository.dart';
 import 'derivation.dart';
+import 'ed25519_verify.dart';
+import 'solana_v1_transaction.dart';
+import 'eip712.dart';
 import 'exceptions.dart';
+import 'login_challenge.dart';
 
 import '../../shared/utils/chain.dart';
 
 const _tag = 'WalletManager';
 
-/// Result of signing the backend login challenge (`<message>\n\ntoken:<token>`)
-/// for a wallet.
+/// Result of signing a backend login challenge for a wallet.
 ///
 /// [signature]'s encoding is chain-specific: Solana → base58, Ethereum → `0x`
 /// hex (EIP-191), Tezos → `edsig…`. [publicKey] and [timestamp] are populated
@@ -55,11 +65,13 @@ class _IsolateSignTask {
     required this.messageBytes,
     this.mnemonic,
     this.account = 0,
+    this.scheme = SolanaDerivationScheme.standard,
     this.privateKey,
   });
 
   final String? mnemonic;
   final int account;
+  final SolanaDerivationScheme scheme;
   final List<int>? privateKey;
   final List<int> messageBytes;
 }
@@ -76,10 +88,10 @@ class _IsolateSignResult {
 Future<_IsolateSignResult> _signOnIsolate(_IsolateSignTask task) async {
   final Ed25519HDKeyPair keypair;
   if (task.mnemonic != null) {
-    keypair = await Ed25519HDKeyPair.fromMnemonic(
+    keypair = await MultiChainDerivation.deriveSolanaWithScheme(
       task.mnemonic!,
-      account: task.account,
-      change: 0,
+      task.account,
+      task.scheme,
     );
   } else if (task.privateKey != null) {
     keypair = await Ed25519HDKeyPair.fromPrivateKeyBytes(
@@ -105,6 +117,7 @@ class WalletManager {
     this._walletRepo,
     this._ledgerService,
     this._seedVaultService,
+    this._keystoneSignService,
   );
 
   final SecureWalletStorage _storage;
@@ -112,6 +125,7 @@ class WalletManager {
   final WalletRepository _walletRepo;
   final LedgerService _ledgerService;
   final SeedVaultService _seedVaultService;
+  final KeystoneSignService _keystoneSignService;
 
   /// Stream controller for wallet change events.
   final _walletChangedController = StreamController<String>.broadcast();
@@ -204,6 +218,9 @@ class WalletManager {
       case WalletType.seedVault:
         return _signMessageWithSeedVault(message, address: row!.address);
 
+      case WalletType.keystone:
+        return _signMessageWithKeystone(message, row: row!);
+
       case WalletType.hd:
       case WalletType.importedKey:
       case WalletType.social:
@@ -226,30 +243,58 @@ class WalletManager {
   /// Exhaustive for the same reason as [signMessage].
   Future<Signature> signMessageForWallet(
     String walletId,
-    List<int> message,
-  ) async {
+    List<int> message, {
+    String? expectedAddress,
+    void Function()? ensureActive,
+    Future<void>? cancelled,
+  }) async {
     final row = await _db.getWalletById(walletId);
-    final type = row == null ? null : WalletType.fromDbString(row.walletType);
+    if (row == null ||
+        (expectedAddress != null && row.address != expectedAddress)) {
+      throw NoWalletException();
+    }
+    ensureActive?.call();
+    final type = WalletType.fromDbString(row.walletType);
 
     switch (type) {
       case WalletType.ledger:
         return _signMessageWithLedger(
           message,
-          address: row!.address,
+          address: row.address,
           account: row.derivationIndex ?? 0,
           scheme: _schemeFromRow(row),
+          ensureActive: ensureActive,
         );
 
       case WalletType.seedVault:
-        return _signMessageWithSeedVault(message, address: row!.address);
+        ensureActive?.call();
+        return _signMessageWithSeedVault(message, address: row.address);
+
+      case WalletType.keystone:
+        ensureActive?.call();
+        // [cancelled] closes the sheet when the request is abandoned, so an
+        // obsolete QR exchange does not hold up the requests behind it.
+        final signature = await _signMessageWithKeystone(
+          message,
+          row: row,
+          cancelled: cancelled,
+        );
+        // The QR exchange can take a minute; the request may have been
+        // superseded while the user was scanning.
+        ensureActive?.call();
+        return signature;
 
       case WalletType.hd:
       case WalletType.importedKey:
       case WalletType.social:
       case WalletType.viewOnly:
-      case null:
-        // A missing row throws [NoWalletException] inside the loader.
+        // The key loader enforces the view-only restriction.
         final keypair = await _getKeypairForWallet(walletId);
+        ensureActive?.call();
+        if (expectedAddress != null &&
+            keypair.publicKey.toBase58() != expectedAddress) {
+          throw StateError('Wallet key does not match the approved address');
+        }
         return keypair.sign(message);
     }
   }
@@ -260,15 +305,16 @@ class WalletManager {
     required String address,
     required int account,
     SolanaDerivationScheme scheme = SolanaDerivationScheme.standard,
+    void Function()? ensureActive,
   }) async {
-    final sigBytes = await _withLedgerConnection(
-      address,
-      () => _ledgerService.signMessage(
+    final sigBytes = await _withLedgerConnection(address, () {
+      ensureActive?.call();
+      return _ledgerService.signMessage(
         Uint8List.fromList(message),
         account: account,
         scheme: scheme,
-      ),
-    );
+      );
+    });
     return Signature(
       sigBytes.toList(),
       publicKey: Ed25519HDPublicKey.fromBase58(address),
@@ -299,6 +345,58 @@ class WalletManager {
     return Signature(
       sigBytes.toList(),
       publicKey: Ed25519HDPublicKey.fromBase58(address),
+    );
+  }
+
+  /// Sign a message with a Keystone, returning [Signature].
+  ///
+  /// The device signs the bytes verbatim — it shows text it can read as
+  /// text, anything else as hex — so an ordinary ed25519 verification over
+  /// these bytes succeeds, as for Seed Vault. [KeystoneSignService] has
+  /// already checked that before this returns.
+  Future<Signature> _signMessageWithKeystone(
+    List<int> message, {
+    required db.Wallet row,
+    Future<void>? cancelled,
+  }) async {
+    final sigBytes = await _signWithKeystone(
+      row,
+      message,
+      KeystoneSignPurpose.message,
+      cancelled: cancelled,
+    );
+    return Signature(
+      sigBytes.toList(),
+      publicKey: Ed25519HDPublicKey.fromBase58(row.address),
+    );
+  }
+
+  /// One Keystone QR round trip for [row] over [payload].
+  ///
+  /// The request is built from the row's own fingerprint, index and scheme —
+  /// the values the device reported at import — and the reply is accepted only
+  /// once it verifies against [row]'s address.
+  Future<Uint8List> _signWithKeystone(
+    db.Wallet row,
+    List<int> payload,
+    KeystoneSignPurpose purpose, {
+    Future<void>? cancelled,
+  }) {
+    // This is the Solana signer; Ethereum rows sign through
+    // [_signEthereumWithKeystone]. A non-Solana row reaching here is an
+    // invariant violation upstream; refuse it as the other Solana-only
+    // loaders do.
+    if (Chain.fromDbString(row.chain) != Chain.solana) {
+      throw NonSolanaSigningWalletException();
+    }
+    return _keystoneSignService.signSolana(
+      payload: Uint8List.fromList(payload),
+      address: row.address,
+      masterFingerprint: row.masterFingerprint ?? 0,
+      derivationIndex: row.derivationIndex ?? 0,
+      scheme: _schemeFromRow(row),
+      purpose: purpose,
+      cancelled: cancelled,
     );
   }
 
@@ -347,6 +445,16 @@ class WalletManager {
         );
         return vaultSignature.toBase58();
 
+      case WalletType.keystone:
+        // Also the login path, exactly as for Seed Vault above: Keystone signs
+        // the challenge bytes verbatim and shows them as text, so the ordinary
+        // verify body works.
+        final keystoneSignature = await _signMessageWithKeystone(
+          message,
+          row: row,
+        );
+        return keystoneSignature.toBase58();
+
       case WalletType.viewOnly:
         throw ViewOnlyWalletException();
     }
@@ -368,25 +476,40 @@ class WalletManager {
   /// Sign the backend login challenge for [walletId], producing a chain-specific
   /// [LoginChallengeSignature] for `/authToken/verify`.
   ///
-  /// The signed payload is `<message>\n\ntoken:<token>` (e.g. `mallow Login`).
+  /// Without [token], signs [message] verbatim (Sign in with Solana), but only
+  /// once [checkSolanaLoginChallenge] accepts it as a fresh first-party sign-in
+  /// for this row's address: it is signed with no review, so the server's word
+  /// is not enough. A refusal throws [LoginChallengeRejectedException] before
+  /// any signer, hardware included, is reached. With a token, signs
+  /// `<message>\n\ntoken:<token>` for the legacy chain flows.
   /// Solana keeps the existing base58 ed25519 path (incl. social/Ledger).
   /// Ethereum and Tezos sign locally with the wallet's own key — the
   /// seed-derived one for HD rows, the stored raw key for imported/social rows
   /// (EIP-191 for ETH, Micheline/Blake2b/Ed25519 for Tezos) — to match how
-  /// the reference web client signs and how the backend verifies. Ledger eth/tez is
-  /// display-only and has no path here.
+  /// the reference web client signs and how the backend verifies. A Keystone
+  /// Ethereum row signs the same EIP-191 message on the device. Ledger eth/tez
+  /// has no path here.
   Future<LoginChallengeSignature> signLoginChallenge(
     String walletId, {
     required String message,
-    required String token,
+    String? token,
   }) async {
     final row = await _db.getWalletById(walletId);
     if (row == null) throw NoWalletException();
     final chain = Chain.fromDbString(row.chain);
-    final messageToSign = '$message\n\ntoken:$token';
+    // Only Solana has a verbatim challenge; the other chains always sign the
+    // fixed prefix plus a nonce, so a missing token there is a caller bug that
+    // would otherwise sign arbitrary text.
+    if (token == null && chain != Chain.solana) {
+      throw LoginChallengeRejectedException('it carries no login token');
+    }
+    final messageToSign = token == null ? message : '$message\n\ntoken:$token';
 
     switch (chain) {
       case Chain.solana:
+        if (token == null) {
+          checkSolanaLoginChallenge(messageToSign, address: row.address);
+        }
         final signature = await signMessageBase58ForWallet(
           walletId,
           utf8.encode(messageToSign),
@@ -396,7 +519,18 @@ class WalletManager {
       case Chain.ethereum:
         final message = utf8.encode(messageToSign);
         final String signature;
-        if (_usesStoredRawKey(row)) {
+        if (WalletType.fromDbString(row.walletType) == WalletType.keystone) {
+          // EIP-191 on the device, checked against the row's address before
+          // it is returned — the same proof the local keys produce.
+          final sig = await _signEthereumWithKeystone(
+            row,
+            signData: Uint8List.fromList(message),
+            dataType: EthDataType.personalMessage,
+            digest: MultiChainDerivation.ethereumPersonalMessageDigest(message),
+            chainId: Config.ethereumChainId,
+          );
+          signature = '0x${bytesToHex(sig)}';
+        } else if (_usesStoredRawKey(row)) {
           final priv = await _withSocialKeyRecovery(
             row,
             () => _loadImportedRawKey(row),
@@ -459,7 +593,7 @@ class WalletManager {
   Future<LoginChallengeSignature> signLoginChallengeForAddress(
     String address, {
     required String message,
-    required String token,
+    String? token,
   }) async {
     final row = await _db.getWalletByAddress(address);
     if (row == null) throw NoWalletException();
@@ -469,30 +603,39 @@ class WalletManager {
   /// Sign a locally-forged Tezos operation ([forgedHex] from
   /// `forgeOperationGroup`) with the Tezos wallet [walletId].
   ///
-  /// v1 scope — HD, imported-key and social wallets only. Ledger and view-only
-  /// Tezos wallets throw [TezosOperationSigningNotSupportedException]; there is
-  /// no local Ed25519 key to sign with and hardware Tezos operation signing is
-  /// not wired.
+  /// HD, imported-key and social wallets sign locally. Ledger wallets sign
+  /// on-device after their public key is checked against the approved address;
+  /// the signature is verified before returning. Unsupported wallet types throw
+  /// [TezosOperationSigningNotSupportedException].
   ///
   /// Returns the `edsig…` signature and `signedOperationHex`
   /// (`forgedHex ++ raw-signature-hex`) for `/injection/operation`.
   Future<({String signature, String signedOperationHex})> signTezosOperation(
     String walletId,
-    String forgedHex,
-  ) async {
+    String forgedHex, {
+    String? expectedAddress,
+    void Function()? ensureActive,
+    Future<void>? cancelled,
+  }) async {
     final row = await _db.getWalletById(walletId);
     if (row == null) throw NoWalletException();
     if (Chain.fromDbString(row.chain) != Chain.tezos) {
       throw StateError('Wallet $walletId is not a Tezos wallet');
     }
+    if (expectedAddress != null && row.address != expectedAddress) {
+      throw StateError('The Tezos wallet no longer matches the review');
+    }
+    ensureActive?.call();
 
     switch (WalletType.fromDbString(row.walletType)) {
       case WalletType.hd:
         final mnemonic = await _loadHdMnemonic(row);
+        ensureActive?.call();
         return MultiChainDerivation.signTezosOperation(
           mnemonic,
           row.derivationIndex ?? 0,
           forgedHex,
+          ensureActive: ensureActive,
         );
       case WalletType.importedKey:
       case WalletType.social:
@@ -500,14 +643,122 @@ class WalletManager {
           row,
           () => _loadImportedRawKey(row),
         );
-        return MultiChainDerivation.signTezosOperationWithSeed(seed, forgedHex);
+        ensureActive?.call();
+        return MultiChainDerivation.signTezosOperationWithSeed(
+          seed,
+          forgedHex,
+          ensureActive: ensureActive,
+        );
       case WalletType.ledger:
+        return _withLedgerConnection(row.address, () async {
+          ensureActive?.call();
+          final publicKey = await _tezosLedgerPublicKey(
+            row,
+            cancelled: cancelled,
+            ensureActive: ensureActive,
+          );
+          ensureActive?.call();
+          final forged = hexToBytes(forgedHex);
+          final signature = await _ledgerService.signTezosOperation(
+            forged,
+            account: row.derivationIndex ?? 0,
+            cancelled: cancelled,
+            ensureActive: ensureActive,
+          );
+          ensureActive?.call();
+          await _verifyTezosLedgerSignature(
+            publicKey,
+            signature,
+            Uint8List.fromList([3, ...forged]),
+          );
+          ensureActive?.call();
+          return (
+            signature: MultiChainDerivation.encodeTezosEdsig(signature),
+            signedOperationHex:
+                forgedHex + bytesToHex(signature, include0x: false),
+          );
+        }, cancelled: cancelled);
       case WalletType.viewOnly:
       // Seed Vault's whole purpose enum is one value, Solana transaction
       // signing, so it holds no Tezos key and never will. A Seed Vault row is
       // a Solana row anyway; reaching here at all means something upstream is
       // wrong, and refusing is the only safe answer.
       case WalletType.seedVault:
+      // Keystone firmware has no Tezos app and no Tezos request type, so no
+      // Keystone row is ever a Tezos row.
+      case WalletType.keystone:
+        throw TezosOperationSigningNotSupportedException();
+    }
+  }
+
+  /// A browser message must be a packed Micheline string, never an operation
+  /// or arbitrary digest that could authorize spending without a review.
+  Future<String> signTezosPayloadForWallet(
+    String walletId,
+    Uint8List payload, {
+    required String expectedAddress,
+    required void Function() ensureActive,
+    Future<void>? cancelled,
+  }) async {
+    if (payload.length < 6 ||
+        payload[0] != 5 ||
+        payload[1] != 1 ||
+        ByteData.sublistView(payload).getUint32(2) != payload.length - 6) {
+      throw const FormatException('Expected a packed Micheline string');
+    }
+    utf8.decode(payload.sublist(6));
+    final row = await _db.getWalletById(walletId);
+    if (row == null) throw NoWalletException();
+    if (Chain.fromDbString(row.chain) != Chain.tezos ||
+        row.address != expectedAddress) {
+      throw StateError('The Tezos wallet no longer matches the review');
+    }
+    ensureActive();
+    switch (WalletType.fromDbString(row.walletType)) {
+      case WalletType.hd:
+        final mnemonic = await _loadHdMnemonic(row);
+        ensureActive();
+        return MultiChainDerivation.signTezosPayload(
+          mnemonic,
+          row.derivationIndex ?? 0,
+          payload,
+          ensureActive: ensureActive,
+        );
+      case WalletType.importedKey:
+      case WalletType.social:
+        final seed = await _withSocialKeyRecovery(
+          row,
+          () => _loadImportedRawKey(row),
+        );
+        ensureActive();
+        return MultiChainDerivation.signTezosPayloadWithSeed(
+          seed,
+          payload,
+          ensureActive: ensureActive,
+        );
+      case WalletType.ledger:
+        return _withLedgerConnection(row.address, () async {
+          ensureActive();
+          final publicKey = await _tezosLedgerPublicKey(
+            row,
+            cancelled: cancelled,
+            ensureActive: ensureActive,
+          );
+          ensureActive();
+          final signature = await _ledgerService.signTezosMessage(
+            payload,
+            account: row.derivationIndex ?? 0,
+            cancelled: cancelled,
+            ensureActive: ensureActive,
+          );
+          ensureActive();
+          await _verifyTezosLedgerSignature(publicKey, signature, payload);
+          ensureActive();
+          return MultiChainDerivation.encodeTezosEdsig(signature);
+        }, cancelled: cancelled);
+      case WalletType.viewOnly:
+      case WalletType.seedVault:
+      case WalletType.keystone:
         throw TezosOperationSigningNotSupportedException();
     }
   }
@@ -526,16 +777,20 @@ class WalletManager {
     String walletId,
     Transaction transaction, {
     required int chainId,
+    void Function()? ensureActive,
+    Future<void>? cancelled,
   }) async {
     final row = await _db.getWalletById(walletId);
     if (row == null) throw NoWalletException();
     if (Chain.fromDbString(row.chain) != Chain.ethereum) {
       throw StateError('Wallet $walletId is not an Ethereum wallet');
     }
+    ensureActive?.call();
 
     switch (WalletType.fromDbString(row.walletType)) {
       case WalletType.hd:
         final mnemonic = await _loadHdMnemonic(row);
+        ensureActive?.call();
         return MultiChainDerivation.signEthereumTransaction(
           mnemonic,
           row.derivationIndex ?? 0,
@@ -548,6 +803,7 @@ class WalletManager {
           row,
           () => _loadImportedRawKey(row),
         );
+        ensureActive?.call();
         return MultiChainDerivation.signEthereumTransactionWithKey(
           priv,
           transaction,
@@ -568,19 +824,50 @@ class WalletManager {
           transaction,
           chainId,
         );
-        final sig = await _withLedgerConnection(
-          row.address,
-          () => _ledgerService.signEthereumTransaction(
+        final sig = await _withLedgerConnection(row.address, () {
+          ensureActive?.call();
+          return _ledgerService.signEthereumTransaction(
             unsigned,
             account: row.derivationIndex ?? 0,
-          ),
-        );
+          );
+        }, cancelled: cancelled);
         return MultiChainDerivation.encodeSignedEip1559Transaction(
           transaction,
           chainId,
           v: sig.v,
           r: sig.r,
           s: sig.s,
+        );
+      case WalletType.keystone:
+        // The device is sent the same `0x02`-prefixed unsigned serialization a
+        // Ledger signs, as a typed transaction, and returns r‖s‖v. The sign
+        // service accepts the reply only when it recovers to this row's
+        // address; the envelope is then reassembled exactly as for Ledger.
+        if (!transaction.isEIP1559) {
+          throw EthereumTransactionSigningNotSupportedException(
+            'Keystone Ethereum signing supports EIP-1559 (type-2) '
+            'transactions only.',
+          );
+        }
+        final unsigned = MultiChainDerivation.unsignedEip1559Payload(
+          transaction,
+          chainId,
+        );
+        ensureActive?.call();
+        final sig = await _signEthereumWithKeystone(
+          row,
+          signData: unsigned,
+          dataType: EthDataType.typedTransaction,
+          digest: keccak256(unsigned),
+          chainId: chainId,
+          cancelled: cancelled,
+        );
+        return MultiChainDerivation.encodeSignedEip1559Transaction(
+          transaction,
+          chainId,
+          v: sig[64],
+          r: sig.sublist(0, 32),
+          s: sig.sublist(32, 64),
         );
       case WalletType.viewOnly:
       // Seed Vault signs Solana transactions and nothing else — there is no
@@ -592,17 +879,216 @@ class WalletManager {
     }
   }
 
+  /// EIP-191 `personal_sign` of [message] by the Ethereum wallet [walletId],
+  /// for a website request the user reviewed. Returns the 65-byte `r‖s‖v`.
+  ///
+  /// [expectedAddress] is the address the review named; a row whose address
+  /// differs (ignoring EIP-55 case) is refused before any key is loaded. The
+  /// caller still verifies the returned signature recovers to that address,
+  /// because a Ledger's reply proves nothing by arriving.
+  Future<Uint8List> signEthereumPersonalMessageForWallet(
+    String walletId,
+    Uint8List message, {
+    required String expectedAddress,
+    void Function()? ensureActive,
+    Future<void>? cancelled,
+  }) async {
+    final row = await _ethereumRowFor(walletId, expectedAddress);
+    ensureActive?.call();
+    switch (WalletType.fromDbString(row.walletType)) {
+      case WalletType.hd:
+        final mnemonic = await _loadHdMnemonic(row);
+        ensureActive?.call();
+        return hexToBytes(
+          (await MultiChainDerivation.signEthereumPersonalMessage(
+            mnemonic,
+            row.derivationIndex ?? 0,
+            message,
+          )).substring(2),
+        );
+      case WalletType.importedKey:
+      case WalletType.social:
+        final priv = await _withSocialKeyRecovery(
+          row,
+          () => _loadImportedRawKey(row),
+        );
+        ensureActive?.call();
+        return hexToBytes(
+          (await MultiChainDerivation.signEthereumPersonalMessageWithKey(
+            priv,
+            message,
+          )).substring(2),
+        );
+      case WalletType.ledger:
+        return _withLedgerConnection(row.address, () {
+          ensureActive?.call();
+          return _ledgerService.signEthereumPersonalMessage(
+            message,
+            account: row.derivationIndex ?? 0,
+          );
+        }, cancelled: cancelled);
+      case WalletType.keystone:
+        ensureActive?.call();
+        return _signEthereumWithKeystone(
+          row,
+          signData: Uint8List.fromList(message),
+          dataType: EthDataType.personalMessage,
+          digest: MultiChainDerivation.ethereumPersonalMessageDigest(message),
+          chainId: Config.ethereumChainId,
+          cancelled: cancelled,
+        );
+      case WalletType.viewOnly:
+      case WalletType.seedVault:
+        throw EthereumTransactionSigningNotSupportedException(
+          'This wallet cannot sign Ethereum messages.',
+        );
+    }
+  }
+
+  /// Signs EIP-712 [typedData] the user reviewed, with the Ethereum wallet
+  /// [walletId]. Returns the 65-byte `r‖s‖v`.
+  ///
+  /// Local keys sign [Eip712TypedData.digest]. A Ledger is sent the typed
+  /// data itself and hashes it on the device, so it can show the user each
+  /// domain and message field to confirm; only an Ethereum app too old for
+  /// that falls back to signing the domain and message hashes, which it
+  /// shows instead. The caller verifies the signature recovers to
+  /// [expectedAddress] either way.
+  Future<Uint8List> signEthereumTypedDataForWallet(
+    String walletId,
+    Eip712TypedData typedData, {
+    required String expectedAddress,
+    void Function()? ensureActive,
+    Future<void>? cancelled,
+  }) async {
+    final row = await _ethereumRowFor(walletId, expectedAddress);
+    ensureActive?.call();
+    final digest = typedData.digest;
+    switch (WalletType.fromDbString(row.walletType)) {
+      case WalletType.hd:
+        final mnemonic = await _loadHdMnemonic(row);
+        ensureActive?.call();
+        return MultiChainDerivation.signEthereumTypedDataDigest(
+          mnemonic,
+          row.derivationIndex ?? 0,
+          digest,
+        );
+      case WalletType.importedKey:
+      case WalletType.social:
+        final priv = await _withSocialKeyRecovery(
+          row,
+          () => _loadImportedRawKey(row),
+        );
+        ensureActive?.call();
+        return MultiChainDerivation.signEthereumTypedDataDigestWithKey(
+          priv,
+          digest,
+        );
+      case WalletType.ledger:
+        final message = Eip712LedgerMessage(
+          types: {
+            for (final MapEntry(key: name, value: fields)
+                in typedData.types.entries)
+              name: [
+                for (final field in fields)
+                  Eip712LedgerField(field.name, field.type),
+              ],
+          },
+          primaryType: typedData.primaryType,
+          domain: typedData.canonicalDomain,
+          message: typedData.canonicalMessage,
+        );
+        return _withLedgerConnection(row.address, () {
+          ensureActive?.call();
+          return _ledgerService.signEthereumTypedData(
+            message: message,
+            domainSeparator: typedData.domainSeparator,
+            messageHash: typedData.structHash,
+            account: row.derivationIndex ?? 0,
+            cancelled: cancelled,
+          );
+        }, cancelled: cancelled);
+      case WalletType.keystone:
+        // The device hashes the JSON itself and shows its fields. The JSON is
+        // re-serialized from the parsed payload that produced [digest], and
+        // the reply must recover to this row's address over that digest, so a
+        // device that hashed anything other than the reviewed payload is
+        // refused.
+        ensureActive?.call();
+        return _signEthereumWithKeystone(
+          row,
+          signData: Uint8List.fromList(utf8.encode(typedData.json)),
+          dataType: EthDataType.typedData,
+          digest: digest,
+          chainId: typedData.chainId?.toInt() ?? Config.ethereumChainId,
+          cancelled: cancelled,
+        );
+      case WalletType.viewOnly:
+      case WalletType.seedVault:
+        throw EthereumTransactionSigningNotSupportedException(
+          'This wallet cannot sign typed data.',
+        );
+    }
+  }
+
+  /// One Keystone QR round trip for the Ethereum [row]: the request names the
+  /// row's own fingerprint and index, and [KeystoneSignService.signEthereum]
+  /// accepts the reply only once it recovers to the row's address over
+  /// [digest]. Returns `r‖s‖v` with v = 27/28.
+  Future<Uint8List> _signEthereumWithKeystone(
+    db.Wallet row, {
+    required Uint8List signData,
+    required EthDataType dataType,
+    required Uint8List digest,
+    required int chainId,
+    Future<void>? cancelled,
+  }) {
+    if (Chain.fromDbString(row.chain) != Chain.ethereum) {
+      throw StateError('Wallet ${row.id} is not an Ethereum wallet');
+    }
+    return _keystoneSignService.signEthereum(
+      signData: signData,
+      dataType: dataType,
+      digest: digest,
+      chainId: chainId,
+      address: row.address,
+      masterFingerprint: row.masterFingerprint ?? 0,
+      derivationIndex: row.derivationIndex ?? 0,
+      cancelled: cancelled,
+    );
+  }
+
+  Future<db.Wallet> _ethereumRowFor(String walletId, String address) async {
+    final row = await _db.getWalletById(walletId);
+    if (row == null || row.address.toLowerCase() != address.toLowerCase()) {
+      throw NoWalletException();
+    }
+    if (Chain.fromDbString(row.chain) != Chain.ethereum) {
+      throw StateError('Wallet $walletId is not an Ethereum wallet');
+    }
+    return row;
+  }
+
   /// The `edpk…` Ed25519 public key for the Tezos wallet [walletId], for
   /// building a `reveal` content on a never-revealed account.
   ///
-  /// Same v1 scope as [signTezosOperation] — HD, imported-key and social only.
-  Future<String> getTezosPublicKey(String walletId) async {
+  /// Supports local signers and Ledger; the Ledger key must match the wallet row.
+  Future<String> getTezosPublicKey(
+    String walletId, {
+    String? expectedAddress,
+    void Function()? ensureActive,
+    Future<void>? cancelled,
+  }) async {
     final row = await _db.getWalletById(walletId);
     if (row == null) throw NoWalletException();
     if (Chain.fromDbString(row.chain) != Chain.tezos) {
       throw StateError('Wallet $walletId is not a Tezos wallet');
     }
 
+    if (expectedAddress != null && row.address != expectedAddress) {
+      throw StateError('The Tezos wallet no longer matches the review');
+    }
+    ensureActive?.call();
     switch (WalletType.fromDbString(row.walletType)) {
       case WalletType.hd:
         final mnemonic = await _loadHdMnemonic(row);
@@ -618,11 +1104,60 @@ class WalletManager {
         );
         return MultiChainDerivation.tezosPublicKeyFromSeed(seed);
       case WalletType.ledger:
+        return _withLedgerConnection(row.address, () async {
+          final key = await _tezosLedgerPublicKey(
+            row,
+            cancelled: cancelled,
+            ensureActive: ensureActive,
+          );
+          ensureActive?.call();
+          return MultiChainDerivation.encodeTezosEdpk(key);
+        }, cancelled: cancelled);
       case WalletType.viewOnly:
       // Solana-only, as in [signTezosOperation]: there is no Tezos key to
-      // publish for a Seed Vault row.
+      // publish for a Seed Vault or Keystone row.
       case WalletType.seedVault:
+      case WalletType.keystone:
         throw TezosOperationSigningNotSupportedException();
+    }
+  }
+
+  Future<Uint8List> _tezosLedgerPublicKey(
+    db.Wallet row, {
+    Future<void>? cancelled,
+    void Function()? ensureActive,
+  }) async {
+    ensureActive?.call();
+    final key = await _ledgerService.getTezosPublicKey(
+      account: row.derivationIndex ?? 0,
+      cancelled: cancelled,
+      ensureActive: ensureActive,
+    );
+    ensureActive?.call();
+    if (key.length != 32 ||
+        MultiChainDerivation.tezosAddressFromPublicKey(key) != row.address) {
+      throw StateError(
+        'The Ledger key does not match the approved Tezos wallet',
+      );
+    }
+    return key;
+  }
+
+  Future<void> _verifyTezosLedgerSignature(
+    Uint8List publicKey,
+    Uint8List signature,
+    Uint8List payload,
+  ) async {
+    final hash = Blake2bDigest(digestSize: 32).process(payload);
+    if (signature.length != 64 ||
+        !await isValidEd25519Signature(
+          hash,
+          signature,
+          base58encode(publicKey),
+        )) {
+      throw StateError(
+        'The Ledger signature does not match the approved Tezos wallet',
+      );
     }
   }
 
@@ -750,6 +1285,9 @@ class WalletManager {
           row!.address,
         );
 
+      case WalletType.keystone:
+        return _signTransactionWithKeystone(message, recentBlockhash, row!);
+
       case WalletType.hd:
       case WalletType.importedKey:
       case WalletType.social:
@@ -802,6 +1340,13 @@ class WalletManager {
               row.address,
               additionalSigners: additionalSigners,
             );
+          case WalletType.keystone:
+            return _signTransactionWithKeystone(
+              message,
+              recentBlockhash,
+              row,
+              additionalSigners: additionalSigners,
+            );
           case WalletType.social:
             throw SocialTransactionSigningNotSupportedException();
           case WalletType.viewOnly:
@@ -848,6 +1393,10 @@ class WalletManager {
   /// cannot be recompiled client-side without also fetching the ALTs.
   Future<SignedTx> signCompiledTx({
     required SignedTx unsignedTx,
+    String? walletId,
+    String? expectedAddress,
+    void Function()? ensureActive,
+    Future<void>? cancelled,
     List<Ed25519HDKeyPair> additionalSigners = const [],
   }) async {
     final messageBytes = unsignedTx.compiledMessage.toByteArray().toList();
@@ -882,8 +1431,15 @@ class WalletManager {
     // 1. User signature — routed by wallet type.
     Signature userSignature;
     Ed25519HDPublicKey userPubkey;
-    final walletId = await _storage.loadSelectedWalletId();
+    final explicitlyPinned = walletId != null;
+    walletId ??= await _storage.loadSelectedWalletId();
     final row = walletId == null ? null : await _db.getWalletById(walletId);
+    if (explicitlyPinned && row == null) throw NoWalletException();
+    if (expectedAddress != null &&
+        (row == null || row.address != expectedAddress)) {
+      throw NoWalletException();
+    }
+    ensureActive?.call();
     final walletType = row == null
         ? null
         : WalletType.fromDbString(row.walletType);
@@ -891,14 +1447,15 @@ class WalletManager {
     switch (walletType) {
       case WalletType.ledger:
         userPubkey = Ed25519HDPublicKey.fromBase58(row!.address);
-        final sigBytes = await _withLedgerConnection(
-          row.address,
-          () => _ledgerService.signTransaction(
+        final sigBytes = await _withLedgerConnection(row.address, () {
+          ensureActive?.call();
+          return _ledgerService.signTransaction(
             Uint8List.fromList(messageBytes),
             account: row.derivationIndex ?? 0,
             scheme: _schemeFromRow(row),
-          ),
-        );
+            cancelled: cancelled,
+          );
+        }, cancelled: cancelled);
         userSignature = Signature(sigBytes.toList(), publicKey: userPubkey);
       case WalletType.seedVault:
         userPubkey = Ed25519HDPublicKey.fromBase58(row!.address);
@@ -906,12 +1463,30 @@ class WalletManager {
         // payload verbatim — the same contract the Ledger arm satisfies — so
         // the backend's compiled message, its blockhash and any address-table
         // lookups survive untouched and the signature slots straight in.
+        ensureActive?.call();
         final vaultSigBytes = await _seedVaultService.signTransaction(
           Uint8List.fromList(messageBytes),
           address: row.address,
         );
         userSignature = Signature(
           vaultSigBytes.toList(),
+          publicKey: userPubkey,
+        );
+      case WalletType.keystone:
+        userPubkey = Ed25519HDPublicKey.fromBase58(row!.address);
+        // Same detached-signature contract as the two arms above: the device
+        // signs the compiled message bytes verbatim, so lookup tables, the
+        // backend's blockhash and its co-signatures all survive. The service
+        // has verified the reply against this address before it returns.
+        ensureActive?.call();
+        final keystoneSigBytes = await _signWithKeystone(
+          row,
+          messageBytes,
+          KeystoneSignPurpose.transaction,
+          cancelled: cancelled,
+        );
+        userSignature = Signature(
+          keystoneSigBytes.toList(),
           publicKey: userPubkey,
         );
       case WalletType.viewOnly:
@@ -925,9 +1500,14 @@ class WalletManager {
           walletType: walletType,
           messageBytes: messageBytes,
         );
+        ensureActive?.call();
         final result = await compute(_signOnIsolate, task);
         userPubkey = Ed25519HDPublicKey(result.publicKeyBytes);
         userSignature = Signature(result.signatureBytes, publicKey: userPubkey);
+    }
+    ensureActive?.call();
+    if (expectedAddress != null && userPubkey.toBase58() != expectedAddress) {
+      throw StateError('Wallet key does not match the approved address');
     }
     place(userSignature, userPubkey);
 
@@ -940,6 +1520,47 @@ class WalletManager {
       signatures: signatures,
       compiledMessage: unsignedTx.compiledMessage,
     );
+  }
+
+  /// Sign a v1 transaction with the active wallet, then each of
+  /// [additionalSigners].
+  ///
+  /// Only a key the app holds can sign v1: see [activeSignerCanSignV1]. Ask
+  /// that first and request v1 from a builder only when it is true; this
+  /// throws [UnsupportedError] for any other signer rather than hand it bytes
+  /// it would mis-parse.
+  Future<SolanaV1Transaction> signV1Tx({
+    required SolanaV1Transaction unsignedTx,
+    List<Ed25519HDKeyPair> additionalSigners = const [],
+  }) async {
+    final walletId = await _storage.loadSelectedWalletId();
+    final row = walletId == null ? null : await _db.getWalletById(walletId);
+    final walletType = row == null
+        ? null
+        : WalletType.fromDbString(row.walletType);
+    if (walletType == WalletType.viewOnly) throw ViewOnlyWalletException();
+    if (!_signsV1(walletType)) {
+      throw UnsupportedError('This wallet cannot sign a v1 transaction');
+    }
+    final messageBytes = unsignedTx.messageBytes;
+    final task = await _buildIsolateSignTask(
+      row: row,
+      walletType: walletType,
+      messageBytes: messageBytes.toList(),
+    );
+    final result = await compute(_signOnIsolate, task);
+    var signed = unsignedTx.withSignature(
+      Ed25519HDPublicKey(result.publicKeyBytes).toBase58(),
+      result.signatureBytes,
+    );
+    for (final signer in additionalSigners) {
+      final signature = await signer.sign(messageBytes);
+      signed = signed.withSignature(
+        signer.publicKey.toBase58(),
+        signature.bytes,
+      );
+    }
+    return signed;
   }
 
   /// Sign a transaction using a connected Ledger device.
@@ -1006,6 +1627,41 @@ class WalletManager {
     final sigBytes = await _seedVaultService.signTransaction(
       Uint8List.fromList(messageBytes),
       address: address,
+    );
+
+    final signature = Signature(sigBytes.toList(), publicKey: feePayer);
+
+    final extraSignatures = <Signature>[];
+    for (final signer in additionalSigners) {
+      extraSignatures.add(await signer.sign(messageBytes));
+    }
+
+    return SignedTx(
+      signatures: [signature, ...extraSignatures],
+      compiledMessage: compiledMessage,
+    );
+  }
+
+  /// Sign a transaction with a Keystone. Compiles exactly as the Ledger and
+  /// Seed Vault paths do; the device returns a detached signature over the
+  /// compiled message.
+  Future<SignedTx> _signTransactionWithKeystone(
+    Message message,
+    String recentBlockhash,
+    db.Wallet row, {
+    List<Ed25519HDKeyPair> additionalSigners = const [],
+  }) async {
+    final feePayer = Ed25519HDPublicKey.fromBase58(row.address);
+    final compiledMessage = message.compile(
+      recentBlockhash: recentBlockhash,
+      feePayer: feePayer,
+    );
+    final messageBytes = compiledMessage.toByteArray().toList();
+
+    final sigBytes = await _signWithKeystone(
+      row,
+      messageBytes,
+      KeystoneSignPurpose.transaction,
     );
 
     final signature = Signature(sigBytes.toList(), publicKey: feePayer);
@@ -1119,6 +1775,12 @@ class WalletManager {
     return WalletType.fromDbString(row.walletType).isHardware;
   }
 
+  /// The wallet type behind [address], or null when no wallet row holds it.
+  Future<WalletType?> walletTypeOf(String address) async {
+    final row = await _db.getWalletByAddress(address);
+    return row == null ? null : WalletType.fromDbString(row.walletType);
+  }
+
   /// Whether signing for [address] would first have to run the interactive
   /// Web3Auth re-login — i.e. it is a social wallet whose key is not on this
   /// device (wiped keystore, restored database, or a pre-migration row whose
@@ -1145,6 +1807,41 @@ class WalletManager {
     // which is precisely what triggers the recovery.
     return await _storage.loadPrivateKey(row.id) == null;
   }
+
+  /// Whether the selected wallet row signs through Keystone, using the same
+  /// stored selection as [signCompiledTx] when no wallet id is supplied.
+  Future<bool> activeSignerIsKeystone() async {
+    final walletId = await _storage.loadSelectedWalletId();
+    final row = walletId == null ? null : await _db.getWalletById(walletId);
+    return row != null &&
+        WalletType.fromDbString(row.walletType) == WalletType.keystone;
+  }
+
+  /// Whether the active wallet can sign a v1 transaction.
+  ///
+  /// True for the wallets whose key the app holds (seed phrase, imported key,
+  /// social login, and the legacy single-mnemonic fallback): they sign the
+  /// message bytes with ed25519 and never parse them. Ledger, Seed Vault and
+  /// Keystone parse the transaction on the device to show it, and none of
+  /// them is known to read v1, so they stay on v0.
+  Future<bool> activeSignerCanSignV1() async {
+    final walletId = await _storage.loadSelectedWalletId();
+    final row = walletId == null ? null : await _db.getWalletById(walletId);
+    return _signsV1(
+      row == null ? null : WalletType.fromDbString(row.walletType),
+    );
+  }
+
+  static bool _signsV1(WalletType? walletType) => switch (walletType) {
+    WalletType.hd ||
+    WalletType.importedKey ||
+    WalletType.social ||
+    null => true,
+    WalletType.ledger ||
+    WalletType.seedVault ||
+    WalletType.keystone ||
+    WalletType.viewOnly => false,
+  };
 
   /// Whether the active wallet signs locally (HD seed phrase or imported
   /// private key, plus the legacy single-mnemonic fallback). Returns false for
@@ -1228,6 +1925,7 @@ class WalletManager {
         return _IsolateSignTask(
           mnemonic: mnemonic,
           account: row.derivationIndex ?? 0,
+          scheme: _schemeFromRow(row),
           messageBytes: messageBytes,
         );
 
@@ -1248,11 +1946,13 @@ class WalletManager {
       case WalletType.viewOnly:
       case WalletType.ledger:
       case WalletType.seedVault:
+      case WalletType.keystone:
         // The switch in [signCompiledTx] handles these branches before
         // reaching here; surfacing as a state error makes the misuse loud.
         // None of them can be served from an isolate anyway: an isolate
         // reaches neither the BLE link nor the platform channel behind
-        // Seed Vault's approval Activity.
+        // Seed Vault's approval Activity, nor the sheet behind a Keystone's QR
+        // exchange.
         throw StateError(
           'Cannot build isolate sign task for wallet type $walletType',
         );
@@ -1300,8 +2000,9 @@ class WalletManager {
       case WalletType.viewOnly:
       case WalletType.ledger:
       case WalletType.seedVault:
+      case WalletType.keystone:
         // There is no keypair to hand back: mallow holds no key material for
-        // any of these rows, by design for the two hardware types.
+        // any of these rows, by design for the three hardware types.
         throw ViewOnlyWalletException();
     }
   }
@@ -1312,7 +2013,10 @@ class WalletManager {
   /// [LedgerConnectController] to show the connect sheet and waits for the
   /// user to reconnect. Throws [LedgerNotConnectedException] if the user
   /// dismisses the sheet or the connect attempt fails.
-  Future<void> _ensureLedgerConnected(String address) async {
+  Future<void> _ensureLedgerConnected(
+    String address, {
+    Future<void>? cancelled,
+  }) async {
     AppLogger.debug(
       _tag,
       '_ensureLedgerConnected($address) — '
@@ -1320,7 +2024,7 @@ class WalletManager {
     );
     if (_ledgerService.isConnected) return;
     final ok = await GetIt.instance<LedgerConnectController>()
-        .requestConnection(address);
+        .requestConnection(address, cancelled: cancelled);
     AppLogger.debug(_tag, '_ensureLedgerConnected got ok=$ok');
     if (!ok) throw const LedgerNotConnectedException();
   }
@@ -1330,15 +2034,16 @@ class WalletManager {
   /// of bubbling up as "Ledger device not connected".
   Future<T> _withLedgerConnection<T>(
     String address,
-    Future<T> Function() op,
-  ) async {
-    await _ensureLedgerConnected(address);
+    Future<T> Function() op, {
+    Future<void>? cancelled,
+  }) async {
+    await _ensureLedgerConnected(address, cancelled: cancelled);
     try {
       return await op();
     } on LedgerNotConnectedException {
       // Stale isConnected — force a fresh connection then retry once.
       final ok = await GetIt.instance<LedgerConnectController>()
-          .requestConnection(address);
+          .requestConnection(address, cancelled: cancelled);
       if (!ok) throw const LedgerNotConnectedException();
       return op();
     }

@@ -83,7 +83,7 @@ void main() {
 
     test('unknown DB string falls back to hd (does not throw)', () {
       // Fail-soft so a future enum addition can't brick the DB load path.
-      expect(WalletType.fromDbString('keystone'), WalletType.hd);
+      expect(WalletType.fromDbString('trezor'), WalletType.hd);
       expect(WalletType.fromDbString(''), WalletType.hd);
     });
   });
@@ -94,9 +94,13 @@ void main() {
     // background-login skip that keeps an external approval screen from
     // appearing with no user action behind it. A hardware type missing from
     // this set does not fail loudly; it signs silently, or prompts silently.
-    const hardware = {WalletType.ledger, WalletType.seedVault};
+    const hardware = {
+      WalletType.ledger,
+      WalletType.seedVault,
+      WalletType.keystone,
+    };
 
-    test('ledger and Seed Vault are the hardware types', () {
+    test('Ledger, Seed Vault and Keystone are the hardware types', () {
       for (final t in WalletType.values) {
         expect(
           t.isHardware,
@@ -337,15 +341,17 @@ void main() {
     // actually supports. A wallet that passes this gate but throws at signing
     // is offered as a send source and dead-ends the user *after* the biometric
     // prompt — the failure this predicate exists to prevent.
-    test('Ethereum allows HD, imported key, social and Ledger', () {
+    test('Ethereum allows HD, imported key, social, Ledger and Keystone', () {
       // Social is included because a social login stores a per-chain key
       // on-device (WalletRepository.addSocialAccount) and signs through the
-      // imported-key path — nothing about it is remote.
+      // imported-key path — nothing about it is remote. Keystone signs an
+      // EIP-1559 transaction over QR.
       for (final type in [
         WalletType.hd,
         WalletType.importedKey,
         WalletType.social,
         WalletType.ledger,
+        WalletType.keystone,
       ]) {
         expect(
           _wallet(chain: 'ethereum', walletType: type).canSignSendTransfer,
@@ -452,6 +458,22 @@ void main() {
           isFalse,
         );
       }
+    });
+  });
+
+  // Removal re-authenticates exactly when this is true, so a type that holds
+  // a key in the app's vault must never read false.
+  group('WalletType.storesKeyOnDevice', () {
+    test('is true only for the types whose key lives in the app', () {
+      final storing = {
+        for (final t in WalletType.values)
+          if (t.storesKeyOnDevice) t,
+      };
+      expect(storing, {
+        WalletType.hd,
+        WalletType.importedKey,
+        WalletType.social,
+      });
     });
   });
 }

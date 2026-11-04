@@ -120,12 +120,17 @@ class JupiterSwapInstructionsClient {
   final String _baseUrl;
 
   /// `GET /quote`. Mirrors the webapp's `fetchExactInJupQuote` with
-  /// `anyDexes: true` (no dex restriction params), `platformFeeBps: 0`.
+  /// `anyDexes: true` (no dex restriction params).
+  ///
+  /// [platformFeeBps] defaults to 0. A non-zero fee is only collected when the
+  /// later swap call passes a `feeAccount` for the input or output mint; the
+  /// quote's `outAmount` already has it deducted either way.
   Future<JupiterClassicQuote> getQuote({
     required String inputMint,
     required String outputMint,
     required int amount,
     int slippageBps = 50,
+    int platformFeeBps = 0,
   }) async {
     final response = await _dio.get<Map<String, dynamic>>(
       '$_baseUrl/quote',
@@ -134,7 +139,7 @@ class JupiterSwapInstructionsClient {
         'outputMint': outputMint,
         'amount': '$amount',
         'slippageBps': '$slippageBps',
-        'platformFeeBps': '0',
+        'platformFeeBps': '$platformFeeBps',
       },
     );
     final data = response.data;
@@ -168,5 +173,49 @@ class JupiterSwapInstructionsClient {
       throw Exception('Failed to get swap instructions: ${data?['error']}');
     }
     return JupSwapInstructions.fromJson(data);
+  }
+
+  /// `POST /swap` — the whole swap as one unsigned v0 transaction, compiled by
+  /// Jupiter around [userPublicKey].
+  ///
+  /// Unlike an Ultra order, the result carries no signature but the user's
+  /// and no server-side expiry: the route and its minimum-out live in the swap
+  /// instruction, so the caller may rewrite the blockhash before signing and
+  /// re-sign the same route after a slow signer lets it lapse.
+  ///
+  /// [maxPriorityFeeLamports] caps Jupiter's own priority-fee estimate
+  /// (defaults to the 1M-lamport cap [getSwapInstructions] uses).
+  /// [dynamicSlippage] lets Jupiter pick the slippage at build time; pass
+  /// false to keep the quote's `slippageBps`. [feeAccount] is a token account
+  /// of the input or output mint that receives the quote's platform fee.
+  Future<String> getSwapTransaction({
+    required JupiterClassicQuote quote,
+    required String userPublicKey,
+    String? feeAccount,
+    bool dynamicSlippage = true,
+    int? maxPriorityFeeLamports,
+  }) async {
+    final response = await _dio.post<Map<String, dynamic>>(
+      '$_baseUrl/swap',
+      data: {
+        'quoteResponse': quote.raw,
+        'userPublicKey': userPublicKey,
+        'dynamicComputeUnitLimit': true,
+        'dynamicSlippage': dynamicSlippage,
+        'feeAccount': ?feeAccount,
+        'prioritizationFeeLamports': {
+          'priorityLevelWithMaxLamports': {
+            'maxLamports': maxPriorityFeeLamports ?? 1000000,
+            'priorityLevel': 'veryHigh',
+          },
+        },
+      },
+    );
+    final data = response.data;
+    final tx = data?['swapTransaction'];
+    if (data == null || data['error'] != null || tx is! String || tx.isEmpty) {
+      throw Exception('Failed to build swap transaction: ${data?['error']}');
+    }
+    return tx;
   }
 }

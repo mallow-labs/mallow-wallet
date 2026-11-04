@@ -101,8 +101,9 @@ class SearchRepository {
   /// Fetch one page of an artwork drilldown from `POST /v1/explore`.
   ///
   /// [filter] is the user's selection from the filters sheet; the drilldown's
-  /// own constraint is pinned on top of it by [SearchFilterType.pinTo], so the
-  /// header's promise ("Auction", "3D") holds whatever the user picked.
+  /// own constraint is pinned on top of it by [ArtworkDrilldownTarget.pinTo],
+  /// so the header's promise ("Auction", "3D", "#tag") holds whatever the user
+  /// picked.
   ///
   /// [sort] is applied server-side rather than over the loaded pages — sorting
   /// only what page 0 returned would reorder a window, not the result set, and
@@ -110,7 +111,7 @@ class SearchRepository {
   ///
   /// Wrapped in [Result.guard] for the same reason as [fetchFilterResults].
   Future<Result<List<PortfolioArtwork>, AppFailure>> fetchArtworkResults(
-    SearchFilterType filterType, {
+    ArtworkDrilldownTarget target, {
     int page = 0,
     api.ExploreFilter? filter,
     api.ExploreSort sort = api.ExploreSort.recentActivity,
@@ -120,7 +121,7 @@ class SearchRepository {
         api.ExploreRequest(
           page: page,
           sort: sort,
-          filter: filterType.pinTo(filter ?? const api.ExploreFilter()),
+          filter: target.pinTo(filter ?? const api.ExploreFilter()),
         ),
       );
       return _mapPreviews(response.result, source: 'explore');

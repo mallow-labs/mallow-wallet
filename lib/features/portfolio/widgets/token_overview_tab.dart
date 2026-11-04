@@ -227,7 +227,7 @@ class _TokenInfoSection extends StatelessWidget {
                 address: token.mint,
                 chain: token.chain,
               ),
-            MallowKvRow(label: 'Network', value: token.chain.label),
+            MallowKvRow(label: 'Network', value: token.chain.networkLabel),
             if (info?.liquidity != null)
               MallowKvRow(
                 label: 'Liquidity',

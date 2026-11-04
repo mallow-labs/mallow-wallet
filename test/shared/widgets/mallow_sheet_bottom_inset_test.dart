@@ -9,6 +9,7 @@ Future<double> _inset(
   required double keyboard,
   required double safeArea,
   required bool includeKeyboard,
+  double castBar = 0,
 }) async {
   late double result;
   await tester.pumpWidget(
@@ -17,7 +18,10 @@ Future<double> _inset(
         viewInsets: EdgeInsets.only(bottom: keyboard),
         // The keyboard zeroes `padding.bottom` but never `viewPadding.bottom`.
         viewPadding: EdgeInsets.only(bottom: safeArea),
-        padding: EdgeInsets.only(bottom: keyboard > 0 ? 0 : safeArea),
+        // `CastBarMediaQueryInset` adds the casting bar on top of `padding`.
+        padding: EdgeInsets.only(
+          bottom: (keyboard > 0 ? 0 : safeArea) + castBar,
+        ),
       ),
       child: Builder(
         builder: (context) {
@@ -98,6 +102,51 @@ void main() {
         ),
         keyboardHeight + gap,
       );
+    });
+
+    group('with the now-casting bar up', () {
+      const castBar = 50.0;
+
+      for (final includeKeyboard in [true, false]) {
+        testWidgets('clears the bar above the home indicator '
+            '(includeKeyboard: $includeKeyboard)', (tester) async {
+          // The bar is painted above every route, sheets included, so a
+          // sheet's buttons have to sit above it rather than under it.
+          expect(
+            await _inset(
+              tester,
+              keyboard: 0,
+              safeArea: homeIndicator,
+              castBar: castBar,
+              includeKeyboard: includeKeyboard,
+            ),
+            homeIndicator + castBar + gap,
+          );
+        });
+      }
+
+      testWidgets('lets a taller keyboard win', (tester) async {
+        expect(
+          await _inset(
+            tester,
+            keyboard: keyboardHeight,
+            safeArea: homeIndicator,
+            castBar: castBar,
+            includeKeyboard: true,
+          ),
+          keyboardHeight + gap,
+        );
+        expect(
+          await _inset(
+            tester,
+            keyboard: keyboardHeight,
+            safeArea: homeIndicator,
+            castBar: castBar,
+            includeKeyboard: false,
+          ),
+          gap,
+        );
+      });
     });
   });
 }

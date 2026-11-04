@@ -14,6 +14,7 @@ class OfferActionButtons extends StatelessWidget {
     required this.onMakeOffer,
     required this.onCancelOffer,
     this.userOwnOffer = false,
+    this.canMakeOffer = true,
     this.isLoading = false,
     this.isPrimary = false,
     super.key,
@@ -22,6 +23,7 @@ class OfferActionButtons extends StatelessWidget {
   final VoidCallback onMakeOffer;
   final VoidCallback onCancelOffer;
   final bool userOwnOffer;
+  final bool canMakeOffer;
   final bool isLoading;
 
   /// True where make/update-offer is the sheet's main CTA (the unlisted
@@ -32,10 +34,9 @@ class OfferActionButtons extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (!showNftCommerce) {
-      // Store build: making or updating an offer is a purchase CTA and is
-      // not rendered; cancelling a live offer is the escape hatch that
-      // reclaims the escrowed bid, so it stays.
+    if (!showNftCommerce || !canMakeOffer) {
+      // Restricted assets and store builds hide offer entry and updates.
+      // Cancellation reclaims the escrowed bid, so it stays available.
       if (!userOwnOffer) return const SizedBox.shrink();
       return MallowButton(
         label: 'Cancel offer',

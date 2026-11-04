@@ -1,4 +1,4 @@
-/// Canonical asset-URL contract (original-serving spec) — the Dart member of
+/// Canonical asset-URL contract — the Dart member of
 /// a three-language set, alongside the image-resizing service (Rust) and the
 /// web client (TypeScript). All three are pinned by the shared vector file
 /// `canonical_url_tests.json`, copied into this repo at

@@ -147,6 +147,40 @@ void main() {
     expect(find.text('0.000252 ETH'), findsOneWidget);
   });
 
+  testWidgets('persists a preset choice by default', (tester) async {
+    final prefs = sl<PreferencesService>();
+    await prefs.setEthGasMode('market');
+    final result = await openSheet(tester);
+    await tester.tap(find.text('Low'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Done'));
+    await tester.pumpAndSettle();
+
+    expect(result()!.mode, EthGasMode.low);
+    expect(prefs.ethGasMode, 'low');
+  });
+
+  for (final advanced in [false, true]) {
+    testWidgets('replacement ${advanced ? 'Advanced' : 'preset'} edits '
+        'leave saved fees unchanged', (tester) async {
+      final prefs = sl<PreferencesService>();
+      await prefs.setEthGasMode('custom');
+      await prefs.setEthGasMaxBaseFeeGwei(18.5);
+      await prefs.setEthGasPriorityFeeGwei(1.5);
+      final result = await openSheet(tester, replacementFloor: floor);
+      await tester.tap(find.text(advanced ? 'Advanced' : 'Low'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Done'));
+      await tester.pumpAndSettle();
+
+      expect(result()!.maxFeePerGas, floor.maxFeePerGas);
+      expect(result()!.maxPriorityFeePerGas, floor.maxPriorityFeePerGas);
+      expect(prefs.ethGasMode, 'custom');
+      expect(prefs.ethGasMaxBaseFeeGwei, 18.5);
+      expect(prefs.ethGasPriorityFeeGwei, 1.5);
+    });
+  }
+
   testWidgets('takes the caller\'s title', (tester) async {
     await openSheet(
       tester,
@@ -293,6 +327,10 @@ void main() {
     expect(applied, isNotNull);
     expect(applied!.mode, EthGasMode.custom);
     expect(applied.gasLimit, 90000);
+    final prefs = sl<PreferencesService>();
+    expect(prefs.ethGasMode, 'custom');
+    expect(prefs.ethGasMaxBaseFeeGwei, 18);
+    expect(prefs.ethGasPriorityFeeGwei, 2);
   });
 
   testWidgets('seeds the Advanced fields with floored values', (tester) async {

@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 import 'package:share_plus/share_plus.dart';
@@ -21,7 +22,11 @@ import '../../../shared/widgets/filled_heart_svg.dart';
 import '../../../shared/widgets/loading_indicator.dart';
 import '../../../shared/widgets/mallow_refresh_indicator.dart';
 import '../../../shared/widgets/mallow_sheet.dart';
+import '../../../shared/widgets/sheet_drag_handle.dart';
 import '../../../shared/widgets/new_curation_sheet.dart';
+import '../../../shared/widgets/pinned_top_bar.dart';
+import '../../../shared/widgets/sliver_overscroll_anchored.dart';
+import '../../../shared/widgets/stable_width_text.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
 import '../../../shared/widgets/text_span_tap_targets.dart';
 import '../../artwork/services/artwork_download_actions.dart';
@@ -215,7 +220,7 @@ class _CurationScreenState extends State<CurationScreen> {
 
   /// Compute the opacity of content above the in-flow sort/view-mode bar.
   /// Triggers when the in-flow bar's top edge approaches the bottom of the
-  /// system safe area (notch). The same value (inverted) drives the
+  /// floating [PinnedTopBar], which sits below the safe area. The same value (inverted) drives the
   /// floating overlay's opacity — see [build].
   void _updateTopFade() {
     if (!mounted) return;
@@ -224,8 +229,8 @@ class _CurationScreenState extends State<CurationScreen> {
     final ro = ctx.findRenderObject();
     if (ro is! RenderBox || !ro.attached) return;
     final dy = ro.localToGlobal(Offset.zero).dy;
-    final safeAreaTop = MediaQuery.of(context).padding.top;
-    final fade = ((dy - safeAreaTop) / _topFadeRange).clamp(0.0, 1.0);
+    final pinTop = MediaQuery.of(context).padding.top + PinnedTopBar.rowHeight;
+    final fade = ((dy - pinTop) / _topFadeRange).clamp(0.0, 1.0);
     if ((fade - _topContentOpacity).abs() > 0.005) {
       setState(() => _topContentOpacity = fade);
     }
@@ -467,6 +472,8 @@ class _CurationScreenState extends State<CurationScreen> {
   }
 
   Future<void> _showArtworkContextMenu(PortfolioArtwork artwork) async {
+    // Long-press confirmation haptic, as in `showAndHandleArtworkContextMenu`.
+    unawaited(HapticFeedback.mediumImpact());
     final action = await showArtworkContextMenu(
       context,
       artwork: artwork,
@@ -736,20 +743,7 @@ class _CurationScreenState extends State<CurationScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Padding(
-                      padding: const EdgeInsets.only(top: 12),
-                      child: Container(
-                        width: 60,
-                        height: 3,
-                        decoration: BoxDecoration(
-                          color: colors.divider,
-                          borderRadius: BorderRadius.circular(
-                            MallowTheme.radiusFull,
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
+                    const SheetDragHandle(),
                     _OptionsMenuItem(
                       assetPath: 'assets/icons/heart.svg',
                       iconOverride: _isCurationLiked
@@ -888,7 +882,7 @@ class _CurationScreenState extends State<CurationScreen> {
                 // --- Header bar: back · "Curation" · kebab ---
                 SliverOpacity(
                   opacity: _topContentOpacity,
-                  sliver: SliverToBoxAdapter(
+                  sliver: SliverOverscrollAnchored(
                     child: Padding(
                       padding: EdgeInsets.only(
                         left: MallowTheme.spacing20,
@@ -1045,6 +1039,7 @@ class _CurationScreenState extends State<CurationScreen> {
                           children: [
                             _PillButton(
                               label: _isFollowing ? 'Following' : 'Follow',
+                              reserveLabels: const ['Follow', 'Following'],
                               textColor: _isFollowing
                                   ? colors.textSecondary
                                   : colors.textPrimary,
@@ -1057,10 +1052,9 @@ class _CurationScreenState extends State<CurationScreen> {
                   ),
 
                 // In-flow sort/view-mode bar. Renders in its natural scroll
-                // position, with no safe-area inset. The floating overlay
-                // (in the parent Stack) takes over with a safe-area inset
-                // as this bar approaches the notch — see [SortViewModeBar]
-                // and the cross-fade logic below.
+                // position. The floating overlay (in the parent Stack) takes
+                // over as this bar reaches the bottom of the overlay's top
+                // bar — see the cross-fade logic below.
                 SliverOpacity(
                   opacity: _topContentOpacity,
                   sliver: SliverToBoxAdapter(
@@ -1123,8 +1117,8 @@ class _CurationScreenState extends State<CurationScreen> {
             ),
           ),
 
-          // Floating sort/view-mode bar with safe-area inset that fades in
-          // as the in-flow bar approaches the notch. Slides 20px into place
+          // Floating top bar + sort/view-mode bar that fades in as the
+          // in-flow bar reaches the top bar's bottom edge. Slides 20px into place
           // during the fade so the row stays aligned with the in-flow bar
           // during the cross-fade.
           Positioned(
@@ -1135,13 +1129,23 @@ class _CurationScreenState extends State<CurationScreen> {
               ignoring: _topContentOpacity > 0.5,
               child: Opacity(
                 opacity: 1 - _topContentOpacity,
-                child: SortViewModeBar(
-                  sortLabel: _sortLabel,
-                  currentSort: _sort,
-                  viewModeIcon: _viewMode.iconAsset,
-                  onSortChanged: _applySort,
-                  onViewModeToggle: _toggleViewMode,
-                  topInset: safeAreaTop,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    PinnedTopBar(
+                      topInset: safeAreaTop,
+                      title: _name,
+                      onBack: () => Navigator.of(context).pop(),
+                      onMenuTap: showKebab ? _showOptionsSheet : null,
+                    ),
+                    SortViewModeBar(
+                      sortLabel: _sortLabel,
+                      currentSort: _sort,
+                      viewModeIcon: _viewMode.iconAsset,
+                      onSortChanged: _applySort,
+                      onViewModeToggle: _toggleViewMode,
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -1216,9 +1220,15 @@ class _OptionsMenuItem extends StatelessWidget {
 
 /// Pill-shaped button used in the action bar.
 class _PillButton extends StatelessWidget {
-  const _PillButton({required this.label, required this.onTap, this.textColor});
+  const _PillButton({
+    required this.label,
+    required this.reserveLabels,
+    required this.onTap,
+    this.textColor,
+  });
 
   final String label;
+  final List<String> reserveLabels;
   final VoidCallback onTap;
   final Color? textColor;
 
@@ -1238,8 +1248,9 @@ class _PillButton extends StatelessWidget {
             border: Border.all(color: colors.dividerLight),
             borderRadius: BorderRadius.circular(MallowTheme.radiusCircular),
           ),
-          child: Text(
+          child: StableWidthText(
             label,
+            reserve: reserveLabels,
             style: MallowTheme.uiCaption.copyWith(
               color: textColor ?? colors.textPrimary,
             ),

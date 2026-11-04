@@ -7,7 +7,6 @@ import '../theme/mallow_theme.dart';
 import '../utils/token_image_utils.dart';
 import 'mallow_sheet.dart';
 import 'sheet_drag_handle.dart';
-import 'sheet_overscroll_dismiss.dart';
 import 'tappable.dart';
 
 /// Bottom-sheet picker for the bid currency. Returns the selected
@@ -31,50 +30,46 @@ class _CurrencyPickerSheet extends StatelessWidget {
     );
     final maxHeight = MediaQuery.of(context).size.height * 0.7;
 
-    return SheetOverscrollDismiss(
-      child: Container(
-        constraints: BoxConstraints(maxHeight: maxHeight),
-        decoration: BoxDecoration(
-          color: colors.bgSurface,
-          borderRadius: const BorderRadius.vertical(
-            top: Radius.circular(MallowTheme.popupRadius),
+    return Container(
+      constraints: BoxConstraints(maxHeight: maxHeight),
+      decoration: BoxDecoration(
+        color: colors.bgSurface,
+        borderRadius: const BorderRadius.vertical(
+          top: Radius.circular(MallowTheme.popupRadius),
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SheetDragHandle(),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              MallowTheme.spacing20,
+              MallowTheme.spacingMd,
+              MallowTheme.spacing20,
+              MallowTheme.spacingMd,
+            ),
+            child: Row(
+              children: [
+                Text(
+                  'Choose currency',
+                  style: MallowTheme.uiBody.copyWith(color: colors.textPrimary),
+                  textAlign: TextAlign.left,
+                ),
+              ],
+            ),
           ),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SheetDragHandle(),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                MallowTheme.spacing20,
-                MallowTheme.spacingMd,
-                MallowTheme.spacing20,
-                MallowTheme.spacingMd,
-              ),
-              child: Row(
-                children: [
-                  Text(
-                    'Choose currency',
-                    style: MallowTheme.uiBody.copyWith(
-                      color: colors.textPrimary,
-                    ),
-                    textAlign: TextAlign.left,
-                  ),
-                ],
-              ),
+          Flexible(
+            child: ListView.builder(
+              padding: EdgeInsets.only(bottom: sheetBottomInset(context)),
+              itemCount: tokens.length,
+              itemBuilder: (context, index) {
+                final token = tokens[index];
+                return _CurrencyRow(token: token);
+              },
             ),
-            Flexible(
-              child: ListView.builder(
-                padding: EdgeInsets.only(bottom: sheetBottomInset(context)),
-                itemCount: tokens.length,
-                itemBuilder: (context, index) {
-                  final token = tokens[index];
-                  return _CurrencyRow(token: token);
-                },
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

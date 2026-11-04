@@ -1,3 +1,4 @@
+import '../../core/config/environment.dart';
 import '../../core/crypto/derivation.dart';
 import '../../core/security/security_utils.dart';
 import 'tezos_address.dart';
@@ -72,6 +73,18 @@ enum Chain {
     Chain.tezos => 'Tezos',
   };
 
+  /// The network this build transacts on, for "Network" rows and pills.
+  ///
+  /// Solana follows the build (devnet outside production). Ethereum and Tezos
+  /// are pinned to mainnet in every environment, because the backend reads
+  /// their balances from mainnet-only sources ([Config.isEthereumMainnet],
+  /// [Config.isTezosMainnet]).
+  String get networkLabel => switch (this) {
+    Chain.solana => Config.isDevnet ? 'Solana Devnet' : 'Solana Mainnet',
+    Chain.ethereum => 'Ethereum Mainnet',
+    Chain.tezos => 'Tezos Mainnet',
+  };
+
   /// Asset path for this chain's badge icon, used to overlay a chain badge on
   /// non-Solana token logos in the portfolio. See [paddedIconAsset] for the
   /// variant that sizes consistently beside the other two marks.
@@ -100,6 +113,18 @@ enum Chain {
 /// absent. Prefer [Chain.label] wherever the chain is already typed.
 String chainLabel(String? chain) =>
     Chain.tryParse(chain)?.label ?? chain ?? Chain.solana.label;
+
+/// Display label for a CAIP-2 chain id (`solana:mainnet`, `eip155:1`, …), the
+/// form dApp requests and transaction reviews carry. Each id names its own
+/// network, so this does not consult the build. Falls back to the raw id so an
+/// unmodelled network is never shown as a supported one.
+String caip2NetworkLabel(String chain) => switch (chain) {
+  'solana:mainnet' => 'Solana Mainnet',
+  'solana:devnet' => 'Solana Devnet',
+  'eip155:1' => 'Ethereum Mainnet',
+  'tezos:NetXdQprcVkpaWU' => 'Tezos Mainnet',
+  _ => chain,
+};
 
 /// Compiled once: [isEthereumAddress] is called per address inside profile /
 /// session loops, and Dart recompiles a `RegExp` literal on every evaluation.

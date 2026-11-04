@@ -71,9 +71,8 @@ enum MarketSource {
 }
 
 extension MarketSourceX on MarketSource? {
-  /// True when the listing lives on a marketplace whose program mallow's tx
-  /// builders cannot drive — every buy / bid / update-listing / cancel-listing
-  /// / claim builder targets `mallow_market`, `mallow-auction` or `rafffle`.
+  /// True for external marketplaces. Mallow listing-management builders cannot
+  /// manage these orders; supported purchases use a dedicated marketplace API.
   ///
   /// Null and [MarketSource.unknown] both mean "mallow", matching the webapp's
   /// null-defaulting (`UpdateListingModal`:
@@ -223,6 +222,9 @@ sealed class BuyNowMetadata with _$BuyNowMetadata {
 @freezed
 sealed class AuctionMetadata with _$AuctionMetadata {
   const factory AuctionMetadata({
+    /// Terminal refund state; retained even when the artwork is unlisted.
+    /// Older backends omit this field, so raw account reads are the backstop.
+    @Default(false) bool refunded,
     double? reservePrice,
     double? currentBidAmount,
 
@@ -578,6 +580,18 @@ sealed class NftDetail with _$NftDetail {
     /// here: that short loop is a card affordance, and a detail view showing
     /// the whole piece must not silently truncate it.
     String? playbackId,
+
+    /// Interactive HTML document for HTML artworks (the metadata's
+    /// `animation_url` when it points at a web page). Rendered in a sandboxed
+    /// web view on the detail screen, never through the image CDN, which does
+    /// not serve HTML inline.
+    String? htmlUrl,
+
+    /// Binary glTF (`.glb`) model for 3D artworks. The detail screen renders
+    /// it in an interactive viewer in place of the still poster ([imageUrl]),
+    /// which stays the fallback when the model cannot load. Outranks
+    /// [htmlUrl] and [videoUrl], as on the webapp.
+    String? modelUrl,
     bool? isImmutable,
     String? tokenStandard,
     String? updateAuth,

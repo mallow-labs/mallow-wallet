@@ -47,6 +47,8 @@ import '../../portfolio/models/token_balance.dart';
 import '../../portfolio/services/token_balance_bloc.dart';
 import '../../wallets/services/profile_lookup_service.dart';
 import '../models/recent_recipient.dart';
+import '../models/payment_request.dart';
+import '../models/recipient_address.dart';
 import '../models/recipient_advisory.dart';
 import '../models/recipient_suggestion.dart';
 import '../services/recipient_advisory_service.dart';
@@ -58,8 +60,11 @@ import 'send_confirm_step.dart';
 import 'send_pipeline_view.dart';
 import 'send_qr_scanner_view.dart';
 import 'send_recipient_step.dart';
+import 'send_sheet_widgets.dart';
 import 'send_token_select_step.dart';
 import 'send_wallet_select_sheet.dart';
+import '../../walletconnect/services/walletconnect_service.dart';
+import '../../walletconnect/walletconnect_module.dart';
 
 /// Opens the multi-step send sheet: token select →
 /// recipient → amount → confirm.
@@ -68,6 +73,18 @@ import 'send_wallet_select_sheet.dart';
 /// screen) and [tokenBalanceBloc] to share the caller's balances; otherwise
 /// the sheet spins up its own.
 ///
+/// Pass [recipient] when the destination is known before the token, as with
+/// a scanned address. The token step then lists only that chain's tokens,
+/// and the address is in the recipient field once a token is picked. It is
+/// not sent to: the user still reviews it on the recipient step and taps
+/// Next.
+///
+/// Pass [payment] for a scanned payment request. The sheet picks the token
+/// the request names, fills the recipient and the amount, and goes on to the
+/// review when each step's own checks pass, stopping on the first step whose
+/// check fails. The recipient and token are fixed by the request, and so is
+/// an amount it states.
+///
 /// Deliberately **not** a kill-switch gate: neither the chain nor the
 /// native-vs-token split is known yet — both come from token selection inside
 /// the sheet. The gates are the picker rows
@@ -75,7 +92,8 @@ import 'send_wallet_select_sheet.dart';
 /// refresh the config on the way in so both read a fresh value.
 ///
 /// It **is** the signer gate for every entry point that passes an
-/// [initialToken], since the chain is known here. Placed in the sheet rather
+/// [initialToken], a [recipient] or a [payment], since the chain is known
+/// here. Placed in the sheet rather
 /// than at each caller so a call site added later inherits it — the same
 /// convention the kill-switch gates follow. Chain-less entry points are gated
 /// at token selection ([_SendSheetState._onTokenSelected]) instead.
@@ -83,10 +101,19 @@ Future<void> showSendSheet(
   BuildContext context, {
   TokenBalance? initialToken,
   TokenBalanceBloc? tokenBalanceBloc,
+  RecipientAddress? recipient,
+  PaymentRequest? payment,
 }) async {
+  // The recipient is applied at token selection, which an initial token
+  // skips.
+  assert(
+    [initialToken, recipient, payment].nonNulls.length <= 1,
+    'Pass a token, a recipient or a payment, not more than one',
+  );
   unawaited(sl<RemoteConfigService>().refreshIfStale());
-  if (initialToken != null &&
-      await guardCannotSend(context, chain: initialToken.chain)) {
+  final chain =
+      initialToken?.chain ?? recipient?.chain ?? payment?.recipient.chain;
+  if (chain != null && await guardCannotSend(context, chain: chain)) {
     return;
   }
   if (!context.mounted) return;
@@ -104,7 +131,11 @@ Future<void> showSendSheet(
           ),
         BlocProvider(create: (_) => sl<SendBloc>()),
       ],
-      child: SendSheet(initialToken: initialToken),
+      child: SendSheet(
+        initialToken: initialToken,
+        recipient: recipient,
+        payment: payment,
+      ),
     ),
   );
 }
@@ -112,9 +143,15 @@ Future<void> showSendSheet(
 enum _SendStep { token, recipient, amount, confirm }
 
 class SendSheet extends StatefulWidget {
-  const SendSheet({this.initialToken, super.key});
+  const SendSheet({this.initialToken, this.recipient, this.payment, super.key});
 
   final TokenBalance? initialToken;
+
+  /// A destination known before the token; see [showSendSheet].
+  final RecipientAddress? recipient;
+
+  /// A payment request to fill the sheet from; see [showSendSheet].
+  final PaymentRequest? payment;
 
   @override
   State<SendSheet> createState() => _SendSheetState();
@@ -150,7 +187,7 @@ class _SendSheetState extends State<SendSheet> {
   bool _pickedProfile = false;
 
   /// A signer switch is in flight. Blocks input and shows a spinner over the
-  /// step: since T0.2 the switch awaits a `/v0/login`, and the auto-adopt path
+  /// step: the switch awaits a `/v0/login`, and the auto-adopt path
   /// fires it without any user action.
   bool _switchingSource = false;
 
@@ -201,7 +238,7 @@ class _SendSheetState extends State<SendSheet> {
   /// in-flight pipeline step within the same route (no separate sheet).
   bool _inPipeline = false;
 
-  // ── Source-wallet selection (send-wallet-select spec) ──────────────────────
+  // ── Source-wallet selection ────────────────────────────────────────────────
 
   /// Qualifying source wallets for the selected token: signable, same-chain,
   /// holding an above-dust balance of it. 2+ enables the picker + the Switch
@@ -234,9 +271,36 @@ class _SendSheetState extends State<SendSheet> {
   /// re-open it after the user already chose.
   bool _sourcePromptShown = false;
 
+  /// [SendSheet.recipient] is in the field but not yet validated. It is read
+  /// once, when the first token (and with it the chain and the source
+  /// wallet) is settled, and never again: a later token pick must not undo a
+  /// recipient the user has since changed.
+  bool _recipientPending = false;
+
+  /// The amount a payment request filled in, until the bloc has checked it.
+  /// [_onBlocState] then goes on to the review if the check passed, as if
+  /// the user had tapped Next.
+  String? _autoReviewAmount;
+
+  /// The recipient fixed before the sheet opened, by a scan or a payment
+  /// request, with its chain.
+  RecipientAddress? get _presetRecipient =>
+      widget.recipient ?? widget.payment?.recipient;
+
   @override
   void initState() {
     super.initState();
+    final preset = _presetRecipient;
+    if (preset != null) {
+      _addressController.text = preset.address;
+      _recipientPending = true;
+    }
+    final payment = widget.payment;
+    if (payment != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_startPayment(payment));
+      });
+    }
     final initial = widget.initialToken;
     if (initial != null) {
       _selectedToken = initial;
@@ -619,6 +683,10 @@ class _SendSheetState extends State<SendSheet> {
     bool alreadyCommitted = false,
     bool interactive = true,
   }) async {
+    // The background refresh in [_refreshSources] lands here again with the
+    // wallet already in use, often after the user (or a payment request) has
+    // reached the review. Only a different wallet invalidates that review.
+    final changed = _sourceWallet?.id != wallet.id;
     if (wallet.bindsGlobalSigner &&
         !alreadyCommitted &&
         wallet.address != _selfAddress) {
@@ -690,7 +758,7 @@ class _SendSheetState extends State<SendSheet> {
       _loadSourceTokens(wallet.address, wallet.chainEnum, refresh: true),
     );
     if (!mounted) return;
-    if (_step == _SendStep.confirm) {
+    if (changed && _step == _SendStep.confirm) {
       context.read<SendBloc>().add(const SendEvent.reset());
       setState(() => _step = _SendStep.amount);
     }
@@ -974,6 +1042,15 @@ class _SendSheetState extends State<SendSheet> {
     final code = capture.barcodes.firstOrNull?.rawValue;
     if (code == null) return;
     final trimmed = code.trim();
+    // A website's WalletConnect code, scanned here by habit: connect to it
+    // instead of ignoring it as an address that does not parse.
+    if (WalletConnectService.instance != null && trimmed.startsWith('wc:')) {
+      final route = ModalRoute.of(routeContext);
+      if (route == null || !route.isCurrent) return;
+      Navigator.of(routeContext).pop();
+      handleWalletConnectText(trimmed);
+      return;
+    }
     final bool isValid;
     if (_chain == Chain.tezos) {
       isValid = isValidTezosAddress(trimmed);
@@ -1332,6 +1409,17 @@ class _SendSheetState extends State<SendSheet> {
         if (input.amount.isNotEmpty && _amountController.text != input.amount) {
           _amountController.text = input.amount;
         }
+        // A payment request's amount, now checked: review it if it passed,
+        // or leave the error showing on the amount step if it did not.
+        final pending = _autoReviewAmount;
+        if (pending != null && input.amount == pending) {
+          _autoReviewAmount = null;
+          if (input.amountError == null &&
+              input.recipientError == null &&
+              _step == _SendStep.amount) {
+            _onAmountNext();
+          }
+        }
       },
       ready: (ready) {
         _ready = ready;
@@ -1432,7 +1520,7 @@ class _SendSheetState extends State<SendSheet> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      SheetDragHandle(color: colors.divider),
+                      const SheetDragHandle(),
                       Flexible(
                         child: Stack(
                           children: [
@@ -1519,7 +1607,15 @@ class _SendSheetState extends State<SendSheet> {
   Widget _buildStep(BuildContext context, SendState state) {
     switch (_step) {
       case _SendStep.token:
-        return SendTokenSelectStep(onSelected: _onTokenSelected);
+        // A payment request names its token, so there is nothing to pick:
+        // the sheet waits for balances, then moves on by itself.
+        if (widget.payment != null) {
+          return const Center(child: MallowLoadingIndicator());
+        }
+        return SendTokenSelectStep(
+          onSelected: _onTokenSelected,
+          chain: _presetRecipient?.chain,
+        );
       case _SendStep.recipient:
         return SendRecipientStep(
           controller: _addressController,
@@ -1535,12 +1631,16 @@ class _SendSheetState extends State<SendSheet> {
           onRecentTap: _onRecentTap,
           searchController: _recipientSearch,
           onSuggestionPicked: _onSuggestionPicked,
-          onBack: () {
-            // The dropdown lives in the root overlay, so it would otherwise
-            // hang over the token step after this step is gone.
-            _recipientSearch.close();
-            setState(() => _step = _SendStep.token);
-          },
+          // A payment request's token is fixed, so there is no picker to go
+          // back to.
+          onBack: widget.payment != null
+              ? null
+              : () {
+                  // The dropdown lives in the root overlay, so it would
+                  // otherwise hang over the token step after this step is gone.
+                  _recipientSearch.close();
+                  setState(() => _step = _SendStep.token);
+                },
           onCancel: () => Navigator.of(context).pop(),
           onNext: _onRecipientNext,
           sourceAddress: _sourceLineAddress,
@@ -1560,15 +1660,113 @@ class _SendSheetState extends State<SendSheet> {
           onChanged: _onAmountChanged,
           onHalf: _onHalf,
           onMax: _onMax,
-          onBack: () => setState(() => _step = _SendStep.recipient),
+          // A payment request's recipient is fixed, so the request's send
+          // starts here.
+          onBack: widget.payment != null
+              ? null
+              : () => setState(() => _step = _SendStep.recipient),
           onCancel: () => Navigator.of(context).pop(),
           onNext: _onAmountNext,
           sourceAddress: _sourceLineAddress,
           onSwitch: _sourceSwitchHandler,
+          amountLocked: widget.payment?.amount != null,
+          requestNote: _requestNote(),
         );
       case _SendStep.confirm:
         return _buildConfirmStep(context, state);
     }
+  }
+
+  // ── Payment requests ───────────────────────────────────────────────────
+
+  Widget? _requestNote() {
+    final payment = widget.payment;
+    if (payment == null) return null;
+    return SendRequestNote(label: payment.label, message: payment.message);
+  }
+
+  /// Fills the sheet from [payment] and moves it on as far as the values
+  /// allow.
+  ///
+  /// Each step is passed the way the user would pass it, through its own
+  /// handler, so every check a typed send gets still runs: the signer gate
+  /// and source picker in [_onTokenSelected], the address and self-send
+  /// checks in [_onRecipientNext], the balance check on the amount. A check
+  /// that fails leaves the sheet on that step with its error showing.
+  Future<void> _startPayment(PaymentRequest payment) async {
+    final token = await _paymentToken(payment);
+    if (!mounted) return;
+    if (token == null) {
+      return _abandonPayment("This request is for a token you don't hold");
+    }
+    final amount = payment.amount?.inDecimals(token.decimals);
+    if (payment.amount != null && amount == null) {
+      return _abandonPayment(
+        "This request's amount is more precise than ${token.symbol} allows",
+      );
+    }
+    context.read<SendBloc>().add(SendEvent.setPaymentTags(payment.tags));
+    await _onTokenSelected(token);
+    if (!mounted) return;
+    // The signer gate refused, or the user dismissed the wallet picker. There
+    // is no token picker behind it in a payment, so close.
+    if (_step != _SendStep.recipient) {
+      Navigator.of(context).pop();
+      return;
+    }
+    _onRecipientNext();
+    if (amount == null || _step != _SendStep.amount) return;
+    _amountController.text = amount;
+    _autoReviewAmount = amount;
+    _onAmountChanged(amount);
+  }
+
+  /// The holding [payment] asks to be paid in, or null when the session
+  /// holds none of it.
+  ///
+  /// The native coin always resolves, to an empty balance if the wallet has
+  /// no row for it, so a request the wallet cannot fund still opens and is
+  /// stopped by the balance check, which says why. A token the session has
+  /// never held has no decimals to read the amount with.
+  Future<TokenBalance?> _paymentToken(PaymentRequest payment) async {
+    final chain = payment.recipient.chain;
+    final balances = context.read<TokenBalanceBloc>();
+    final state = balances.state.maybeMap(
+      loaded: (s) => s,
+      error: (s) => s,
+      orElse: () => null,
+    );
+    final settled =
+        state ??
+        await balances.stream.firstWhere(
+          (s) => s.maybeMap(
+            loaded: (_) => true,
+            error: (_) => true,
+            orElse: () => false,
+          ),
+        );
+    final tokens = settled.maybeMap(
+      loaded: (s) => s.tokens,
+      orElse: () => const <TokenBalance>[],
+    );
+    final mint = payment.token;
+    if (mint == null) {
+      return tokens.firstWhereOrNull((t) => t.chain == chain && t.isNative) ??
+          TokenBalance.nativeForChain(chain);
+    }
+    return tokens.firstWhereOrNull(
+      (t) =>
+          t.chain == chain &&
+          !t.isNative &&
+          (chain == Chain.ethereum
+              ? t.mint.toLowerCase() == mint.toLowerCase()
+              : t.mint == mint),
+    );
+  }
+
+  void _abandonPayment(String message) {
+    AppSnackBar.show(context, message, type: AppSnackBarType.error);
+    Navigator.of(context).pop();
   }
 
   Future<void> _onTokenSelected(TokenBalance token) async {
@@ -1609,8 +1807,13 @@ class _SendSheetState extends State<SendSheet> {
     // Re-read whatever text the user left in the field as an address on the
     // new chain, now that the source — and with it `_chain` — has settled. A
     // handle re-runs the username search against the new chain; a raw address
-    // reports itself invalid instead of sitting there looking accepted.
-    if (chainChanged) _onAddressChanged(_addressController.text);
+    // reports itself invalid instead of sitting there looking accepted. A
+    // preset recipient is read here too, since a Solana one changes no chain
+    // and would otherwise never reach the bloc.
+    if (chainChanged || _recipientPending) {
+      _recipientPending = false;
+      _onAddressChanged(_addressController.text);
+    }
     setState(() => _step = _SendStep.recipient);
   }
 
@@ -1755,7 +1958,7 @@ class _SendSheetState extends State<SendSheet> {
       recipientAddress: ready.recipient,
       feeText: feeText,
       feeFiatText: _fiat(feeUsd),
-      networkName: isTezos ? 'Tezos' : (isEthereum ? 'Ethereum' : 'Solana'),
+      networkName: _chain.networkLabel,
       feeSymbol: isTezos ? 'XTZ' : (isEthereum ? 'ETH' : 'SOL'),
       feeMint: isTezos
           ? TokenBalance.tezosNativeSentinel
@@ -1780,6 +1983,7 @@ class _SendSheetState extends State<SendSheet> {
       onBack: _onConfirmBack,
       onCancel: () => Navigator.of(context).pop(),
       onSend: _onSend,
+      requestNote: _requestNote(),
       sourceAddress: _sourceLineAddress,
       onSwitch: _sourceSwitchHandler,
       intrinsicHeight: intrinsicHeight,

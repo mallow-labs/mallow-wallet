@@ -26,8 +26,7 @@ class _MockProfileLookupService extends Mock implements ProfileLookupService {}
 
 // `resolveArtworkActionState` is the central decision tree that decides
 // which bottom-sheet variant the artwork detail screen pins to the bottom
-// of the page. It mirrors the matrix in `docs/artwork_state.md` and the
-// webapp's per-listing dispatchers. Getting any branch wrong silently
+// of the page. It mirrors the webapp's per-listing dispatchers. Getting any branch wrong silently
 // breaks a checkout/bid/claim flow for a specific wallet relationship —
 // the kind of bug that's easy to ship and impossible to spot from logs.
 
@@ -50,6 +49,7 @@ ArtworkDetails artwork({
   MarketSource? lastSource,
   ListingState? listingState,
   String? chain,
+  String? tokenStandard,
   BuyNowMetadata? buyNowMetadata,
   String? currency,
   int? supply,
@@ -57,6 +57,7 @@ ArtworkDetails artwork({
 }) => ArtworkDetails(
   mintAccount: mint,
   chain: chain,
+  tokenStandard: tokenStandard,
   title: 'T',
   imageUrl: '',
   description: null,
@@ -92,6 +93,184 @@ const other = 'other-addr';
 const artist = 'artist-addr';
 
 void main() {
+  group('Refunded auctions', () {
+    for (final listingType in [ListingType.auction, ListingType.unlisted]) {
+      for (final hasBids in [false, true]) {
+        for (final address in [null, owner, other, 'bidder']) {
+          for (final endsAt in [DateTime.utc(2025), DateTime.utc(2028)]) {
+            test('refund is informational for $listingType, bids=$hasBids, '
+                '$address ending $endsAt', () {
+              final state = resolveArtworkActionState(
+                artwork: artwork(
+                  listingType: listingType,
+                  ownerAddress: owner,
+                  auctionMetadata: AuctionMetadata(
+                    refunded: true,
+                    currentBidder: hasBids ? 'bidder' : null,
+                    bidCount: hasBids ? 1 : 0,
+                    endsAt: endsAt,
+                  ),
+                ),
+                currentAddress: address,
+                creatorLinkedAddresses: const {},
+                permissions: null,
+                now: DateTime.utc(2026),
+              );
+              expect(state, isA<ArtworkAuctionRefundedAction>());
+            });
+          }
+        }
+      }
+    }
+  });
+  group('Bubblegum v2 action eligibility', () {
+    ArtworkPermissions permissions(bool eligible) => ArtworkPermissions(
+      canTransfer: true,
+      canEdit: false,
+      canBurn: true,
+      canList: eligible,
+      canTrade: eligible,
+      tokenStandard: TokenStandard.cnftV2,
+    );
+    for (final indexedStandard in [null, 'cnft', 'cnft-v2']) {
+      test(
+        'DAS v2 restrictions gate stale indexed standard $indexedStandard',
+        () {
+          expect(
+            resolveArtworkActionState(
+              artwork: artwork(
+                tokenStandard: indexedStandard,
+                ownerAddress: owner,
+              ),
+              currentAddress: other,
+              creatorLinkedAddresses: const {},
+              permissions: permissions(false),
+            ),
+            isA<ArtworkNoAction>(),
+          );
+        },
+      );
+    }
+    test('eligible listed v2 owner must cancel before accepting', () {
+      final state =
+          resolveArtworkActionState(
+                artwork: artwork(
+                  tokenStandard: 'cnft',
+                  ownerAddress: owner,
+                  listingType: ListingType.buyNow,
+                ),
+                currentAddress: owner,
+                creatorLinkedAddresses: const {},
+                permissions: permissions(true),
+              )
+              as ArtworkOwnerListedAction;
+      expect(state.canAcceptOffer, isFalse);
+    });
+    for (final eligible in [true, false]) {
+      test('viewer make offer follows eligibility $eligible', () {
+        final state = resolveArtworkActionState(
+          artwork: artwork(tokenStandard: 'cnft-v2', ownerAddress: owner),
+          currentAddress: other,
+          creatorLinkedAddresses: const {},
+          permissions: permissions(eligible),
+        );
+        expect(
+          state,
+          eligible
+              ? isA<ArtworkUnlistedViewerAction>()
+              : isA<ArtworkNoAction>(),
+        );
+      });
+      test(
+        'owner accept offer follows eligibility $eligible while Send stays available',
+        () {
+          final state =
+              resolveArtworkActionState(
+                    artwork: artwork(
+                      tokenStandard: 'cnft-v2',
+                      ownerAddress: owner,
+                    ),
+                    currentAddress: owner,
+                    creatorLinkedAddresses: const {},
+                    permissions: permissions(eligible),
+                  )
+                  as ArtworkOwnerUnlistedAction;
+          expect(state.canAcceptOffer, eligible);
+          expect(state.canList, eligible && showNftCommerce);
+          expect(state.canSend, isTrue);
+        },
+      );
+    }
+    test('listed v2 owner retains management while accept is hidden', () {
+      final state =
+          resolveArtworkActionState(
+                artwork: artwork(
+                  tokenStandard: 'cnft-v2',
+                  ownerAddress: owner,
+                  listingType: ListingType.buyNow,
+                ),
+                currentAddress: owner,
+                creatorLinkedAddresses: const {},
+                permissions: permissions(false),
+              )
+              as ArtworkOwnerListedAction;
+      expect(state.canAcceptOffer, isFalse);
+    });
+    test('listed v2 viewer keeps Buy while make/update offer is hidden', () {
+      final state =
+          resolveArtworkActionState(
+                artwork: artwork(
+                  tokenStandard: 'cnft-v2',
+                  ownerAddress: owner,
+                  listingType: ListingType.buyNow,
+                ),
+                currentAddress: other,
+                creatorLinkedAddresses: const {},
+                permissions: permissions(false),
+              )
+              as ArtworkBuyAction;
+      expect(state.canMakeOffer, isFalse);
+    });
+    test('v2 raffle follows the existing compressed raffle path', () {
+      expect(
+        resolveArtworkActionState(
+          artwork: artwork(
+            tokenStandard: 'cnft-v2',
+            ownerAddress: owner,
+            listingType: ListingType.raffle,
+          ),
+          currentAddress: other,
+          creatorLinkedAddresses: const {},
+          permissions: permissions(false),
+        ),
+        isA<ArtworkRaffleAction>(),
+      );
+    });
+    test('pending permission resolution hides v2 make offer', () {
+      expect(
+        resolveArtworkActionState(
+          artwork: artwork(tokenStandard: 'cnft-v2', ownerAddress: owner),
+          currentAddress: other,
+          creatorLinkedAddresses: const {},
+          permissions: null,
+        ),
+        isA<ArtworkNoAction>(),
+      );
+    });
+    test('ineligible leaf retains cancel-offer action', () {
+      expect(
+        resolveArtworkActionState(
+          artwork: artwork(tokenStandard: 'cnft-v2', ownerAddress: owner),
+          currentAddress: other,
+          creatorLinkedAddresses: const {},
+          permissions: permissions(false),
+          userOwnOffer: true,
+        ),
+        isA<ArtworkUnlistedViewerAction>(),
+      );
+    });
+  });
+
   test('synthetic master has no asset-level action for any viewer state', () {
     const master = 'cnft-master-collection-hash';
     for (final address in <String?>[null, owner, other]) {
@@ -1548,10 +1727,85 @@ void main() {
   });
 
   group('market source', () {
-    // Every CTA the dispatcher can produce is built against a mallow program.
-    // The webapp refuses foreign sources outright ("Unsupported market source",
-    // `useCancelListing`) and defaults a missing value to mallow
-    // (`UpdateListingModal`).
+    test(
+      'Magic Eden buy-now routes to a quote purchase for every supply type',
+      () {
+        for (final supply in [
+          SupplyType.oneOfOne,
+          SupplyType.editionPrint,
+          SupplyType.limitedEdition,
+          SupplyType.openEdition,
+        ]) {
+          final s = resolveArtworkActionState(
+            artwork: artwork(
+              listingType: ListingType.buyNow,
+              supplyType: supply,
+              lastSource: MarketSource.magicEden,
+            ),
+            currentAddress: owner,
+            creatorLinkedAddresses: const {},
+            permissions: null,
+          );
+          expect(s, isA<ArtworkMagicEdenBuyAction>(), reason: '$supply');
+        }
+      },
+    );
+    test(
+      'Magic Eden owner and session owners cannot buy their own listing',
+      () {
+        for (final current in [owner, other]) {
+          final s = resolveArtworkActionState(
+            artwork: artwork(
+              listingType: ListingType.buyNow,
+              ownerAddresses: const [owner],
+              lastSource: MarketSource.magicEden,
+            ),
+            currentAddress: current,
+            sessionAddresses: const {owner, other},
+            creatorLinkedAddresses: const {},
+            permissions: null,
+          );
+          expect(s, isA<ArtworkNoAction>());
+        }
+      },
+    );
+    test('disconnected Magic Eden viewer can connect to buy', () {
+      final s = resolveArtworkActionState(
+        artwork: artwork(
+          listingType: ListingType.buyNow,
+          lastSource: MarketSource.magicEden,
+        ),
+        currentAddress: null,
+        creatorLinkedAddresses: const {},
+        permissions: null,
+      );
+      expect(s, isA<ArtworkConnectWalletAction>());
+    });
+    test('Magic Eden auction and non-Solana listing stay unsupported', () {
+      for (final a in [
+        artwork(
+          listingType: ListingType.auction,
+          lastSource: MarketSource.magicEden,
+        ),
+        artwork(
+          listingType: ListingType.buyNow,
+          lastSource: MarketSource.magicEden,
+          chain: 'ethereum',
+        ),
+      ]) {
+        expect(
+          resolveArtworkActionState(
+            artwork: a,
+            currentAddress: owner,
+            creatorLinkedAddresses: const {},
+            permissions: null,
+          ),
+          isA<ArtworkNoAction>(),
+        );
+      }
+    });
+    // External listing management remains unsupported. Magic Eden buy-now
+    // viewers use a separate quote purchase path tested above.
     test('an objkt-sourced listing yields no CTA at all', () {
       final s = resolveArtworkActionState(
         artwork: artwork(
@@ -2465,6 +2719,205 @@ void main() {
         permissions: null,
       );
       expect(s, isA<ArtworkBuyAction>());
+    });
+  });
+
+  group('no Solana signer in the session → import wallet', () {
+    // A profile whose only key is Tezos, with its Solana wallets linked
+    // watch-only. Solana signs with the active wallet, so a Buy CTA here sent
+    // the `tz1…` address as the buyer and the backend answered "invalid buyer".
+    const tz1 = 'tz1VSUr8wwNhLAzempoch5d6hLRiTh8Cjcjb';
+    final now = DateTime.utc(2026);
+    final live = AuctionMetadata(endsAt: now.add(const Duration(hours: 1)));
+
+    ArtworkActionState resolve(
+      ArtworkDetails a, {
+      ArtworkSolanaSigner signer = ArtworkSolanaSigner.watchOnly,
+      String? currentAddress = tz1,
+      ArtworkPermissions? permissions,
+      Set<String> sessionAddresses = const {},
+    }) => resolveArtworkActionState(
+      artwork: a,
+      currentAddress: currentAddress,
+      creatorLinkedAddresses: const {},
+      permissions: permissions,
+      sessionAddresses: sessionAddresses,
+      solanaSigner: signer,
+      now: now,
+    );
+
+    void expectImport(ArtworkActionState s, String action) {
+      expect(s, isA<ArtworkImportWalletAction>());
+      expect((s as ArtworkImportWalletAction).action, action);
+    }
+
+    test('cnft-v2 buy-now viewer gets import instead of Buy', () {
+      final s = resolve(
+        artwork(
+          listingType: ListingType.buyNow,
+          ownerAddress: other,
+          tokenStandard: 'cnft-v2',
+        ),
+        permissions: const ArtworkPermissions(
+          canTransfer: false,
+          canEdit: false,
+          canBurn: false,
+          canList: false,
+          canTrade: true,
+          tokenStandard: TokenStandard.cnftV2,
+        ),
+      );
+      expectImport(s, 'buy');
+      expect((s as ArtworkImportWalletAction).watchOnly, isTrue);
+    });
+
+    test('missing vs watch-only only changes the copy flag', () {
+      final s = resolve(
+        artwork(listingType: ListingType.buyNow, ownerAddress: other),
+        signer: ArtworkSolanaSigner.missing,
+      );
+      expectImport(s, 'buy');
+      expect((s as ArtworkImportWalletAction).watchOnly, isFalse);
+    });
+
+    test('edition buy, offer and bid are all replaced', () {
+      expectImport(
+        resolve(
+          artwork(
+            listingType: ListingType.buyNow,
+            supplyType: SupplyType.limitedEdition,
+            ownerAddress: other,
+          ),
+        ),
+        'buy',
+      );
+      expectImport(resolve(artwork(ownerAddress: other)), 'make an offer');
+      expectImport(
+        resolve(
+          artwork(
+            listingType: ListingType.auction,
+            ownerAddress: other,
+            auctionMetadata: live,
+          ),
+        ),
+        'place a bid',
+      );
+    });
+
+    test('owner held by a watch-only Solana wallet cannot list or manage', () {
+      const holder = 'sol-watch-only';
+      final listing = resolve(
+        artwork(listingType: ListingType.buyNow, ownerAddress: holder),
+        sessionAddresses: const {holder, tz1},
+      );
+      expectImport(listing, 'manage this listing');
+
+      final unlisted = resolve(
+        artwork(ownerAddress: holder),
+        sessionAddresses: const {holder, tz1},
+        permissions: const ArtworkPermissions(
+          canTransfer: true,
+          canEdit: false,
+          canBurn: false,
+          canList: true,
+        ),
+      );
+      expectImport(unlisted, 'list this artwork');
+
+      final auction = resolve(
+        artwork(
+          listingType: ListingType.auction,
+          ownerAddress: holder,
+          auctionMetadata: live,
+        ),
+        sessionAddresses: const {holder, tz1},
+      );
+      expectImport(auction, 'manage this auction');
+    });
+
+    test('raffle: buying tickets is replaced, awaiting draw keeps status', () {
+      RaffleMetadata raffle(DateTime endsAt) => RaffleMetadata(
+        mintAccount: 'm',
+        creator: 'c',
+        raffleAccount: 'r',
+        entrantsAccount: 'e',
+        endsAt: endsAt,
+        supply: 50,
+        sold: 7,
+      );
+      expectImport(
+        resolve(
+          artwork(
+            listingType: ListingType.raffle,
+            ownerAddress: other,
+            raffleMetadata: raffle(now.add(const Duration(hours: 1))),
+          ),
+        ),
+        'buy tickets',
+      );
+      final awaiting = resolve(
+        artwork(
+          listingType: ListingType.raffle,
+          ownerAddress: other,
+          raffleMetadata: raffle(now.subtract(const Duration(minutes: 1))),
+        ),
+      );
+      expect(awaiting, isA<ArtworkRaffleAction>());
+    });
+
+    test('sheets that sign nothing stay as resolved', () {
+      expect(
+        resolve(
+          artwork(
+            listingType: ListingType.auction,
+            ownerAddress: other,
+            auctionMetadata: AuctionMetadata(refunded: true, endsAt: now),
+          ),
+        ),
+        isA<ArtworkAuctionRefundedAction>(),
+      );
+      expect(
+        resolve(artwork(listingType: ListingType.gumball)),
+        isA<ArtworkExternalLinkAction>(),
+      );
+      expect(
+        resolve(
+          artwork(listingType: ListingType.buyNow, ownerAddress: other),
+          currentAddress: null,
+        ),
+        isA<ArtworkConnectWalletAction>(),
+      );
+    });
+
+    test('a session that can sign on Solana keeps the normal CTA', () {
+      expect(
+        resolve(
+          artwork(listingType: ListingType.buyNow, ownerAddress: other),
+          signer: ArtworkSolanaSigner.available,
+        ),
+        isA<ArtworkBuyAction>(),
+      );
+    });
+
+    group('store build', () {
+      setUp(() => debugShowNftCommerceOverride = false);
+      tearDown(() => debugShowNftCommerceOverride = null);
+
+      test('a paid action is not named; a management one still is', () {
+        final buy = resolve(
+          artwork(listingType: ListingType.buyNow, ownerAddress: other),
+        );
+        expect(buy, isA<ArtworkImportWalletAction>());
+        expect((buy as ArtworkImportWalletAction).action, isNull);
+
+        expectImport(
+          resolve(
+            artwork(listingType: ListingType.buyNow, ownerAddress: owner),
+            sessionAddresses: const {owner},
+          ),
+          'manage this listing',
+        );
+      });
     });
   });
 }

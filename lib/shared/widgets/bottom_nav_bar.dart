@@ -6,12 +6,12 @@ import '../theme/mallow_theme.dart';
 import 'tappable.dart';
 
 /// Tab items for the bottom navigation bar.
-enum MallowNavTab { home, tokens, portfolio }
+enum MallowNavTab { home, tokens, portfolio, browser }
 
 /// A floating pill-style bottom navigation bar with separate FAB.
 ///
 /// Designed to match the Figma design system:
-/// - Centered pill with 3 icon-only tabs
+/// - Centered pill with icon-only tabs
 /// - White background with shadow
 /// - Separate FAB on the right for quick actions
 /// - Gradient fade at top for smooth content transition
@@ -22,12 +22,14 @@ class MallowBottomNavBar extends StatelessWidget {
     super.key,
     this.onFabPressed,
     this.showFab = true,
+    this.showBrowser = true,
   });
 
   final MallowNavTab currentTab;
   final ValueChanged<MallowNavTab> onTabSelected;
   final VoidCallback? onFabPressed;
   final bool showFab;
+  final bool showBrowser;
 
   /// Selecting a *different* tab fires a selection haptic; re-tapping the
   /// active tab is a no-op change and stays silent.
@@ -66,7 +68,8 @@ class MallowBottomNavBar extends StatelessWidget {
             children: [
               // Left spacer to keep the center pill centered against the
               // right-side action FAB.
-              if (showFab) const SizedBox(width: 48),
+              if (showFab && MediaQuery.sizeOf(context).width >= 380)
+                const SizedBox(width: 48),
               // Center pill navigation
               Expanded(
                 child: Center(
@@ -107,6 +110,20 @@ class MallowBottomNavBar extends StatelessWidget {
                           isActive: currentTab == MallowNavTab.tokens,
                           onTap: () => _select(MallowNavTab.tokens),
                         ),
+                        // Same _NavItem as the other tabs, not an IconButton:
+                        // the bar is mounted above the Navigator (app.dart),
+                        // so there is no Overlay for a tooltip to attach to
+                        // and IconButton's tooltip throws at build.
+                        if (showBrowser)
+                          _NavItem(
+                            assetPath: 'assets/icons/compass.svg',
+                            label: 'Browser',
+                            // An outline glyph: at 24 its 18 dp ring matches
+                            // the filled portfolio and tokens glyphs.
+                            iconSize: 24,
+                            isActive: currentTab == MallowNavTab.browser,
+                            onTap: () => _select(MallowNavTab.browser),
+                          ),
                       ],
                     ),
                   ),

@@ -58,7 +58,8 @@ class SendRecipientStep extends StatelessWidget {
   final RecipientSearchController searchController;
   final ValueChanged<RecipientSuggestion> onSuggestionPicked;
 
-  final VoidCallback onBack;
+  /// Null hides Back, for a send whose token was fixed before this step.
+  final VoidCallback? onBack;
   final VoidCallback onCancel;
   final VoidCallback onNext;
   final String? sourceAddress;

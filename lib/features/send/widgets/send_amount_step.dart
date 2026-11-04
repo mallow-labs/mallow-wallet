@@ -27,6 +27,8 @@ class SendAmountStep extends StatelessWidget {
     required this.onNext,
     this.sourceAddress,
     this.onSwitch,
+    this.amountLocked = false,
+    this.requestNote,
     super.key,
   });
 
@@ -41,11 +43,20 @@ class SendAmountStep extends StatelessWidget {
   final ValueChanged<String> onChanged;
   final VoidCallback onHalf;
   final VoidCallback onMax;
-  final VoidCallback onBack;
+
+  /// Null hides Back, for a send that starts on this step.
+  final VoidCallback? onBack;
   final VoidCallback onCancel;
   final VoidCallback onNext;
   final String? sourceAddress;
   final VoidCallback? onSwitch;
+
+  /// The amount was set by a payment request, so it cannot be edited and
+  /// Half/Max are hidden: a different amount is not the payment asked for.
+  final bool amountLocked;
+
+  /// Shown under the header; see [SendRequestNote].
+  final Widget? requestNote;
 
   @override
   Widget build(BuildContext context) {
@@ -56,6 +67,10 @@ class SendAmountStep extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           SendStepHeader(title: 'Send', onBack: onBack),
+          if (requestNote != null) ...[
+            const SizedBox(height: MallowTheme.spacingSm),
+            requestNote!,
+          ],
           const SizedBox(height: MallowTheme.spacingLg),
           Row(
             children: [
@@ -92,6 +107,7 @@ class SendAmountStep extends StatelessWidget {
             focusNode: focusNode,
             hintText: '0.00',
             errorText: errorText,
+            enabled: !amountLocked,
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
             inputFormatters: [DecimalInputFormatter(token.decimals)],
             onChanged: onChanged,
@@ -112,14 +128,15 @@ class SendAmountStep extends StatelessWidget {
                   ),
           ),
           const SizedBox(height: MallowTheme.spacing12),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              _Chip(label: 'Half', onTap: onHalf),
-              const SizedBox(width: MallowTheme.spacingSm),
-              _Chip(label: 'Max', onTap: onMax),
-            ],
-          ),
+          if (!amountLocked)
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                _Chip(label: 'Half', onTap: onHalf),
+                const SizedBox(width: MallowTheme.spacingSm),
+                _Chip(label: 'Max', onTap: onMax),
+              ],
+            ),
           const Spacer(),
           const SizedBox(height: MallowTheme.spacingMd),
           SendStepButtons(

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_api/mallow_api.dart' as api;
+import 'package:mallow_wallet/core/network/auth_service.dart';
 import 'package:mallow_wallet/core/services/pending_evm_tx_tracker.dart';
 import 'package:mallow_wallet/core/services/wallet_repository.dart';
 import 'package:mallow_wallet/core/session/session_manager.dart';
@@ -35,6 +36,8 @@ class _MockSessionManager extends Mock implements SessionManager {}
 class _MockWalletRepository extends Mock implements WalletRepository {}
 
 class _MockPendingEvmTxTracker extends Mock implements PendingEvmTxTracker {}
+
+class _MockAuthService extends Mock implements AuthService {}
 
 late _MockActivityRepository _repo;
 late ActivityRefreshSignal _signal;
@@ -234,5 +237,33 @@ void main() {
     );
     await tester.pump();
     expect(tester.getBottomLeft(lastCell).dy, lessThanOrEqualTo(844));
+  });
+
+  testWidgets('the signed-in wallet is the first address the feed asks for', (
+    tester,
+  ) async {
+    // The repository keeps only the first addresses within the endpoint's
+    // limits, so the signed-in wallet must lead or its own rows can be dropped.
+    const signedIn = '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM';
+    when(
+      () => sl<SessionManager>().apiOwnerAddresses,
+    ).thenReturn([_wallet, signedIn]);
+    final auth = _MockAuthService();
+    when(() => auth.currentAddress).thenReturn(signedIn);
+    sl.registerSingleton<AuthService>(auth);
+    addTearDown(() => sl.unregister<AuthService>());
+
+    await _openSheet(tester);
+
+    final sent = verify(
+      () => _repo.getActivities(
+        addresses: captureAny(named: 'addresses'),
+        page: any(named: 'page'),
+        limit: any(named: 'limit'),
+        types: any(named: 'types'),
+        before: any(named: 'before'),
+      ),
+    ).captured;
+    expect(sent.first, [signedIn, _wallet]);
   });
 }

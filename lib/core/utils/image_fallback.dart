@@ -1,5 +1,4 @@
-/// Direct-gateway fallback for failed image-CDN loads
-/// (original-serving spec decision 26).
+/// Direct-gateway fallback for failed image-CDN loads.
 ///
 /// Once every asset request goes through one domain, that domain being
 /// unreachable would black out every image in the app — so a failed load gets

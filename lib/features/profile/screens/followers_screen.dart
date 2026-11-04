@@ -12,6 +12,7 @@ import '../../../shared/utils/address_utils.dart';
 import '../../../shared/widgets/account_avatar.dart';
 import '../../../shared/widgets/loading_indicator.dart';
 import '../../../shared/widgets/mallow_network_image.dart';
+import '../../../shared/widgets/stable_width_text.dart';
 import '../../../shared/widgets/tappable.dart';
 import '../services/followers_bloc.dart';
 import '../widgets/profile_required_sheet.dart';
@@ -455,8 +456,9 @@ class _FollowUserRow extends StatelessWidget {
                     MallowTheme.radiusCircular,
                   ),
                 ),
-                child: Text(
+                child: StableWidthText(
                   user.isFollowing ? 'Unfollow' : 'Follow',
+                  reserve: const ['Follow', 'Unfollow'],
                   style: MallowTheme.uiCaption.copyWith(
                     color: colors.textPrimary,
                   ),

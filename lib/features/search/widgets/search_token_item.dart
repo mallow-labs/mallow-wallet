@@ -104,6 +104,7 @@ class SearchTokenItem extends StatelessWidget {
                   fontStyle: FontStyle.italic,
                   color: colors.textPrimary,
                 ),
+                maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
               Text(

@@ -201,7 +201,7 @@ Future<_SignerResolution> _resolveSigner(
       confirmLabel: 'Import wallet',
     );
     if ((go ?? false) && context.mounted) {
-      await context.push(AppRoutes.importWallet);
+      await context.push(AppRoutes.addWalletGlobal);
     }
     return (canProceed: false, switchTarget: null);
   }

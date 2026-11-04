@@ -187,7 +187,11 @@ void main() {
         await tester.pumpWidget(const MaterialApp(home: OffersScreen()));
         await tester.pumpAndSettle();
 
-        verifyNever(() => offersBloc.add(const OffersInboxEvent.refresh()));
+        verifyNever(
+          () => offersBloc.add(
+            const OffersInboxEvent.refresh(refreshRefunds: false),
+          ),
+        );
       },
     );
 
@@ -205,7 +209,9 @@ void main() {
         await tester.pumpAndSettle();
 
         verify(
-          () => offersBloc.add(const OffersInboxEvent.refresh()),
+          () => offersBloc.add(
+            const OffersInboxEvent.refresh(refreshRefunds: false),
+          ),
         ).called(1);
       },
     );
@@ -233,7 +239,9 @@ void main() {
         await tester.pumpAndSettle();
 
         verify(
-          () => offersBloc.add(const OffersInboxEvent.refresh()),
+          () => offersBloc.add(
+            const OffersInboxEvent.refresh(refreshRefunds: false),
+          ),
         ).called(1);
       },
     );
@@ -293,13 +301,19 @@ void main() {
         expect(find.text('artwork'), findsOneWidget);
         // Refetching on the way *in* would be wasted work and would drop the
         // rows out from under the screen the user is leaving.
-        verifyNever(() => offersBloc.add(const OffersInboxEvent.refresh()));
+        verifyNever(
+          () => offersBloc.add(
+            const OffersInboxEvent.refresh(refreshRefunds: false),
+          ),
+        );
 
         router.pop();
         await tester.pumpAndSettle();
 
         verify(
-          () => offersBloc.add(const OffersInboxEvent.refresh()),
+          () => offersBloc.add(
+            const OffersInboxEvent.refresh(refreshRefunds: false),
+          ),
         ).called(1);
       },
     );

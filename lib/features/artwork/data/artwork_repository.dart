@@ -151,6 +151,8 @@ class ArtworkRepository {
       quantityTotal: quantityTotal,
       animationUrl: item.videoUrl,
       playbackId: item.playbackId,
+      htmlUrl: item.htmlUrl,
+      modelUrl: item.modelUrl,
       royaltySplits: item.royalties
           .where((r) => (r.address ?? '').isNotEmpty)
           .map(
@@ -195,7 +197,7 @@ class ArtworkRepository {
   /// single-creator artwork with no indexed seller fee read "Royalties 100%".
   String? _royaltyPercentFromApi(api.NftDetail item) {
     final sellerFeeBps = item.sellerFeeBasisPoints;
-    if (sellerFeeBps != null && sellerFeeBps > 0) {
+    if (sellerFeeBps != null && sellerFeeBps > 0 && sellerFeeBps != 65535) {
       return _formatBpsPercent(sellerFeeBps);
     }
     return null;

@@ -48,7 +48,7 @@ class MintCostBreakdown {
 
 /// Orchestrates the mint pipeline: IPFS uploads, backend tx build, and
 /// finalization. Signing + broadcast live in [MintBloc] so they can
-/// co-ordinate with the user wallet via `WalletManager` (Phase 7).
+/// co-ordinate with the user wallet via `WalletManager`.
 @lazySingleton
 class MintRepository {
   MintRepository(this._api, this._apiV2, this._ipfs);

@@ -55,6 +55,20 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+        </activity>
+        <!-- Every inbound link: a display-less trampoline, not filters on
+             MainActivity. A sender that omits FLAG_ACTIVITY_NEW_TASK (a camera
+             scanning a QR code) starts its target inside its own task, where
+             singleTop finds no MainActivity to reuse. That made a second
+             MainActivity, and a second Flutter engine on the same database.
+             LinkTrampolineActivity hands the link to the existing one. -->
+        <activity
+            android:name="com.mallow.wallet.android.LinkTrampolineActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity="">
             <!-- Verified Android App Links for mallow.art (https). autoVerify
                  lets Android confirm ownership via the site's
                  /.well-known/assetlinks.json so these open the app directly
@@ -78,15 +92,48 @@
                 <data android:pathPrefix="/u/" />
                 <data android:pathPrefix="/a/" />
             </intent-filter>
-            <!-- Non-sensitive custom-scheme surface: the Web3Auth OAuth
-                 redirect (mallowwallet://auth, consumed by the SDK and dropped
-                 by DeepLinkService) plus unverified-link fallback. Kept for
-                 environments where App Links verification is unavailable. -->
+            <!-- Custom-scheme surface: the Web3Auth OAuth redirect
+                 (mallowwallet://auth, consumed by the SDK and dropped by
+                 DeepLinkService), the browser handoff
+                 (mallowwallet://browser/open), the WalletConnect wrapper
+                 (mallowwallet://wc) and the unverified-link fallback, kept
+                 for environments where App Links verification is
+                 unavailable. None of them can sign. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="mallowwallet" />
+            </intent-filter>
+            <!-- WalletConnect pairing links (wc:<topic>@2?symKey=…) from a
+                 website or another app. The link carries its pairing key, so
+                 DeepLinkService hands it to WalletConnect before it can be
+                 logged. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="wc" />
+            </intent-filter>
+        </activity>
+        <!-- Share-sheet target "Open in mallow browser". A display-less
+             trampoline, not a SEND filter on MainActivity: the share sheet
+             starts its target inside the sharing app's task, which would put a
+             second MainActivity (and a second Flutter engine on the same
+             database) there. ShareTargetActivity hands the link to the
+             existing MainActivity instead. -->
+        <activity
+            android:name="com.mallow.wallet.android.ShareTargetActivity"
+            android:exported="true"
+            android:label="Open in mallow browser"
+            android:theme="@android:style/Theme.NoDisplay"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity="">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
         <meta-data
@@ -135,6 +182,14 @@
         <intent>
             <action android:name="android.intent.action.VIEW"/>
             <data android:scheme="https"/>
+        </intent>
+        <!-- Solana dApp Store listings (solanadappstore://details?id=…).
+             Without this, package visibility hides the dApp Store app and
+             canLaunchUrl() answers false for the update link on the dApp Store
+             build, which sends the user nowhere. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="solanadappstore"/>
         </intent>
         <!-- LaunchMode.inAppBrowserView resolves a Custom Tabs provider through
              this service query; without it the in-app browser degrades to an

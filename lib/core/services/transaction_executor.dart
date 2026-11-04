@@ -1,18 +1,21 @@
 import 'dart:convert';
 
+import 'package:get_it/get_it.dart';
 import 'package:injectable/injectable.dart';
 import 'package:solana/encoder.dart';
 import 'package:solana/solana.dart' show Ed25519HDKeyPair;
 
 import '../config/remote_config.dart';
+import '../crypto/solana_v1_transaction.dart';
 import '../network/solana_rpc_service.dart';
 import '../result/app_failure.dart';
 import '../result/result.dart';
+import 'keystone_sign_service.dart';
 import 'ledger_service.dart';
 import 'stale_tx_tracker.dart';
 import 'transaction_pipeline.dart';
 import 'transaction_signing.dart'
-    show createsLookupTable, hasPreAttachedSignature;
+    show SignedTooLateException, createsLookupTable, hasPreAttachedSignature;
 
 /// Coarse pipeline phase used to drive per-bloc UI copy.
 ///
@@ -84,6 +87,10 @@ class TransactionExecutor {
 
   final TransactionPipeline _pipeline;
 
+  /// How many times one tx is refreshed or rebuilt for a signature that came
+  /// back after it went stale, before the failure is surfaced.
+  static const _maxTooLateRebuilds = 2;
+
   /// Execute [txsBase64] in order. Returns the last on-chain signature on
   /// success.
   ///
@@ -105,7 +112,10 @@ class TransactionExecutor {
   /// tracker is redundant there; passing one in is still safe — it just
   /// won't fire. If the tracked batch has aged past the staleness window the
   /// tracker re-runs its build closure, swaps the batch, and execution
-  /// proceeds against the fresh txs.
+  /// proceeds against the fresh txs. If a slow Keystone signature outlives
+  /// a client-refreshed blockhash, retrying the same pending tx refreshes it
+  /// again. Both recovery paths allow at most two retries before surfacing
+  /// the user-facing expiry error.
   ///
   /// **[rebuildsRemainingWork] — mid-batch staleness.** By default the
   /// tracker is consulted only *before the first* tx. That is deliberate and
@@ -163,6 +173,10 @@ class TransactionExecutor {
       var completed = 0;
       var total = pending.length;
       String? lastSignature;
+      // Consecutive retries for a signature that came back too late. Capped
+      // so a signer that can never beat the window ends in an error the user
+      // can read rather than an endless loop of fresh QR codes.
+      var tooLateRebuilds = 0;
 
       while (pending.isNotEmpty) {
         // Staleness refresh. Before the first tx this fires for any batch the
@@ -192,6 +206,16 @@ class TransactionExecutor {
         }
 
         final index = completed;
+        // Whether this tx can go back to its builder if it ages out *during*
+        // signing — the same rule as the refresh above. The refresh only sees
+        // the age when signing starts; a Keystone's QR round trip can then
+        // outlast the window, so the age is checked again before broadcast.
+        final staleTracker =
+            tracker != null &&
+                (completed == 0 || rebuildsRemainingWork) &&
+                needsBuilderRebuild(pending)
+            ? tracker
+            : null;
         onStage?.call(
           ExecutorStageEvent(
             stage: ExecutorStage.awaitingApproval,
@@ -199,7 +223,8 @@ class TransactionExecutor {
             total: total,
           ),
         );
-        final txResult = await _pipeline.signAndBroadcast(
+        Future<Result<String, AppFailure>>
+        signAndBroadcast() => _pipeline.signAndBroadcast(
           unsignedTxBase64: pending.first,
           rpcOverride: rpcOverride,
           // Every tx in a batch belongs to the same cell — the kill check in
@@ -221,6 +246,9 @@ class TransactionExecutor {
             additionalSigners,
           ),
           useLedger: useLedger,
+          discardSignatureIf: staleTracker == null
+              ? null
+              : () => staleTracker.isStale,
           onLedgerSigning: useLedger
               ? (s) {
                   if (s == LedgerSigningState.waitingForConfirmation) {
@@ -242,6 +270,41 @@ class TransactionExecutor {
             ),
           ),
         );
+        final controller = GetIt.instance.isRegistered<KeystoneSignController>()
+            ? GetIt.instance<KeystoneSignController>()
+            : null;
+        final txResult = await (controller == null
+            ? signAndBroadcast()
+            : controller.withContext(
+                KeystoneSignContext(
+                  notice: tooLateRebuilds > 0
+                      ? 'That took too long, so the transaction expired before '
+                            'it was sent. Approve it again on your Keystone.'
+                      : null,
+                  index: total > 1 ? index : null,
+                  total: total > 1 ? total : null,
+                ),
+                signAndBroadcast,
+              ));
+        // The signature arrived after the tx went stale and was discarded
+        // unsent. Rebuild what needs its builder; otherwise retry the same
+        // pending tx only if its blockhash can be refreshed before signing.
+        // An untracked co-signed tx cannot be freshened client-side, and its
+        // builder may have side effects, so surface expiry without re-signing
+        // the same expired bytes.
+        if (tooLateRebuilds < _maxTooLateRebuilds &&
+            txResult is ResultFailure<String, AppFailure> &&
+            txResult.error.cause is SignedTooLateException &&
+            (staleTracker != null || !needsBuilderRebuild([pending.first]))) {
+          tooLateRebuilds++;
+          if (staleTracker != null) {
+            pending = await staleTracker.rebuildNow();
+            total = completed + pending.length;
+            if (pending.isEmpty) break;
+          }
+          continue;
+        }
+        tooLateRebuilds = 0;
         // Rethrow per-tx failures inside the surrounding [Result.guard] so
         // the outer switch classifies them uniformly (cancel vs. other).
         lastSignature = switch (txResult) {
@@ -283,9 +346,15 @@ class TransactionExecutor {
 /// A tx whose bytes will not decode is not counted: it cannot be inspected,
 /// and signing it a moment later fails with a real error rather than an
 /// unhandled decode throw out of [TransactionExecutor.execute].
+///
+/// A v1 transaction has no lookup tables, so only a co-signature counts.
 bool needsBuilderRebuild(List<String> txsBase64) => txsBase64.any((tx) {
   try {
-    final decoded = SignedTx.fromBytes(base64Decode(tx));
+    final wire = base64Decode(tx);
+    if (SolanaV1Transaction.isV1Wire(wire)) {
+      return SolanaV1Transaction.fromBytes(wire).hasPreAttachedSignature;
+    }
+    final decoded = SignedTx.fromBytes(wire);
     return hasPreAttachedSignature(decoded) || createsLookupTable(decoded);
   } catch (_) {
     return false;
@@ -304,7 +373,14 @@ List<Ed25519HDKeyPair> requiredSignersForTx(
 ) {
   if (signers.isEmpty) return signers;
   try {
-    final msg = SignedTx.fromBytes(base64Decode(txBase64)).compiledMessage;
+    final wire = base64Decode(txBase64);
+    if (SolanaV1Transaction.isV1Wire(wire)) {
+      final required = SolanaV1Transaction.fromBytes(wire).signerKeys.toSet();
+      return signers
+          .where((s) => required.contains(s.publicKey.toBase58()))
+          .toList(growable: false);
+    }
+    final msg = SignedTx.fromBytes(wire).compiledMessage;
     final required = <String>{
       for (
         var i = 0;

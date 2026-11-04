@@ -17,8 +17,8 @@ import 'offer_action_buttons.dart';
 /// Persistent bottom sheet for listed 1/1s and edition prints. Shows the
 /// listing price, a supply-progress bar (when applicable), and a Buy CTA.
 ///
-/// Triggered by `viewer` × `buyNow` × (`oneOfOne` ∨ `editionPrint`) — see
-/// `docs/artwork_state.md`.
+/// Triggered by `viewer` × `buyNow` × (`oneOfOne` ∨ `editionPrint`) in
+/// `resolveArtworkActionState`.
 class ArtworkBuySheet extends StatelessWidget {
   const ArtworkBuySheet({
     required this.artwork,
@@ -27,11 +27,16 @@ class ArtworkBuySheet extends StatelessWidget {
     required this.onCancelOffer,
     this.isLoading = false,
     this.userOwnOffer = false,
+    this.canMakeOffer = true,
     this.block,
+    this.showOffers = true,
+    this.checkListedBalance = true,
     super.key,
   });
 
   final ArtworkDetails artwork;
+  final bool showOffers;
+  final bool checkListedBalance;
   final VoidCallback onBuy;
   final bool isLoading;
 
@@ -43,6 +48,7 @@ class ArtworkBuySheet extends StatelessWidget {
   /// True when the connected wallet has a live offer on this artwork —
   /// flips the secondary CTA from "Make offer" to "Cancel offer".
   final bool userOwnOffer;
+  final bool canMakeOffer;
 
   final VoidCallback onMakeOffer;
   final VoidCallback onCancelOffer;
@@ -117,7 +123,9 @@ class ArtworkBuySheet extends StatelessWidget {
                     builder: (context, balanceState) {
                       final result = checkBalanceOrSkip(
                         paymentMint: artwork.currency,
-                        requiredRawAmount: artwork.price?.round(),
+                        requiredRawAmount: checkListedBalance
+                            ? artwork.price?.round()
+                            : null,
                         balanceState: balanceState,
                       );
                       return MallowButton(
@@ -136,13 +144,16 @@ class ArtworkBuySheet extends StatelessWidget {
                       );
                     },
                   ),
-                  const SizedBox(height: MallowTheme.spacingSm),
-                  OfferActionButtons(
-                    userOwnOffer: userOwnOffer,
-                    isLoading: isLoading || switching,
-                    onMakeOffer: onMakeOffer,
-                    onCancelOffer: onCancelOffer,
-                  ),
+                  if (showOffers && (canMakeOffer || userOwnOffer)) ...[
+                    const SizedBox(height: MallowTheme.spacingSm),
+                    OfferActionButtons(
+                      userOwnOffer: userOwnOffer,
+                      canMakeOffer: canMakeOffer,
+                      isLoading: isLoading || switching,
+                      onMakeOffer: onMakeOffer,
+                      onCancelOffer: onCancelOffer,
+                    ),
+                  ],
                 ],
               ),
             ),

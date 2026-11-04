@@ -4,6 +4,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/widgets/account_avatar.dart';
 import '../../../shared/widgets/mallow_network_image.dart';
+import '../../../shared/widgets/stable_width_text.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
 import '../../../shared/widgets/verified_badge.dart';
 
@@ -180,8 +181,9 @@ class _FollowButton extends StatelessWidget {
             border: Border.all(color: context.mallowColors.dividerLight),
             borderRadius: BorderRadius.circular(MallowTheme.radiusCircular),
           ),
-          child: Text(
+          child: StableWidthText(
             isFollowing ? 'Following' : 'Follow',
+            reserve: const ['Follow', 'Following'],
             style: MallowTheme.uiCaption.copyWith(
               color: isFollowing
                   ? context.mallowColors.textSecondary

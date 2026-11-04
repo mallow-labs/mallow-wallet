@@ -25,6 +25,7 @@ import '../../mint/widgets/mint_progress_bar.dart';
 import '../../portfolio/services/portfolio_bloc.dart';
 import '../../portfolio/services/token_balance_bloc.dart';
 import '../../sell/listing_flow_navigation.dart';
+import '../../sell/widgets/listing_eligibility_notice.dart';
 import '../services/fixed_price_bloc.dart';
 import '../steps/pricing_step.dart';
 import '../steps/review_step.dart';
@@ -398,6 +399,7 @@ class _BottomCta extends StatelessWidget {
       buildWhen: (prev, next) =>
           prev.step != next.step ||
           prev.canGoNext != next.canGoNext ||
+          prev.listingEligibilityError != next.listingEligibilityError ||
           (prev.flow is TxFlowIdle) != (next.flow is TxFlowIdle),
       builder: (context, state) {
         final isPipelineActive = state.flow is! TxFlowIdle;
@@ -409,32 +411,44 @@ class _BottomCta extends StatelessWidget {
             bottom:
                 MediaQuery.of(context).padding.bottom + MallowTheme.spacingMd,
           ),
-          child: BlocBuilder<TokenBalanceBloc, TokenBalanceState>(
-            builder: (context, balanceState) {
-              final result = isReview
-                  ? checkBalance(
-                      paymentMint: null,
-                      requiredRawAmount: 0,
-                      balanceState: balanceState,
-                    )
-                  : const BalanceCheckResult.sufficient();
-              return _PillCta(
-                label: fallbackLabel,
-                enabled: state.canGoNext && !isPipelineActive,
-                onPressed: () {
-                  if (isReview) {
-                    if (!ensureSufficientBalance(context, result)) return;
-                    context.read<FixedPriceBloc>().add(
-                      const FixedPriceEvent.requestList(),
-                    );
-                  } else {
-                    context.read<FixedPriceBloc>().add(
-                      const FixedPriceEvent.next(),
-                    );
-                  }
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListingEligibilityNotice(
+                message: state.listingEligibilityError,
+                isChecking: state.isCheckingEligibility,
+                onRetry: () => context.read<FixedPriceBloc>().add(
+                  const FixedPriceEvent.retryEligibility(),
+                ),
+              ),
+              BlocBuilder<TokenBalanceBloc, TokenBalanceState>(
+                builder: (context, balanceState) {
+                  final result = isReview
+                      ? checkBalance(
+                          paymentMint: null,
+                          requiredRawAmount: 0,
+                          balanceState: balanceState,
+                        )
+                      : const BalanceCheckResult.sufficient();
+                  return _PillCta(
+                    label: fallbackLabel,
+                    enabled: state.canGoNext && !isPipelineActive,
+                    onPressed: () {
+                      if (isReview) {
+                        if (!ensureSufficientBalance(context, result)) return;
+                        context.read<FixedPriceBloc>().add(
+                          const FixedPriceEvent.requestList(),
+                        );
+                      } else {
+                        context.read<FixedPriceBloc>().add(
+                          const FixedPriceEvent.next(),
+                        );
+                      }
+                    },
+                  );
                 },
-              );
-            },
+              ),
+            ],
           ),
         );
       },

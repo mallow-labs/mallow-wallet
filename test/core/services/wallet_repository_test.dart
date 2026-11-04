@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:drift/native.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -196,8 +197,9 @@ void main() {
   // full WalletImportSelection each time.
   Future<List<WalletInfo>> importSolanaAt(
     String spId,
-    List<int> indices,
-  ) async {
+    List<int> indices, {
+    Map<int, String> accountNames = const {},
+  }) async {
     final maxIndex = indices.reduce((a, b) => a > b ? a : b);
     final picker = await repo.deriveAccountsForPicker(
       spId,
@@ -211,7 +213,11 @@ void main() {
           address: picker.accounts[i].solanaStandard,
         ),
     ];
-    return repo.importAccountsFromPhrase(spId, selections);
+    return repo.importAccountsFromPhrase(
+      spId,
+      selections,
+      accountNames: accountNames,
+    );
   }
 
   // Seeds a phrase with a single Solana HD wallet at index 0 (auto-selected) —
@@ -324,6 +330,24 @@ void main() {
       expect(await repo.getWalletsForSeedPhrase(sp.id), isEmpty);
       expect(await repo.getActiveWallet(), isNull);
     });
+
+    test(
+      'reports failure when the recovery graph cannot record a new seed',
+      () async {
+        when(
+          () => vault.write('mallow_account_graph', any()),
+        ).thenThrow(PlatformException(code: 'write_failed'));
+
+        await expectLater(
+          repo.createSeedPhrase(_abandonMnemonic, autoDerive: false),
+          throwsA(isA<GraphSyncException>()),
+        );
+        await expectLater(
+          repo.createSeedPhrase(_abandonMnemonic, autoDerive: false),
+          throwsA(isA<GraphSyncException>()),
+        );
+      },
+    );
 
     test('a second distinct seed phrase is named "Seed 2"', () async {
       await repo.createSeedPhrase(_abandonMnemonic);
@@ -485,6 +509,128 @@ void main() {
         expect(sp.id, isNotNull);
       },
     );
+
+    test(
+      'reports failure when the recovery graph cannot record a new key',
+      () async {
+        final k = await _importableKey(0x34);
+        when(
+          () => vault.write('mallow_account_graph', any()),
+        ).thenThrow(PlatformException(code: 'write_failed'));
+
+        await expectLater(
+          repo.addImportedKeyWallet(k.key, 'Imported'),
+          throwsA(isA<GraphSyncException>()),
+        );
+      },
+    );
+
+    // A failed graph commit leaves the row and key behind (as in the previous
+    // test). A retry finds that row and refuses it as a duplicate — which
+    // must not also leave the graph without the key, or a later database loss
+    // orphans it for good.
+    test('a retry after a failed graph commit records the key it '
+        'refuses', () async {
+      final k = await _importableKey(0x35);
+      when(
+        () => vault.write('mallow_account_graph', any()),
+      ).thenThrow(PlatformException(code: 'write_failed'));
+      await expectLater(
+        repo.addImportedKeyWallet(k.key, 'Imported'),
+        throwsA(isA<GraphSyncException>()),
+      );
+
+      when(() => vault.write('mallow_account_graph', any())).thenAnswer((
+        inv,
+      ) async {
+        vaultStore['mallow_account_graph'] =
+            inv.positionalArguments[1] as String;
+      });
+      await expectLater(
+        repo.addImportedKeyWallet(k.key, 'Imported'),
+        throwsA(isA<DuplicateWalletException>()),
+      );
+
+      final graph =
+          jsonDecode((await storage.loadAccountGraph())!)
+              as Map<String, dynamic>;
+      final wallets = (graph['wallets'] as List).cast<Map<String, dynamic>>();
+      expect(wallets.map((w) => w['address']), contains(k.address));
+    });
+
+    group('completeImportedKeyRetry', () {
+      test('completes a retry: the stored key matches and the graph names '
+          'it', () async {
+        final k = await _importableKey(0x37);
+        when(
+          () => vault.write('mallow_account_graph', any()),
+        ).thenThrow(PlatformException(code: 'write_failed'));
+        await expectLater(
+          repo.addImportedKeyWallet(k.key, 'Imported'),
+          throwsA(isA<GraphSyncException>()),
+        );
+        when(() => vault.write('mallow_account_graph', any())).thenAnswer((
+          inv,
+        ) async {
+          vaultStore['mallow_account_graph'] =
+              inv.positionalArguments[1] as String;
+        });
+
+        final wallet = await repo.completeImportedKeyRetry(k.key);
+
+        expect(wallet?.address, k.address);
+        final graph =
+            jsonDecode((await storage.loadAccountGraph())!)
+                as Map<String, dynamic>;
+        final wallets = (graph['wallets'] as List).cast<Map<String, dynamic>>();
+        expect(wallets.map((w) => w['address']), contains(k.address));
+      });
+
+      test('throws while the graph still cannot be written', () async {
+        final k = await _importableKey(0x38);
+        await repo.addImportedKeyWallet(k.key, 'Imported');
+        when(
+          () => vault.write('mallow_account_graph', any()),
+        ).thenThrow(PlatformException(code: 'write_failed'));
+
+        await expectLater(
+          repo.completeImportedKeyRetry(k.key),
+          throwsA(isA<GraphSyncException>()),
+        );
+      });
+
+      test('refuses a wallet whose stored key is gone', () async {
+        final k = await _importableKey(0x39);
+        final wallet = await repo.addImportedKeyWallet(k.key, 'Imported');
+        vaultStore.remove('mallow_pk_${wallet.id}');
+
+        expect(await repo.completeImportedKeyRetry(k.key), isNull);
+      });
+
+      test('refuses an address no imported key holds', () async {
+        final k = await _importableKey(0x3a);
+        await repo.addViewOnlyWallet(k.address, 'Watching');
+
+        expect(await repo.completeImportedKeyRetry(k.key), isNull);
+      });
+    });
+
+    // The refusal is the truth whatever the sync does. A GraphSyncException
+    // here would tell the caller this attempt wrote rows when it wrote
+    // nothing — and the watch-address screen words that error as "it was
+    // added".
+    test('a duplicate stays a duplicate when its graph sync fails', () async {
+      final k = await _importableKey(0x36);
+      await repo.addImportedKeyWallet(k.key, 'Imported');
+      when(
+        () => vault.write('mallow_account_graph', any()),
+      ).thenThrow(PlatformException(code: 'write_failed'));
+
+      await expectLater(
+        repo.addImportedKeyWallet(k.key, 'Imported'),
+        throwsA(isA<DuplicateWalletException>()),
+      );
+    });
   });
 
   group('addViewOnlyWallet', () {
@@ -775,6 +921,253 @@ void main() {
       final account = (await repo.getAccountViews()).single;
       expect(account.kind, AccountKind.seedVault);
     });
+  });
+
+  group('addKeystoneWallet', () {
+    const fingerprintA = 0x12345678;
+    const fingerprintB = 0x9ABCDEF0;
+
+    test('writes a keystone row carrying the device fingerprint', () async {
+      final wallet = await repo.addKeystoneWallet(
+        'KS-Addr',
+        'Solana (legacy)',
+        masterFingerprint: fingerprintA,
+        derivationIndex: 3,
+        derivationScheme: SolanaDerivationScheme.legacy,
+      );
+
+      expect(wallet.walletType, WalletType.keystone);
+      expect(wallet.chain, Chain.solana.toDbString());
+      expect(wallet.masterFingerprint, fingerprintA);
+
+      // Every field a sign request is built from must round-trip: a wrong
+      // scheme or fingerprint signs from a different key, or not at all.
+      final reloaded = await repo.getWalletById(wallet.id);
+      expect(reloaded?.walletType, WalletType.keystone);
+      expect(reloaded?.derivationIndex, 3);
+      expect(reloaded?.derivationScheme, SolanaDerivationScheme.legacy);
+      expect(reloaded?.masterFingerprint, fingerprintA);
+    });
+
+    // Restore rebuilds hardware rows from the graph alone, so a Keystone the
+    // graph never recorded is gone after a database loss — the same rule the
+    // Ledger and Seed Vault imports follow.
+    test('reports failure when the recovery graph cannot record it', () async {
+      when(
+        () => vault.write('mallow_account_graph', any()),
+      ).thenThrow(PlatformException(code: 'write_failed'));
+
+      await expectLater(
+        repo.addKeystoneWallet(
+          'KS-Addr',
+          'Solana',
+          masterFingerprint: fingerprintA,
+        ),
+        throwsA(isA<GraphSyncException>()),
+      );
+    });
+
+    test('a retry after a failed graph commit records the wallet it '
+        'refuses', () async {
+      when(
+        () => vault.write('mallow_account_graph', any()),
+      ).thenThrow(PlatformException(code: 'write_failed'));
+      await expectLater(
+        repo.addKeystoneWallet(
+          'KS-Retry',
+          'Solana',
+          masterFingerprint: fingerprintA,
+        ),
+        throwsA(isA<GraphSyncException>()),
+      );
+
+      when(() => vault.write('mallow_account_graph', any())).thenAnswer((
+        inv,
+      ) async {
+        vaultStore['mallow_account_graph'] =
+            inv.positionalArguments[1] as String;
+      });
+      await expectLater(
+        repo.addKeystoneWallet(
+          'KS-Retry',
+          'Solana',
+          masterFingerprint: fingerprintA,
+        ),
+        throwsA(isA<DuplicateWalletException>()),
+      );
+
+      final graph =
+          jsonDecode((await storage.loadAccountGraph())!)
+              as Map<String, dynamic>;
+      final wallets = (graph['wallets'] as List).cast<Map<String, dynamic>>();
+      expect(wallets.map((w) => w['address']), contains('KS-Retry'));
+    });
+
+    test('refuses a zero fingerprint', () async {
+      // Zero is what a missing field decodes to, and the device refuses a
+      // request naming it — a row with it could never sign.
+      expect(
+        () => repo.addKeystoneWallet('KS-Zero', 'Solana', masterFingerprint: 0),
+        throwsArgumentError,
+      );
+      expect(await repo.getAllWallets(), isEmpty);
+    });
+
+    test('stores no secret for the wallet', () async {
+      final wallet = await repo.addKeystoneWallet(
+        'KS-NoSecret',
+        'Solana',
+        masterFingerprint: fingerprintA,
+      );
+      bool keyedToWallet(String id) =>
+          [...fssStore.keys, ...vaultStore.keys].any((k) => k.contains(id));
+      expect(keyedToWallet(wallet.id), isFalse);
+    });
+
+    test('two Keystones at the same index get two accounts', () async {
+      // The reason the account carries the fingerprint: both devices export
+      // index 0, and an index-keyed account would merge them into one card.
+      final a = await repo.addKeystoneWallet(
+        'KS-A0',
+        'Solana',
+        masterFingerprint: fingerprintA,
+      );
+      final b = await repo.addKeystoneWallet(
+        'KS-B0',
+        'Solana',
+        masterFingerprint: fingerprintB,
+      );
+      expect(a.accountId, isNot(b.accountId));
+
+      final views = await repo.getAccountViews();
+      expect(views.where((v) => v.kind == AccountKind.keystone), hasLength(2));
+    });
+
+    test('rows of one device at one index share an account', () async {
+      final standard = await repo.addKeystoneWallet(
+        'KS-0s',
+        'Solana',
+        masterFingerprint: fingerprintA,
+      );
+      final legacy = await repo.addKeystoneWallet(
+        'KS-0l',
+        'Solana (legacy)',
+        masterFingerprint: fingerprintA,
+        derivationScheme: SolanaDerivationScheme.legacy,
+      );
+      final next = await repo.addKeystoneWallet(
+        'KS-1s',
+        'Solana',
+        masterFingerprint: fingerprintA,
+        derivationIndex: 1,
+      );
+      expect(standard.accountId, legacy.accountId);
+      expect(standard.accountId, isNot(next.accountId));
+    });
+
+    test('stays apart from Ledger and Seed Vault at the same index', () async {
+      final ledger = await repo.addLedgerWallet('L-0', 'Nano');
+      final vault = await repo.addSeedVaultWallet('SV-0', 'Seeker');
+      final keystone = await repo.addKeystoneWallet(
+        'KS-0',
+        'Solana',
+        masterFingerprint: fingerprintA,
+      );
+      expect({
+        ledger.accountId,
+        vault.accountId,
+        keystone.accountId,
+      }, hasLength(3));
+    });
+
+    test('throws DuplicateWalletException for an address a signer already '
+        'holds', () async {
+      await repo.addKeystoneWallet(
+        'KS-Dup',
+        'A',
+        masterFingerprint: fingerprintA,
+      );
+      expect(
+        () => repo.addKeystoneWallet(
+          'KS-Dup',
+          'B',
+          masterFingerprint: fingerprintA,
+        ),
+        throwsA(isA<DuplicateWalletException>()),
+      );
+    });
+
+    // Why: without the fingerprint a restored row cannot build a sign request
+    // at all, and without the account's copy a second device's import would
+    // merge into the restored account.
+    test(
+      'round-trips through the recovery graph with its fingerprint',
+      () async {
+        final wallet = await repo.addKeystoneWallet(
+          'KS-Graph',
+          'Solana',
+          masterFingerprint: fingerprintA,
+          derivationIndex: 4,
+        );
+        final graphJson = await storage.loadAccountGraph();
+        expect(graphJson, isNotNull);
+
+        await db.clearAll();
+        expect(await repo.getAllWallets(), isEmpty);
+        await repo.restoreFromGraph(graphJson!);
+
+        final restored = await repo.getWalletById(wallet.id);
+        expect(restored?.walletType, WalletType.keystone);
+        expect(restored?.derivationIndex, 4);
+        expect(restored?.masterFingerprint, fingerprintA);
+        final account = (await repo.getAccountViews()).single;
+        expect(account.kind, AccountKind.keystone);
+
+        // The restored account still resolves by (fingerprint, index), so a
+        // second row from the same device joins it instead of opening another.
+        final sibling = await repo.addKeystoneWallet(
+          'KS-Graph-legacy',
+          'Solana (legacy)',
+          masterFingerprint: fingerprintA,
+          derivationIndex: 4,
+          derivationScheme: SolanaDerivationScheme.legacy,
+        );
+        expect(sibling.accountId, account.id);
+      },
+    );
+  });
+
+  group('hardware imports name the account from the picker', () {
+    // Each call imports index 0 twice: the first creates the account under the
+    // picker's name, the second joins it and must not rename it.
+    final imports = <String, Future<WalletInfo> Function(String, String?)>{
+      'Ledger': (address, name) =>
+          repo.addLedgerWallet(address, 'Solana', accountName: name),
+      'Seed Vault': (address, name) =>
+          repo.addSeedVaultWallet(address, 'Solana', accountName: name),
+      'Keystone': (address, name) => repo.addKeystoneWallet(
+        address,
+        'Solana',
+        masterFingerprint: 0x12345678,
+        accountName: name,
+      ),
+    };
+
+    for (final MapEntry(key: label, value: add) in imports.entries) {
+      test('$label: a new account takes the name and still consumes its '
+          'number', () async {
+        final named = await add('$label-0s', 'Cold storage');
+        // The next account continues from 02: the named one consumed 01.
+        final next = await repo.addViewOnlyWallet('ViewOnlyAfter', 'Watch');
+        await add('$label-0l', 'Renamed');
+
+        final views = {
+          for (final v in await repo.getAccountViews()) v.id: v.name,
+        };
+        expect(views[named.accountId], 'Cold storage');
+        expect(views[next.accountId], 'Account 02');
+      });
+    }
   });
 
   group('addSocialAccount', () {
@@ -1757,6 +2150,41 @@ void main() {
       );
     });
 
+    test(
+      'a failed private-key erase emits a sanitized production error',
+      () async {
+        final k = await _importableKey(0x7e);
+        final wallet = await repo.addImportedKeyWallet(k.key, 'Imported');
+        when(() => vault.delete('mallow_pk_${wallet.id}')).thenThrow(
+          PlatformException(
+            code: 'delete_failed',
+            message: 'must-not-reach-diagnostics',
+          ),
+        );
+        final logLines = <String>[];
+        final originalDebugPrint = debugPrint;
+        debugPrint = (message, {wrapWidth}) {
+          if (message != null) logLines.add(message);
+        };
+        addTearDown(() => debugPrint = originalDebugPrint);
+
+        await repo.removeWallet(wallet.id);
+
+        expect(
+          logLines.single,
+          startsWith(
+            '[WalletRepository] Stored private key could not be erased after '
+            'wallet removal: PlatformException',
+          ),
+        );
+        expect(logLines.join('\n'), isNot(contains(wallet.id)));
+        expect(
+          logLines.join('\n'),
+          isNot(contains('must-not-reach-diagnostics')),
+        );
+      },
+    );
+
     test('removeWallets keeps a seed phrase when a sibling stays', () async {
       final sp = await repo.createSeedPhrase(
         _abandonMnemonic,
@@ -2538,8 +2966,8 @@ void main() {
     // Carry-over is only as safe as the read it carries from. A keystore that
     // answered "no graph" here would carry nothing over, and the write that
     // follows would replace the graph with the new seed alone — the exact
-    // orphaning carry-over exists to prevent. So the read throws, and a plain
-    // sync must swallow it and leave the stored graph untouched.
+    // orphaning carry-over exists to prevent. So the read throws, and the
+    // additive sync must fail loudly and leave the stored graph untouched.
     test('a failed stored-graph read leaves the stored graph alone', () async {
       final old = await repo.createSeedPhrase(_abandonMnemonic);
       await repo.syncWalletGraph();
@@ -2553,7 +2981,11 @@ void main() {
       ).thenThrow(PlatformException(code: 'read_failed'));
       clearInteractions(vault);
 
-      final fresh = await repo.createSeedPhrase(_legalMnemonic);
+      await expectLater(
+        repo.createSeedPhrase(_legalMnemonic),
+        throwsA(isA<GraphSyncException>()),
+      );
+      final fresh = (await repo.getAllSeedPhrases()).single;
 
       verifyNever(() => vault.write('mallow_account_graph', any()));
       expect(vaultStore['mallow_account_graph'], storedBefore);
@@ -2561,9 +2993,8 @@ void main() {
         old.id,
       });
 
-      // Skipping the write costs nothing permanently: once the keystore
-      // answers again, the next sync writes the fresh seed from the database
-      // and carries the old one over.
+      // The secret and row still landed, so once the keystore answers again a
+      // retrying sync writes the fresh seed and carries the old one over.
       when(
         () => vault.read('mallow_account_graph', prompt: any(named: 'prompt')),
       ).thenAnswer((_) async => vaultStore['mallow_account_graph']);
@@ -3562,6 +3993,50 @@ void main() {
           1: 'Account 02',
           2: 'Account 03',
         });
+      },
+    );
+
+    test('a name given in the picker replaces Account NN but still consumes '
+        'its number', () async {
+      final sp = await repo.createSeedPhrase(
+        _abandonMnemonic,
+        autoDerive: false,
+      );
+      await importSolanaAt(sp.id, [0, 1, 2], accountNames: {1: 'Trading'});
+
+      // idx1 took number 02 under its custom name, so idx2 is still 03 — the
+      // same numbering the picker previewed.
+      expect(await accountNamesByIndex(), {
+        0: 'Account 01',
+        1: 'Trading',
+        2: 'Account 03',
+      });
+    });
+
+    test(
+      'a picker name does not rename an account that already exists',
+      () async {
+        final sp = await repo.createSeedPhrase(
+          _abandonMnemonic,
+          autoDerive: false,
+        );
+        await importSolanaAt(sp.id, [0]); // Account 01, Solana only
+
+        // Adding idx0's Tezos wallet lands in the existing account.
+        final picker = await repo.deriveAccountsForPicker(sp.id, count: 1);
+        await repo.importAccountsFromPhrase(
+          sp.id,
+          [
+            WalletImportSelection(
+              index: 0,
+              chain: Chain.tezos,
+              address: picker.accounts.first.tezos!,
+            ),
+          ],
+          accountNames: {0: 'Renamed'},
+        );
+
+        expect(await accountNamesByIndex(), {0: 'Account 01'});
       },
     );
 

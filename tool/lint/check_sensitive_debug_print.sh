@@ -33,6 +33,12 @@ PATHS=(
   # Holds the Web3Auth secp256k1 key that backs BOTH the Ethereum and the
   # Tezos address, plus the hand-redacted `_SocialKeys.toString`.
   "lib/core/services/social_auth_service.dart"
+  # Stores and erases every mnemonic and imported key, and parses the recovery
+  # graph, whose parse errors quote the JSON naming every wallet and address.
+  "lib/core/services/wallet_repository.dart"
+  # Parses and pairs WalletConnect links, whose symKey lets whoever holds the
+  # link answer the website's connection request in the wallet's place.
+  "lib/features/walletconnect"
 )
 
 # Preflight: every guarded path must exist.

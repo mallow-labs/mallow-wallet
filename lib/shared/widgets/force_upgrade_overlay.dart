@@ -18,6 +18,68 @@ const _playStoreUrl =
 /// user cannot leave, so a wrong id is a dead end, not a cosmetic bug.
 const _iosStoreUrl = 'https://apps.apple.com/app/id6758995397';
 
+/// The Solana dApp Store build's package id (`applicationId` of the `dappstore`
+/// flavour in `android/app/build.gradle.kts`).
+const _dappStorePackageName = 'art.mallow.twa';
+
+/// Solana dApp Store listing. The dApp Store has no web listing URL; this
+/// scheme is its documented link to a listing page. It resolves only where the
+/// dApp Store app is installed, and Android 11+ package visibility hides that
+/// app from `canLaunchUrl` unless the manifest declares the scheme in
+/// `<queries>`.
+const _dappStoreUrl = 'solanadappstore://details?id=$_dappStorePackageName';
+
+/// The store listing an update should open for this build.
+///
+/// - the Solana dApp Store listing for the dApp Store build, told apart by its
+///   package name, because it is a separate app id from the Play build;
+/// - the Play listing for every other Android build;
+/// - the App Store listing on iOS.
+///
+/// [packageNameLoader] and [platform] are seams for tests; production reads
+/// `package_info_plus` and [defaultTargetPlatform]. A failed package lookup
+/// answers with the Play (or App Store) listing rather than throwing: this feeds
+/// a button on a screen the user cannot leave.
+Future<Uri> storeListingUrl({
+  Future<String?> Function() packageNameLoader = _readPackageName,
+  TargetPlatform? platform,
+}) async {
+  if ((platform ?? defaultTargetPlatform) != TargetPlatform.android) {
+    return Uri.parse(_iosStoreUrl);
+  }
+  if (await packageNameLoader() == _dappStorePackageName) {
+    return Uri.parse(_dappStoreUrl);
+  }
+  return Uri.parse(_playStoreUrl);
+}
+
+Future<String?> _readPackageName() async {
+  try {
+    return (await PackageInfo.fromPlatform()).packageName;
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Opens [storeListingUrl] in the store app. External application, not the in-app
+/// browser the rest of the app uses: the destination is a store listing, which
+/// only installs from the store app itself. Returns whether it launched; a
+/// scheme no installed app handles answers false or throws, and both read as
+/// "did not open".
+Future<bool> openStoreListing({
+  Future<Uri> Function() urlLoader = storeListingUrl,
+  Future<bool> Function(Uri url) launcher = _launchExternal,
+}) async {
+  try {
+    return await launcher(await urlLoader());
+  } catch (_) {
+    return false;
+  }
+}
+
+Future<bool> _launchExternal(Uri url) =>
+    launchUrl(url, mode: LaunchMode.externalApplication);
+
 /// Copy shown when the backend requires an update but sent no message.
 const forceUpgradeFallbackMessage =
     'A newer version of mallow is required to continue.';
@@ -155,15 +217,7 @@ class _UpgradeWall extends StatelessWidget {
 
   final String? message;
 
-  Future<void> _openStore() async {
-    final url = defaultTargetPlatform == TargetPlatform.android
-        ? _playStoreUrl
-        : _iosStoreUrl;
-    // externalApplication, not the in-app browser the rest of the app uses:
-    // the destination is a store listing, which only installs from the store
-    // app itself.
-    await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
-  }
+  Future<void> _openStore() => openStoreListing();
 
   @override
   Widget build(BuildContext context) {

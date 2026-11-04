@@ -10,6 +10,10 @@ import '../theme/mallow_theme.dart';
 /// before/after the text field (e.g. `%` glyph for royalties, search icon
 /// for search inputs, "SOL" suffix for price fields, paste/QR/MAX
 /// trailing buttons).
+///
+/// [height], [padding] and [boxShadow] let a prominent field (the browser's
+/// search capsule) grow without forking the widget; the defaults are the
+/// standard 40px pill.
 class MallowPillField extends StatelessWidget {
   const MallowPillField({
     required this.controller,
@@ -29,10 +33,15 @@ class MallowPillField extends StatelessWidget {
     this.enabled = true,
     this.autocorrect = true,
     this.enableSuggestions = true,
+    this.obscureText = false,
+    this.autofillHints,
     this.textCapitalization = TextCapitalization.none,
     this.textAlign = TextAlign.start,
     this.borderColor,
     this.backgroundColor,
+    this.height = 40,
+    this.padding = const EdgeInsets.symmetric(horizontal: 16),
+    this.boxShadow,
   });
 
   final TextEditingController controller;
@@ -51,10 +60,15 @@ class MallowPillField extends StatelessWidget {
   final bool enabled;
   final bool autocorrect;
   final bool enableSuggestions;
+  final bool obscureText;
+  final Iterable<String>? autofillHints;
   final TextCapitalization textCapitalization;
   final TextAlign textAlign;
   final Color? borderColor;
   final Color? backgroundColor;
+  final double height;
+  final EdgeInsetsGeometry padding;
+  final List<BoxShadow>? boxShadow;
 
   @override
   Widget build(BuildContext context) {
@@ -64,9 +78,10 @@ class MallowPillField extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Container(
-          height: 40,
-          padding: const EdgeInsets.symmetric(horizontal: 16),
+          height: height,
+          padding: padding,
           decoration: BoxDecoration(
+            boxShadow: boxShadow,
             borderRadius: BorderRadius.circular(MallowTheme.radiusCircular),
             border: Border.all(
               color: hasError ? colors.error : (borderColor ?? colors.divider),
@@ -93,6 +108,8 @@ class MallowPillField extends StatelessWidget {
                   enabled: enabled,
                   autocorrect: autocorrect,
                   enableSuggestions: enableSuggestions,
+                  obscureText: obscureText,
+                  autofillHints: autofillHints,
                   textCapitalization: textCapitalization,
                   textAlign: textAlign,
                   style: MallowTheme.uiBody.copyWith(color: colors.textPrimary),

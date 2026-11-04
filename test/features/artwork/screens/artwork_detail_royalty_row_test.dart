@@ -167,6 +167,7 @@ void main() {
 
     when(() => authService.currentAddress).thenReturn(null);
     when(() => sessionManager.sessionAddresses).thenReturn(const {});
+    when(() => sessionManager.sessionWallets).thenReturn(const []);
     when(
       () => listingRepository.getEditionState(any()),
     ).thenAnswer((_) async => null);

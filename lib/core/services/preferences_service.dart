@@ -84,6 +84,7 @@ class PreferencesService {
   // Device-scoped: epoch ms of the last `Logged In` event, for its throttle.
   static const _kLoggedInTrackedAt = 'pref_analytics_logged_in_at';
   static const _kTokenMetadataCache = 'pref_token_metadata_cache';
+  static const _kProgramLabelCache = 'pref_program_label_cache';
   static const _kSwapSlippageBps = 'pref_swap_slippage_bps';
   static const _kPriorityFeeLamports = 'pref_priority_fee_lamports';
   static const _kSwapPriorityFeeLamports = 'pref_swap_priority_fee_lamports';
@@ -194,6 +195,15 @@ class PreferencesService {
 
   Future<void> setTokenMetadataCache(String json) =>
       _prefs.setString(_kTokenMetadataCache, json);
+
+  /// JSON-encoded `{fetchedAt, programs: {address: name}, instructions:
+  /// {address: {discriminator: name}}}`: the last program label list
+  /// `ProgramLabelService` fetched, and when. Public data, kept so a
+  /// launch inside the TTL needs no request.
+  String? get programLabelCache => _prefs.getString(_kProgramLabelCache);
+
+  Future<void> setProgramLabelCache(String json) =>
+      _prefs.setString(_kProgramLabelCache, json);
 
   // ── Theme ─────────────────────────────────────────────────────────────────
 
@@ -550,6 +560,32 @@ class PreferencesService {
   /// Remember [walletId] as the Solana signing wallet for [accountId].
   Future<void> setLastSolanaWalletId(String accountId, String walletId) =>
       _prefs.setString('$_kLastSolanaWalletPrefix$accountId', walletId);
+
+  // ── Browser search engine ────────────────────────────────────────────────
+
+  static const _kBrowserSearchEngine = 'pref_browser_search_engine';
+  static const _kBrowserEthereumWalletId = 'pref_browser_ethereum_wallet_id';
+
+  /// The in-app browser's search engine, by name; null until one is picked.
+  String? get browserSearchEngine => _prefs.getString(_kBrowserSearchEngine);
+
+  Future<void> setBrowserSearchEngine(String name) =>
+      _prefs.setString(_kBrowserSearchEngine, name);
+
+  /// The Ethereum wallet the in-app browser's `window.ethereum` acts for, as
+  /// last picked in its wallet picker. Used only while that wallet is in the
+  /// session; otherwise the browser falls back to the session's first one.
+  String? get browserEthereumWalletId =>
+      _prefs.getString(_kBrowserEthereumWalletId);
+
+  Future<void> setBrowserEthereumWalletId(String id) =>
+      _prefs.setString(_kBrowserEthereumWalletId, id);
+
+  /// The Tezos wallet last selected in the browser, used within its session.
+  String? get browserTezosWalletId =>
+      _prefs.getString('pref_browser_tezos_wallet_id');
+  Future<void> setBrowserTezosWalletId(String id) =>
+      _prefs.setString('pref_browser_tezos_wallet_id', id);
 
   // ── Legacy Solana derivation in import picker ────────────────────────────
 

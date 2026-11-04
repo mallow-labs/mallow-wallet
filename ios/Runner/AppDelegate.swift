@@ -72,6 +72,12 @@ class MallowSceneDelegate: FlutterSceneDelegate {
 
     let timezoneRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "TimezoneChannel")!
     TimezoneChannel.register(with: timezoneRegistrar)
+
+    let browserInsetsRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "BrowserInsetsChannel")!
+    BrowserInsetsChannel.register(with: browserInsetsRegistrar)
+
+    let browserAppearanceRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "BrowserAppearanceChannel")!
+    BrowserAppearanceChannel.register(with: browserAppearanceRegistrar)
   }
 
   override func applicationWillResignActive(_ application: UIApplication) {

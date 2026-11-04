@@ -12,10 +12,10 @@ import 'package:solana/solana.dart';
 
 import '../../../core/config/environment.dart';
 import '../../../core/crypto/derivation.dart';
+import '../../../core/crypto/login_challenge.dart';
 import '../../../core/database/database.dart' hide Wallet;
 import '../../../core/database/database.dart' as db show Wallet;
 import '../../../core/network/auth_service.dart';
-import '../../../core/network/solana_rpc_service.dart';
 import '../../../core/security/secure_storage.dart';
 import '../../../core/services/ledger_open_app.dart';
 import '../../../core/services/ledger_service.dart';
@@ -52,7 +52,6 @@ sealed class LedgerSessionState with _$LedgerSessionState {
 class LedgerAuthService {
   LedgerAuthService(
     this._ledgerService,
-    this._rpcService,
     this._authService,
     this._db,
     this._dio,
@@ -66,7 +65,6 @@ class LedgerAuthService {
   }
 
   final LedgerService _ledgerService;
-  final SolanaRpcService _rpcService;
   final AuthService _authService;
   final MallowDatabase _db;
   final Dio _dio;
@@ -300,10 +298,16 @@ class LedgerAuthService {
   // Ownership verification
   // ---------------------------------------------------------------------------
 
-  /// The login challenge message prefix the backend reconstructs and verifies
-  /// (the signed content is `<prefix>\n\ntoken:<token>`). Matches
-  /// `AuthService._loginMessagePrefix` so the Ledger and HD paths agree.
+  /// Legacy Ethereum and Tezos challenge prefix.
   static const _messagePrefix = 'mallow Login';
+  static const _memoV4ProgramId = 'Memo4c2pN8afCj432Lb7RMVKi9PbQnnW7ewFFaV3oAH';
+
+  /// The all-zero hash, which no block ever has. The login proof is a memo
+  /// transaction only because the Ledger Solana app signs transactions, not
+  /// arbitrary text; the backend verifies the signature and never the
+  /// blockhash. A live blockhash would make the proof a transaction anyone
+  /// holding it could broadcast, at the user's expense, for about a minute.
+  static const _proofBlockhash = '11111111111111111111111111111111';
 
   /// Verify wallet ownership by signing the login challenge with the connected
   /// Ledger and submitting it to the backend's `/authToken/verify` endpoint.
@@ -333,21 +337,33 @@ class LedgerAuthService {
         ? address.toLowerCase()
         : address;
 
-    // Step 1: Get auth token
-    final tokenResponse = await _dio.post<Map<String, dynamic>>(
+    // Step 1: Request the chain-specific challenge
+    final challengeResponse = await _dio.post<Map<String, dynamic>>(
       '${Config.apiBaseUrl}/v0/authToken',
-      data: {'address': cookieAddress},
+      data: {
+        'address': cookieAddress,
+        if (chain == Chain.solana) 'format': 'siws',
+      },
     );
-    final token = tokenResponse.data?['result'] as String?;
-    if (token == null) throw Exception('Failed to get auth token');
+    final challenge = challengeResponse.data?['result'] as String?;
+    if (challenge == null) throw Exception('Failed to get login challenge');
+    // The memo carries the server's text verbatim, so it gets the same check
+    // as every other signer before the device is asked to sign it.
+    if (chain == Chain.solana) {
+      checkSolanaLoginChallenge(challenge, address: row.address);
+    }
 
     // Step 2: Build the chain-specific `/authToken/verify` body. Solana submits
     // a signed memo transaction; Ethereum an EIP-191 signature; Tezos an `edsig`
     // over the Micheline payload plus the `edpk` the backend re-derives from.
     final verifyBody = switch (chain) {
-      Chain.solana => await _solanaVerifyBody(cookieAddress, row, token),
-      Chain.ethereum => await _ethereumVerifyBody(cookieAddress, row, token),
-      Chain.tezos => await _tezosVerifyBody(cookieAddress, row, token),
+      Chain.solana => await _solanaVerifyBody(cookieAddress, row, challenge),
+      Chain.ethereum => await _ethereumVerifyBody(
+        cookieAddress,
+        row,
+        challenge,
+      ),
+      Chain.tezos => await _tezosVerifyBody(cookieAddress, row, challenge),
     };
 
     // Step 3: Verify with backend
@@ -373,21 +389,23 @@ class LedgerAuthService {
   Future<Map<String, dynamic>> _solanaVerifyBody(
     String address,
     db.Wallet row,
-    String token,
+    String fullMessage,
   ) async {
-    final fullMessage = '$_messagePrefix\n\ntoken:$token';
     final feePayer = Ed25519HDPublicKey.fromBase58(address);
 
-    final memoInstruction = MemoInstruction(
-      signers: [feePayer],
-      memo: fullMessage,
+    // package:solana's MemoInstruction is pinned to the v3 program, so build
+    // the SPL Memo v4 instruction directly. Same wire format: the signers are
+    // the accounts, and the data is the UTF-8 memo.
+    final memoInstruction = Instruction(
+      programId: Ed25519HDPublicKey.fromBase58(_memoV4ProgramId),
+      accounts: [AccountMeta.writeable(pubKey: feePayer, isSigner: true)],
+      data: ByteArray(utf8.encode(fullMessage)),
     );
     final message = Message.only(memoInstruction);
-    final recentBlockhash = await _rpcService.getLatestBlockhash();
 
     final scheme = _schemeFromRow(row);
     final compiledMessage = message.compile(
-      recentBlockhash: recentBlockhash,
+      recentBlockhash: _proofBlockhash,
       feePayer: feePayer,
     );
     final messageBytes = compiledMessage.toByteArray().toList();
@@ -406,7 +424,8 @@ class LedgerAuthService {
 
     return {
       'address': address,
-      'message': _messagePrefix,
+      'message': fullMessage,
+      'format': 'siws',
       'tx': signedTx.encode(),
     };
   }

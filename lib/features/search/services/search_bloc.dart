@@ -34,6 +34,11 @@ sealed class SearchEvent with _$SearchEvent {
   const factory SearchEvent.filterSelected(SearchFilterType filterType) =
       SearchFilterSelected;
 
+  /// The pushed artwork drilldown screen opened on [target]: a landing-page
+  /// filter, or a tag chip on the artwork page.
+  const factory SearchEvent.drilldownOpened(ArtworkDrilldownTarget target) =
+      SearchDrilldownOpened;
+
   /// User tapped back from filter results to return to landing.
   const factory SearchEvent.filterBack() = SearchFilterBack;
 
@@ -104,13 +109,13 @@ sealed class SearchState with _$SearchState {
   }) = SearchFilterResults;
 
   /// Artwork drilldown results — every explore-backed filter type (see
-  /// [SearchFilterType.isArtworkBrowse]). Carries the same filter / sort /
-  /// view-mode knobs as the portfolio's "Artworks" tab.
+  /// [SearchFilterType.isArtworkBrowse]) and every tag drilldown. Carries the
+  /// same filter / sort / view-mode knobs as the portfolio's "Artworks" tab.
   ///
   /// [filter] holds only what the user picked in the sheet; the drilldown's
   /// own constraint is pinned on at fetch time, so it can never be cleared.
   const factory SearchState.artworkResults({
-    required SearchFilterType filterType,
+    required ArtworkDrilldownTarget target,
     required List<PortfolioArtwork> artworks,
     required int currentPage,
     @Default(api.ExploreFilter()) api.ExploreFilter filter,
@@ -147,6 +152,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     on<SearchClear>(_onClear);
     on<_SearchExecute>(_onExecute);
     on<SearchFilterSelected>(_onFilterSelected);
+    on<SearchDrilldownOpened>(_onDrilldownOpened);
     on<SearchFilterBack>(_onFilterBack);
     on<SearchLoadMoreFilterResults>(_onLoadMore);
     on<SearchSetDrilldownFilter>(_onSetDrilldownFilter);
@@ -304,13 +310,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     emit(SearchState.filterLoading(filterType: event.filterType));
 
     if (event.filterType.isArtworkBrowse) {
-      await _loadArtworkPage(
-        emit,
-        filterType: event.filterType,
-        filter: const api.ExploreFilter(),
-        sort: PortfolioSortOption.recent,
-        artworkViewMode: await loadArtworkViewMode(),
-      );
+      await _openArtworkDrilldown(emit, event.filterType);
       return;
     }
 
@@ -335,6 +335,31 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
           const SearchState.error(message: "Couldn't load results. Try again."),
         );
     }
+  }
+
+  Future<void> _onDrilldownOpened(
+    SearchDrilldownOpened event,
+    Emitter<SearchState> emit,
+  ) async {
+    _debounceTimer?.cancel();
+    _searchGen++;
+    _currentQuery = '';
+    await _openArtworkDrilldown(emit, event.target);
+  }
+
+  /// First page of a fresh artwork drilldown: no user filter, the default
+  /// sort, and the app-wide artwork layout.
+  Future<void> _openArtworkDrilldown(
+    Emitter<SearchState> emit,
+    ArtworkDrilldownTarget target,
+  ) async {
+    await _loadArtworkPage(
+      emit,
+      target: target,
+      filter: const api.ExploreFilter(),
+      sort: PortfolioSortOption.recent,
+      artworkViewMode: await loadArtworkViewMode(),
+    );
   }
 
   void _onFilterBack(SearchFilterBack event, Emitter<SearchState> emit) {
@@ -418,7 +443,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
 
     await _loadArtworkPage(
       emit,
-      filterType: current.filterType,
+      target: current.target,
       filter: event.filter,
       sort: current.sort,
       artworkViewMode: current.artworkViewMode,
@@ -446,7 +471,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
 
     await _loadArtworkPage(
       emit,
-      filterType: current.filterType,
+      target: current.target,
       filter: current.filter,
       sort: event.sort,
       artworkViewMode: current.artworkViewMode,
@@ -478,7 +503,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
   /// constraints, so both refetch rather than re-slice what's loaded.
   Future<void> _loadArtworkPage(
     Emitter<SearchState> emit, {
-    required SearchFilterType filterType,
+    required ArtworkDrilldownTarget target,
     required api.ExploreFilter filter,
     required PortfolioSortOption sort,
     required ArtworkViewMode artworkViewMode,
@@ -488,7 +513,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     final gen = ++_artworkGen;
 
     final result = await _repository.fetchArtworkResults(
-      filterType,
+      target,
       filter: filter,
       sort: _exploreSort(sort),
     );
@@ -500,7 +525,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
       case ResultSuccess(:final value):
         emit(
           SearchState.artworkResults(
-            filterType: filterType,
+            target: target,
             artworks: value,
             currentPage: 0,
             filter: filter,
@@ -536,7 +561,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
 
     final nextPage = current.currentPage + 1;
     final result = await _repository.fetchArtworkResults(
-      current.filterType,
+      current.target,
       page: nextPage,
       filter: current.filter,
       sort: _exploreSort(current.sort),

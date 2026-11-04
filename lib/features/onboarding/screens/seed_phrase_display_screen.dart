@@ -203,10 +203,14 @@ class _SeedPhraseDisplayScreenState extends State<SeedPhraseDisplayScreen> {
     setState(() => _isSubmitting = true);
     try {
       if (widget.isAddingAccount) {
-        // Multi-account path: go to HD picker — seed phrase created on import
-        if (mounted) {
-          context.go(AppRoutes.importFromPhrasePath('new'), extra: _mnemonic);
-        }
+        // Multi-account path: push the HD picker — seed phrase created on
+        // import. Push (not go) so its back button returns here; re-enable
+        // Continue once the user comes back.
+        await context.push(
+          AppRoutes.importFromPhrasePath('new'),
+          extra: _mnemonic,
+        );
+        if (mounted) setState(() => _isSubmitting = false);
       } else {
         // Onboarding path: create seed phrase, continue to PIN/biometric setup
         final walletRepo = sl<WalletRepository>();

@@ -118,11 +118,11 @@ Future<void> resetAppState() async {
 /// `static` in `lib/` therefore survives from case to case, and three of them
 /// are load-bearing for navigation:
 ///
-///  * `NavBarState.selectedTab` / `.activeTab` — a `ValueNotifier` does not
-///    notify on an unchanged write, so a leaked `selectedTab` makes the first
-///    tap on that tab a silent no-op; and a leaked `activeTab` makes
+///  * `NavBarState.selectedTab` / `.activeTab` — a leaked `activeTab` makes
 ///    `_TabNavigatorState.initState` write a CHANGED value while the router is
 ///    mid-build, tripping "setState() during build" in the persistent nav bar.
+///    `selectedTab` notifies on every write, so a leaked value no longer
+///    swallows a tap; it is reset so each case starts from the same state.
 ///  * `NavBarState.visible` + its private `_showRefCount` — driven by
 ///    `requestShow`/`releaseShow` from `TabNavigator`'s RouteAware callbacks.
 ///    The refcount is private, so it is wound down through the public
@@ -984,9 +984,8 @@ Future<void> waitForHome(WidgetTester tester, {int rounds = 250}) => pumpUntil(
 
 /// The app's LIVE [AppLockBloc] — the one `MallowApp` created and provided.
 ///
-/// Never `sl<AppLockBloc>()`: it is registered as a FACTORY, so the locator
-/// hands back a brand-new bloc that no widget listens to. Events dispatched to
-/// that one change nothing on screen, and its state is not the app's.
+/// Read from the widget tree rather than `sl`: `sl<AppLockBloc>()` is the same
+/// instance only within one DI graph, and `restartApp` builds a new graph.
 AppLockBloc appLockBloc(WidgetTester tester) => BlocProvider.of<AppLockBloc>(
   tester.element(find.byType(MaterialApp).first),
 );

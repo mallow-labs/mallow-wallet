@@ -118,7 +118,7 @@ class PushNotificationService {
     // catch terminated-state notification taps from prior granted sessions.
     _messaging.onTokenRefresh.listen(_onTokenRefresh);
 
-    // Gap 2 fix: Handle terminated-state notification tap.
+    // Handle a terminated-state notification tap.
     // getInitialMessage() returns the RemoteMessage that caused the app to
     // open from a fully-terminated state. onMessageOpenedApp does NOT fire
     // in this case — this is the only way to catch it.
@@ -132,7 +132,7 @@ class PushNotificationService {
       pendingDeepLink.value = route;
     }
 
-    // Gap 2 fix (iOS): Configure foreground notification presentation.
+    // iOS: configure foreground notification presentation.
     // By default, iOS suppresses alerts/sound/badge when the app is in the
     // foreground. This call opts in to showing them while the app is open.
     await FirebaseMessaging.instance
@@ -164,9 +164,9 @@ class PushNotificationService {
   /// a banner there would double up. Android has no foreground presentation at
   /// all, which is why the platform showed nothing before this.
   ///
-  /// The service has no [BuildContext], so the banner goes onto the root
-  /// navigator's overlay — the same key the action menu and other global
-  /// overlays already use.
+  /// The service has no [BuildContext], so it passes the root navigator's —
+  /// the same key the action menu and other global overlays already use. The
+  /// `InAppPushBannerHost` wraps the router, so it is found from there.
   void _onForegroundMessage(RemoteMessage message) {
     debugPrint('[PushNotification] Foreground message: ${message.messageId}');
     if (defaultTargetPlatform != TargetPlatform.android) return;

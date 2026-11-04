@@ -106,6 +106,15 @@ class AccountUpdate {
     ).toLocal();
   }
 
+  /// Explicit terminal state, including refunds of auctions with no bids.
+  /// Older decoders omit the flag: only infer a refund when a zero amount
+  /// retains a real bidder. An unset bidder alone cannot establish a refund.
+  bool get cnftRefunded {
+    final refunded = raw['cnftRefunded'];
+    if (refunded is bool) return refunded;
+    return _int('highestBidAmount') == 0 && _addr('highestBidder') != null;
+  }
+
   // ── auctionConfig accessors ──────────────────────────────────────────────
 
   /// Highest bid in raw atomic units, or null when no bid has landed

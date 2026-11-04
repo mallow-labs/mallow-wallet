@@ -5,7 +5,7 @@ part of '../artwork_detail_screen.dart';
 /// image-cache entry and the Hero flies a single decoded bitmap between them.
 const int _artworkPosterBucket = 800;
 
-/// Decision 26 for video sources: a `/original/` URL that failed to initialise
+/// Video-source fallback: a `/original/` URL that failed to initialise
 /// earns exactly one retry against the asset's own gateway, appended to
 /// [candidates] so the player's loop picks it up on its next pass — but only
 /// after [ImageFallback.directUrlFor]'s HEAD probe confirms the image service,
@@ -20,12 +20,12 @@ Future<void> _appendVideoFallback(
   if (direct != null && !candidates.contains(direct)) candidates.add(direct);
 }
 
-/// The image surfaces on this screen that each own an independent decision-26
+/// The image surfaces on this screen that each own an independent gateway
 /// fallback attempt: the 800-bucket poster (inline and, as the fullscreen
 /// viewer's Hero base, there too) and the full-resolution original.
 enum _FallbackSurface { poster, fullRes }
 
-/// Decision 26's probe-once-then-swap, shared by all four surfaces on this
+/// The probe-once-then-swap fallback, shared by all four surfaces on this
 /// screen: a failed image-CDN load earns exactly one retry against the
 /// asset's own gateway, and only once [ImageFallback.directUrlFor]'s HEAD probe
 /// says the image service — not a 4xx takedown verdict — is what failed. A
@@ -170,8 +170,60 @@ class _ArtworkImageState extends State<_ArtworkImage>
     return id == null ? null : Mux.streamUrl(id);
   }
 
+  /// Gateway ladder for an HTML artwork's page, empty for every other artwork.
+  /// Recomputed only when the artwork's HTML source changes, so a refresh of
+  /// the same artwork does not hand the viewer a "new" list and reload it.
+  List<String> _htmlSources = const [];
+
+  /// Set once every gateway in [_htmlSources] has failed. The artwork then
+  /// falls through to the media it would have without HTML — the poster, or a
+  /// video — as the webapp's `AssetDisplay` does on a load error.
+  bool _htmlFailed = false;
+
+  /// The source that last painted, put first for the fullscreen viewer so it
+  /// does not walk the gateways that already failed inline.
+  String? _htmlPaintedSource;
+
+  List<String> _resolveHtmlSources() {
+    final url = widget.artwork.htmlUrl?.trim();
+    if (url == null || url.isEmpty) return const [];
+    return artworkHtmlSourceCandidates(
+      url,
+      mintAccount: widget.artwork.mintAccount,
+      chain: widget.artwork.chain,
+    );
+  }
+
+  /// Set once the 3D model has failed on every source it is allowed. The
+  /// artwork then falls through to the media it would have without a model.
+  bool _modelFailed = false;
+
+  /// The source the inline model loaded from, handed to the fullscreen viewer
+  /// so it does not retry a source that already failed.
+  String? _modelLoadedSource;
+
+  /// Moves the loaded model between the inline and fullscreen viewers, so
+  /// neither has to load it again.
+  final _modelSession = ArtworkModelSession();
+
+  /// Whether the model spins on its own. On by default, as on the webapp,
+  /// except under Reduce Motion; resolved on first build, where the setting
+  /// can be read. The fullscreen viewer shares it.
+  bool? _modelAutoRotate;
+
+  /// True while the artwork is shown as its interactive 3D model. A model
+  /// outranks HTML, a video and the still poster, matching the webapp's
+  /// `AssetDisplay` order.
+  bool get _isModel =>
+      (widget.artwork.modelUrl?.trim().isNotEmpty ?? false) && !_modelFailed;
+
+  /// True while the artwork is shown as its live HTML page. HTML outranks a
+  /// video and the still poster, matching the webapp's `AssetDisplay` order.
+  bool get _isHtml => !_isModel && _htmlSources.isNotEmpty && !_htmlFailed;
+
   /// True when the artwork is a video *and* has a playable source.
   bool get _isVideo {
+    if (_isModel || _isHtml) return false;
     final url = widget.artwork.animationUrl;
     if (url == null || url.isEmpty) return false;
     // A playback id is the server's own verdict, reached by transcoding the
@@ -217,6 +269,7 @@ class _ArtworkImageState extends State<_ArtworkImage>
         setState(() => _imageLoading = false);
       },
     );
+    _htmlSources = _resolveHtmlSources();
     _resolveImage();
     _maybeInitVideo();
   }
@@ -230,9 +283,25 @@ class _ArtworkImageState extends State<_ArtworkImage>
     // The inline player's preferred source is the Mux stream, so a transcode
     // that only lands on a later refresh has to restart it — the artwork was
     // playing the original (or nothing) until this frame.
-    final videoChanged =
+    var videoChanged =
         animChanged ||
         oldWidget.artwork.playbackId != widget.artwork.playbackId;
+    final wasModel = _isModel;
+    final wasHtml = _isHtml;
+    if (oldWidget.artwork.modelUrl != widget.artwork.modelUrl) {
+      _modelFailed = false;
+      _modelLoadedSource = null;
+    }
+    if (oldWidget.artwork.htmlUrl != widget.artwork.htmlUrl ||
+        oldWidget.artwork.mintAccount != widget.artwork.mintAccount) {
+      _htmlSources = _resolveHtmlSources();
+      _htmlFailed = false;
+      _htmlPaintedSource = null;
+    }
+    // A model or page that appears replaces a running video, which would
+    // otherwise keep playing unseen behind it; one that goes away hands the
+    // section back to the video it had been standing in for.
+    if (wasModel != _isModel || wasHtml != _isHtml) videoChanged = true;
     if (imageChanged) {
       _aspectRatio = null;
       _posterFallbackUrl = null;
@@ -282,6 +351,7 @@ class _ArtworkImageState extends State<_ArtworkImage>
       _fullResStream!.removeListener(_fullResListener!);
     }
     _disposeVideo();
+    _modelSession.dispose();
     super.dispose();
   }
 
@@ -394,7 +464,7 @@ class _ArtworkImageState extends State<_ArtworkImage>
       ..addListener(_fullResListener!);
   }
 
-  /// Decision 26 applied to the originals stream: re-run the download against
+  /// The same fallback for the originals stream: re-run the download against
   /// the asset's own gateway when the image service — not the asset — is what
   /// failed. Once per artwork; on a refused fallback or a second failure the
   /// 800-bucket poster silently stays, exactly as before.
@@ -420,7 +490,7 @@ class _ArtworkImageState extends State<_ArtworkImage>
     // service picking the gateway behind a redirect. Legacy tries each
     // reachable gateway in turn — the original arweave.net/IPFS source 403s
     // some clients, so the resolver picks a server-verified gateway and we fall
-    // through to mallow's mirror before giving up. Copied so the decision-26
+    // through to mallow's mirror before giving up. Copied so the gateway
     // retry can be appended below.
     final generation = _videoGeneration;
     final muxUrl = _muxStreamUrl;
@@ -456,9 +526,9 @@ class _ArtworkImageState extends State<_ArtworkImage>
         // Superseded mid-await — the teardown already dropped the reference.
         if (generation != _videoGeneration) return;
         _videoController = null;
-        // Decision 26 probes the image service, so a failed Mux stream must not
-        // spend the one attempt the `/original/` candidate behind it is owed —
-        // the probe would refuse a stream.mux.com URL anyway.
+        // The fallback probes the image service, so a failed Mux stream must
+        // not spend the one attempt the `/original/` candidate behind it is
+        // owed — the probe would refuse a stream.mux.com URL anyway.
         if (!fallbackTried && source != muxUrl) {
           fallbackTried = true;
           await _appendVideoFallback(candidates, raw: raw, failedUrl: source);
@@ -543,6 +613,8 @@ class _ArtworkImageState extends State<_ArtworkImage>
 
   @override
   Widget build(BuildContext context) {
+    if (_isModel) return _buildModelSection(context);
+    if (_isHtml) return _buildHtmlSection(context);
     final colors = context.mallowColors;
     final hasImage = widget.artwork.imageUrl.isNotEmpty;
     // Cap the entire artwork section (including padding) at 60% of screen
@@ -635,6 +707,188 @@ class _ArtworkImageState extends State<_ArtworkImage>
     );
   }
 
+  /// An HTML artwork runs live in the section, edge to edge at half the screen
+  /// height (the webapp's `h-[50lvh]`): a page has no intrinsic aspect ratio
+  /// to size the box from. The maximize control sits in the strip below it,
+  /// like every other artwork's.
+  ///
+  /// The page is never built under the NSFW frost. A web view is a native
+  /// view that the frost's backdrop blur cannot reliably cover, so until the
+  /// artwork is revealed the frost covers the poster instead.
+  Widget _buildHtmlSection(BuildContext context) {
+    final colors = context.mallowColors;
+    final height = MediaQuery.sizeOf(context).height * 0.5;
+    const stripHeight = MallowTheme.spacing26 * 2;
+    return NsfwObscured.builder(
+      nsfw: widget.artwork.nsfw,
+      contentId: widget.artwork.mintAccount,
+      builder: (context, obscured) => Stack(
+        children: [
+          Container(
+            width: double.infinity,
+            color: colors.surfaceMuted,
+            padding: const EdgeInsets.only(bottom: stripHeight),
+            child: SizedBox(
+              height: height,
+              child: obscured
+                  ? _posterPlaceholder(colors)
+                  : ArtworkHtmlViewer(
+                      sources: _htmlSources,
+                      placeholder: _posterPlaceholder(colors),
+                      onSourcePainted: (source) => _htmlPaintedSource = source,
+                      onFailed: _onHtmlFailed,
+                    ),
+            ),
+          ),
+          Positioned(
+            right: MallowTheme.spacing12 - 8,
+            bottom: MallowTheme.spacing12 - 8,
+            child: _controlButton(
+              colors: colors,
+              asset: 'assets/icons/arrows_maximize.svg',
+              label: 'View fullscreen',
+              onTap: _openHtmlFullscreen,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// A 3D model gets the same edge-to-edge box at half the screen height as
+  /// an HTML page (the webapp sizes both alike), with the auto-rotate toggle
+  /// and the maximize control in the strip below it. Under the NSFW frost the
+  /// poster stands in, for the same reason as for HTML.
+  Widget _buildModelSection(BuildContext context) {
+    final colors = context.mallowColors;
+    final height = MediaQuery.sizeOf(context).height * 0.5;
+    const stripHeight = MallowTheme.spacing26 * 2;
+    final autoRotate = _modelAutoRotate ??= !context.reduceMotion;
+    return NsfwObscured.builder(
+      nsfw: widget.artwork.nsfw,
+      contentId: widget.artwork.mintAccount,
+      builder: (context, obscured) => Stack(
+        children: [
+          Container(
+            width: double.infinity,
+            color: colors.surfaceMuted,
+            padding: const EdgeInsets.only(bottom: stripHeight),
+            child: SizedBox(
+              height: height,
+              child: obscured
+                  ? _posterPlaceholder(colors)
+                  : ArtworkModelViewer(
+                      modelUrl: widget.artwork.modelUrl!,
+                      session: _modelSession,
+                      initialSource: _modelLoadedSource,
+                      placeholder: _posterPlaceholder(colors),
+                      autoRotate: autoRotate,
+                      progressBuilder: (progress) =>
+                          _MediaLoadingBar(progress: progress),
+                      onLoaded: (source) => _modelLoadedSource = source,
+                      onFailed: _onModelFailed,
+                    ),
+            ),
+          ),
+          Positioned(
+            right: MallowTheme.spacing12 - 8,
+            bottom: MallowTheme.spacing12 - 8,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _autoRotateButton(colors, autoRotate),
+                _controlButton(
+                  colors: colors,
+                  asset: 'assets/icons/arrows_maximize.svg',
+                  label: 'View fullscreen',
+                  onTap: _openModelFullscreen,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _autoRotateButton(MallowColors colors, bool autoRotate) =>
+      _controlButton(
+        colors: colors,
+        asset: 'assets/icons/view_360_arrow.svg',
+        label: 'Auto-rotate',
+        toggled: autoRotate,
+        // Lit while on and dimmed while off, as the webapp's toggle is.
+        color: autoRotate ? colors.textPrimary : colors.textTertiary,
+        onTap: () => _setModelAutoRotate(!autoRotate),
+      );
+
+  void _setModelAutoRotate(bool value) {
+    if (mounted) setState(() => _modelAutoRotate = value);
+  }
+
+  /// The model failed on every source it is allowed: drop to the media this
+  /// artwork has without one, starting its video if that is what it falls to.
+  void _onModelFailed() {
+    if (!mounted || _modelFailed) return;
+    setState(() => _modelFailed = true);
+    _maybeInitVideo();
+  }
+
+  /// Opens the model in a fullscreen viewer, with more room to orbit, zoom
+  /// and pan than the inline box. A model that has loaded moves into the
+  /// viewer and back out through [_modelSession] rather than loading again;
+  /// either way only one WebGL scene runs at a time.
+  void _openModelFullscreen() {
+    _showArtworkModelFullscreen(
+      context,
+      modelUrl: widget.artwork.modelUrl!,
+      session: _modelSession,
+      initialSource: _modelLoadedSource,
+      imageUrl: widget.artwork.imageUrl,
+      autoRotate: _modelAutoRotate ?? !context.reduceMotion,
+      onAutoRotateChanged: _setModelAutoRotate,
+    );
+  }
+
+  /// What stands in for a page or model while it loads, while it is
+  /// suspended, and under the NSFW frost: the artwork's still poster, as it
+  /// would show without either.
+  Widget _posterPlaceholder(MallowColors colors) => ColoredBox(
+    color: colors.surfaceMuted,
+    child: widget.artwork.imageUrl.isEmpty
+        ? const ImageShimmerGrid()
+        : Padding(
+            padding: const EdgeInsets.all(MallowTheme.spacing26),
+            child: _posterImage(),
+          ),
+  );
+
+  /// Every gateway failed: drop to the media this artwork has without HTML,
+  /// starting its video if it has one.
+  void _onHtmlFailed() {
+    if (!mounted || _htmlFailed) return;
+    setState(() => _htmlFailed = true);
+    _maybeInitVideo();
+  }
+
+  /// Opens the page in a fullscreen viewer that takes every gesture, so drag-
+  /// and pinch-driven artworks work there even though the inline view leaves
+  /// drags to the page's scroll. The inline view is torn down while the
+  /// viewer covers it (see [ArtworkHtmlViewer]), so only one copy of the
+  /// artwork runs, and its audio never plays twice. Unlike the webapp's
+  /// iframe, the page reloads on the way in and out: a native view cannot
+  /// move between routes.
+  void _openHtmlFullscreen() {
+    final painted = _htmlPaintedSource;
+    _showArtworkHtmlFullscreen(
+      context,
+      sources: painted == null
+          ? _htmlSources
+          : [painted, ..._htmlSources.where((s) => s != painted)],
+      imageUrl: widget.artwork.imageUrl,
+    );
+  }
+
   /// Fast 800-bucket poster with the full-resolution original cross-fading in
   /// over it once [_loadFullRes] decodes. Mirrors the fullscreen viewer: the
   /// Hero wraps only the 800-bucket base (so the tile → detail and detail →
@@ -671,7 +925,7 @@ class _ArtworkImageState extends State<_ArtworkImage>
   }
 
   /// Asset-gateway URL swapped in after the 800-bucket poster failed and the
-  /// HEAD probe cleared the retry (decision 26). Null while the CDN URL is in
+  /// HEAD probe cleared the retry. Null while the CDN URL is in
   /// play; set at most once per artwork, so a failure on the fallback URL lands
   /// on the placeholder instead of looping.
   String? _posterFallbackUrl;
@@ -790,9 +1044,12 @@ class _ArtworkImageState extends State<_ArtworkImage>
     required String asset,
     required String label,
     required VoidCallback onTap,
+    bool? toggled,
+    Color? color,
   }) => Semantics(
     button: true,
     label: label,
+    toggled: toggled,
     child: Tappable(
       semanticButton: false,
       onTap: onTap,
@@ -802,7 +1059,7 @@ class _ArtworkImageState extends State<_ArtworkImage>
           asset,
           width: 24,
           height: 24,
-          color: colors.textSecondary,
+          color: color ?? colors.textSecondary,
         ),
       ),
     ),
@@ -1002,7 +1259,7 @@ class _ArtworkFullscreenViewerState extends State<_ArtworkFullscreenViewer>
       ..addListener(_fullResListener!);
   }
 
-  /// Same decision-26 retry as the inline detail image, once per viewer.
+  /// Same gateway retry as the inline detail image, once per viewer.
   Future<void> _retryFullResDirect(String failedUrl) => tryDirectFallback(
     _FallbackSurface.fullRes,
     rawUrl: widget.imageUrl,
@@ -1012,7 +1269,7 @@ class _ArtworkFullscreenViewerState extends State<_ArtworkFullscreenViewer>
   );
 
   /// Asset-gateway URL swapped in after the 800-bucket base image failed and the
-  /// HEAD probe cleared the retry (decision 26) — the Hero's own copy of the
+  /// HEAD probe cleared the retry — the Hero's own copy of the
   /// same swap the inline poster does. Set at most once, so a failure on the
   /// fallback URL settles on the placeholder rather than looping.
   String? _baseFallbackUrl;
@@ -1484,4 +1741,252 @@ class _ArtworkVideoFullscreenViewerState
       ),
     ),
   );
+}
+
+/// Opens an HTML artwork in an opaque fullscreen viewer, mirroring the
+/// webapp's fullscreen HTML mode and its top-right close button.
+void _showArtworkHtmlFullscreen(
+  BuildContext context, {
+  required List<String> sources,
+  required String imageUrl,
+}) {
+  Navigator.of(context, rootNavigator: true).push(
+    PageRouteBuilder<void>(
+      transitionDuration: const Duration(milliseconds: 200),
+      pageBuilder: (_, _, _) =>
+          _ArtworkHtmlFullscreenViewer(sources: sources, imageUrl: imageUrl),
+      transitionsBuilder: (_, animation, _, child) =>
+          FadeTransition(opacity: animation, child: child),
+    ),
+  );
+}
+
+class _ArtworkHtmlFullscreenViewer extends StatelessWidget {
+  const _ArtworkHtmlFullscreenViewer({
+    required this.sources,
+    required this.imageUrl,
+  });
+
+  final List<String> sources;
+  final String imageUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.mallowColors;
+    final topInset = MediaQuery.paddingOf(context).top;
+    final placeholder = imageUrl.isEmpty
+        ? const ImageShimmerGrid()
+        : Center(
+            child: MallowNetworkImage(
+              imageUrl: imageUrl,
+              logicalSize: MediaQuery.sizeOf(context).width,
+              cdnFit: 'inside',
+              fit: BoxFit.contain,
+            ),
+          );
+    return ColoredBox(
+      color: colors.bgPrimary,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: SafeArea(
+              child: ArtworkHtmlViewer(
+                sources: sources,
+                placeholder: placeholder,
+                interactive: true,
+              ),
+            ),
+          ),
+          Positioned(
+            top: topInset + MallowTheme.spacing12,
+            right: MallowTheme.spacing20,
+            child: _FullscreenRoundButton(
+              label: 'Close',
+              onTap: () => Navigator.of(context).maybePop(),
+              child: Icon(Icons.close, size: 20, color: colors.textPrimary),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The floating round button the HTML and model fullscreen viewers place in
+/// their top-right corner, after the webapp's fullscreen close button.
+class _FullscreenRoundButton extends StatelessWidget {
+  const _FullscreenRoundButton({
+    required this.label,
+    required this.onTap,
+    required this.child,
+    this.toggled,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+  final Widget child;
+  final bool? toggled;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.mallowColors;
+    return Semantics(
+      button: true,
+      label: label,
+      toggled: toggled,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: colors.bgPrimary,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: colors.shadow.withValues(alpha: 0.16),
+                offset: const Offset(0, 4),
+                blurRadius: 24,
+              ),
+            ],
+          ),
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
+/// Opens a 3D artwork in an opaque fullscreen viewer, mirroring the webapp's
+/// fullscreen display. [onAutoRotateChanged] carries the toggle back to the
+/// inline viewer, which shares the setting.
+void _showArtworkModelFullscreen(
+  BuildContext context, {
+  required String modelUrl,
+  required ArtworkModelSession session,
+  required String? initialSource,
+  required String imageUrl,
+  required bool autoRotate,
+  required ValueChanged<bool> onAutoRotateChanged,
+}) {
+  Navigator.of(context, rootNavigator: true).push(
+    PageRouteBuilder<void>(
+      transitionDuration: const Duration(milliseconds: 200),
+      pageBuilder: (_, _, _) => _ArtworkModelFullscreenViewer(
+        modelUrl: modelUrl,
+        session: session,
+        initialSource: initialSource,
+        imageUrl: imageUrl,
+        autoRotate: autoRotate,
+        onAutoRotateChanged: onAutoRotateChanged,
+      ),
+      transitionsBuilder: (_, animation, _, child) =>
+          FadeTransition(opacity: animation, child: child),
+    ),
+  );
+}
+
+class _ArtworkModelFullscreenViewer extends StatefulWidget {
+  const _ArtworkModelFullscreenViewer({
+    required this.modelUrl,
+    required this.session,
+    required this.initialSource,
+    required this.imageUrl,
+    required this.autoRotate,
+    required this.onAutoRotateChanged,
+  });
+
+  final String modelUrl;
+  final ArtworkModelSession session;
+  final String? initialSource;
+  final String imageUrl;
+  final bool autoRotate;
+  final ValueChanged<bool> onAutoRotateChanged;
+
+  @override
+  State<_ArtworkModelFullscreenViewer> createState() =>
+      _ArtworkModelFullscreenViewerState();
+}
+
+class _ArtworkModelFullscreenViewerState
+    extends State<_ArtworkModelFullscreenViewer> {
+  late bool _autoRotate = widget.autoRotate;
+
+  /// Set when the model fails here too. The poster then stays, and the
+  /// viewer is still dismissed the same way.
+  bool _failed = false;
+
+  void _toggleAutoRotate() {
+    setState(() => _autoRotate = !_autoRotate);
+    widget.onAutoRotateChanged(_autoRotate);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.mallowColors;
+    final topInset = MediaQuery.paddingOf(context).top;
+    final placeholder = widget.imageUrl.isEmpty
+        ? const ImageShimmerGrid()
+        : Center(
+            child: MallowNetworkImage(
+              imageUrl: widget.imageUrl,
+              logicalSize: MediaQuery.sizeOf(context).width,
+              cdnFit: 'inside',
+              fit: BoxFit.contain,
+            ),
+          );
+    return ColoredBox(
+      color: colors.bgPrimary,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: SafeArea(
+              child: ArtworkModelViewer(
+                modelUrl: widget.modelUrl,
+                session: widget.session,
+                initialSource: widget.initialSource,
+                placeholder: placeholder,
+                autoRotate: _autoRotate,
+                progressBuilder: (progress) =>
+                    _MediaLoadingBar(progress: progress),
+                onFailed: () {
+                  if (mounted) setState(() => _failed = true);
+                },
+              ),
+            ),
+          ),
+          Positioned(
+            top: topInset + MallowTheme.spacing12,
+            right: MallowTheme.spacing20,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!_failed) ...[
+                  _FullscreenRoundButton(
+                    label: 'Auto-rotate',
+                    toggled: _autoRotate,
+                    onTap: _toggleAutoRotate,
+                    child: MallowSvgIcon(
+                      'assets/icons/view_360_arrow.svg',
+                      width: 20,
+                      height: 20,
+                      color: _autoRotate
+                          ? colors.textPrimary
+                          : colors.textTertiary,
+                    ),
+                  ),
+                  const SizedBox(width: MallowTheme.spacing12),
+                ],
+                _FullscreenRoundButton(
+                  label: 'Close',
+                  onTap: () => Navigator.of(context).maybePop(),
+                  child: Icon(Icons.close, size: 20, color: colors.textPrimary),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }

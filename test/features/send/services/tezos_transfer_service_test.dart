@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mallow_wallet/core/analytics/analytics_events.dart';
 import 'package:mallow_wallet/core/crypto/wallet_manager.dart';
 import 'package:mallow_wallet/core/network/tezos_rpc_service.dart';
 import 'package:mallow_wallet/features/send/services/tezos_transfer_service.dart';
@@ -6,6 +7,7 @@ import 'package:mallow_wallet/shared/utils/tezos_address.dart';
 import 'package:mockito/annotations.dart';
 import 'package:mockito/mockito.dart';
 
+import '../../../support/recording_analytics.dart';
 import 'tezos_transfer_service_test.mocks.dart';
 
 // Unit coverage for the native-XTZ orchestration in
@@ -434,6 +436,46 @@ void main() {
         verify(rpc.injectOperation('ab')).called(1);
       },
     );
+
+    group('transaction ledger', () {
+      late RecordingAnalytics analytics;
+
+      setUp(() async => analytics = await RecordingAnalytics.install());
+      tearDown(RecordingAnalytics.uninstall);
+
+      Future<void> send() => service.sendNativeTransfer(
+        walletId: walletId,
+        source: source,
+        destination: destination,
+        amountMutez: BigInt.from(amountMutez),
+      );
+
+      test('an included operation is reported as confirmed', () async {
+        await send();
+        await pumpEventQueue();
+
+        final event = analytics.submitted.single;
+        expect(event[AnalyticsProp.flow], 'tezos:native-send');
+        expect(event[AnalyticsProp.signature], 'ooOpHash');
+        expect(event[AnalyticsProp.walletAddress], source);
+        expect(event[AnalyticsProp.confirmation], 'confirmed');
+      });
+
+      test('an inclusion timeout is reported as pending', () async {
+        when(rpc.waitForConfirmation(any)).thenAnswer((_) async => false);
+
+        await expectLater(
+          send(),
+          throwsA(isA<TezosOperationUnconfirmedException>()),
+        );
+        await pumpEventQueue();
+
+        expect(
+          analytics.submitted.single[AnalyticsProp.confirmation],
+          'pending',
+        );
+      });
+    });
 
     test('re-plans against a fresh branch/counter before injecting', () async {
       await service.sendNativeTransfer(

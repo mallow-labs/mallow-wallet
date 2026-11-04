@@ -51,6 +51,13 @@ On failure the runner prints the tail of that run's `mock.log` (per-run files
 under `/tmp/mallow-e2e/`). Every request is logged with its path, so an
 unexpected empty default response is visible without re-running anything.
 
+**Emulator only.** The target is `E2E_DEVICE` (default `emulator-5554`), and
+`lib.sh` refuses anything that is not an `emulator-<port>` serial. It also
+exports `ANDROID_SERIAL`, so every `adb` call it makes goes to that emulator even
+with a phone plugged in. Both safeguards exist because the runners uninstall the
+app (`flutter test` teardown, and `--uninstall` below), and on a real phone that
+deletes its wallet keys for good.
+
 `--uninstall` (`run_one.sh` only) does `adb uninstall` first, for a genuine
 fresh-install case. It is **local-only**: a whole-directory run invokes `flutter
 test integration_test/` as a single shell line and has no between-file hook,

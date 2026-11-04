@@ -73,6 +73,12 @@ class ImportPrivateKeyBloc
   final WalletRepository _walletRepo;
   final WalletManager _walletManager;
 
+  /// The address whose last import failed its recovery-graph write. That
+  /// failure can come after the key and its row are stored, so the retry the
+  /// error asks for is refused as a duplicate; for this address only, that
+  /// duplicate is the import completing. Any other duplicate stays refused.
+  String? _graphFailedAddress;
+
   Future<void> _onValidateKey(
     _ValidateKey event,
     Emitter<ImportPrivateKeyState> emit,
@@ -114,10 +120,26 @@ class ImportPrivateKeyBloc
 
     emit(const ImportPrivateKeyState.importing());
     final result = await Result.guard(() async {
-      final wallet = await _walletRepo.addImportedKeyWallet(
-        current.rawInput.value,
-        'Imported wallet',
-      );
+      WalletInfo wallet;
+      try {
+        wallet = await _walletRepo.addImportedKeyWallet(
+          current.rawInput.value,
+          'Imported wallet',
+        );
+      } on DuplicateWalletException {
+        // The retry of an import whose key and row were stored before its
+        // recovery-graph write failed: the import completes once the
+        // repository confirms that wallet holds exactly this key and the
+        // graph naming it is written (a failed write throws, and is reported
+        // as before). A key imported earlier, or an address another kind of
+        // wallet holds, stays a refusal.
+        if (_graphFailedAddress != current.address) rethrow;
+        final held = await _walletRepo.completeImportedKeyRetry(
+          current.rawInput.value,
+        );
+        if (held == null) rethrow;
+        wallet = held;
+      }
 
       // Activate via WalletManager so onWalletChanged fires and AuthService
       // re-logs in with the new address — otherwise post-onboarding signing
@@ -133,7 +155,10 @@ class ImportPrivateKeyBloc
     });
     switch (result) {
       case ResultSuccess(:final value):
+        _graphFailedAddress = null;
         emit(ImportPrivateKeyState.imported(value));
+        // A completed retry counts too: the failed attempt it completes
+        // stored the wallet, and was tracked only as a failure.
         _trackImported(value.chainEnum);
       case ResultFailure(:final error):
         // This is a key-handling path: for `unknown` the message is
@@ -146,6 +171,16 @@ class ImportPrivateKeyBloc
         );
         emit(ImportPrivateKeyState.error(_safeKeyMessage(error)));
         _trackImportFailed(error.kind);
+        if (error.cause is GraphSyncException) {
+          _graphFailedAddress = current.address;
+          // The row may have landed before the graph write failed; let the
+          // drawer and the other wallet-set listeners re-read.
+          try {
+            await _walletManager.notifyWalletDataChanged();
+          } catch (e) {
+            AppLogger.debug('ImportPrivateKeyBloc', 'Refresh failed: $e');
+          }
+        }
     }
   }
 
@@ -185,10 +220,26 @@ class ImportPrivateKeyBloc
     );
   }
 
-  /// Returns the validation message verbatim, or a safe fallback for any other
-  /// failure kind (which may carry raw exception detail via error.toString()).
-  String _safeKeyMessage(AppFailure error) =>
-      error.kind == AppFailureKind.validation
-      ? error.message
-      : 'Could not import this key.';
+  /// Returns the validation message verbatim, fixed copy for the two
+  /// repository refusals below, or a safe fallback for any other failure kind
+  /// (which may carry raw exception detail via error.toString()).
+  ///
+  /// A failed recovery-graph write can come after the key and its row are
+  /// stored, or before anything is (superseding a watch-only wallet at the
+  /// address), so its copy claims neither. A retry works in both cases: the
+  /// second one imports afresh, and the first is refused as a duplicate that
+  /// [_onImportWallet] opens as the imported wallet. Any other duplicate — a
+  /// key imported earlier, or an address another wallet holds — reaches this
+  /// message.
+  String _safeKeyMessage(AppFailure error) {
+    if (error.kind == AppFailureKind.validation) return error.message;
+    final cause = error.cause;
+    if (cause is DuplicateWalletException) {
+      return 'A wallet with this address is already on this device.';
+    }
+    if (cause is GraphSyncException) {
+      return 'Could not update recovery data. Please try again.';
+    }
+    return 'Could not import this key.';
+  }
 }

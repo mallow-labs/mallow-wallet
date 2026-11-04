@@ -19,6 +19,10 @@ void main() {
       expect(tokenStandardLabel(TokenStandard.coreCollection), 'Metaplex Core');
       expect(tokenStandardLabel(TokenStandard.pnft), 'Metaplex Programmable');
       expect(tokenStandardLabel(TokenStandard.cnft), 'Metaplex Compressed');
+      expect(
+        tokenStandardLabel(TokenStandard.cnftV2),
+        'Metaplex Compressed V2',
+      );
     });
 
     test('cross-chain labels are formatted with their canonical name', () {
@@ -35,6 +39,7 @@ void main() {
       expect(tokenStandardLabelFromWire('core-collection'), 'Metaplex Core');
       expect(tokenStandardLabelFromWire('pnft'), 'Metaplex Programmable');
       expect(tokenStandardLabelFromWire('cnft'), 'Metaplex Compressed');
+      expect(tokenStandardLabelFromWire('cnft-v2'), 'Metaplex Compressed V2');
       expect(tokenStandardLabelFromWire('erc721'), 'ERC-721');
     });
 

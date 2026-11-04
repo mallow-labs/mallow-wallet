@@ -49,7 +49,7 @@ sealed class BidTxResponse with _$BidTxResponse {
   factory BidTxResponse.fromJson(Map<String, dynamic> json) => _$BidTxResponseFromJson(json);
 }
 
-// --- Phase 3: offer tx builders ---
+// --- Offer tx builders ---
 
 /// Request body for `POST /v1/artwork/getMakeOfferTx`. Mirrors the webapp's
 /// `useMakeOffer`. `price` is a raw on-chain integer scaled by
@@ -102,7 +102,7 @@ sealed class CancelOfferTxResponse with _$CancelOfferTxResponse {
       _$CancelOfferTxResponseFromJson(json);
 }
 
-// --- Phase 4: listing cancel + update tx builders ---
+// --- Listing cancel + update tx builders ---
 
 @freezed
 sealed class GetCancelListingTxRequest with _$GetCancelListingTxRequest {
@@ -148,7 +148,7 @@ sealed class UpdateListingTxResponse with _$UpdateListingTxResponse {
       _$UpdateListingTxResponseFromJson(json);
 }
 
-// --- Phase 5: auction cancel + settle tx builders ---
+// --- Auction cancel + settle tx builders ---
 //
 // The settle ix covers BOTH seller-payout AND winner-NFT-transfer in a
 // single call — the wallet just calls `getSettleAuctionTx` with

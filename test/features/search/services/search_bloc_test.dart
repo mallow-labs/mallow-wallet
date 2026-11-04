@@ -335,6 +335,39 @@ void main() {
       },
     );
 
+    // A tag chip on the artwork page opens the same drilldown with the tag
+    // as its target, which the repository pins onto the explore filter.
+    blocTest<SearchBloc, SearchState>(
+      'opens a tag drilldown on the tag',
+      setUp: () => stubFirstPage([_artwork(0)]),
+      build: buildBloc,
+      // The drilldown reads the shared view-mode pref before its first
+      // emit; bloc_test's default window closes before that async hop.
+      wait: const Duration(milliseconds: 50),
+      act: (bloc) => bloc.add(
+        const SearchEvent.drilldownOpened(TagDrilldownTarget('sunset')),
+      ),
+      expect: () => [
+        isA<SearchArtworkResults>()
+            .having(
+              (s) => s.target,
+              'target',
+              const TagDrilldownTarget('sunset'),
+            )
+            .having((s) => s.artworks.length, 'artworks', 1),
+      ],
+      verify: (_) {
+        verify(
+          () => repo.fetchArtworkResults(
+            const TagDrilldownTarget('sunset'),
+            page: any(named: 'page'),
+            filter: const api.ExploreFilter(),
+            sort: any(named: 'sort'),
+          ),
+        ).called(1);
+      },
+    );
+
     // Same contract as the item drilldowns: a dead endpoint must not
     // render as "no results".
     blocTest<SearchBloc, SearchState>(

@@ -11,7 +11,7 @@ Android, built with Flutter. There is no web or desktop build.
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Flutter](https://img.shields.io/badge/Flutter-3.44.8-02569B?logo=flutter&logoColor=white)](CONTRIBUTING.md)
 
-The App Store and Google Play listings are not live yet. See
+The App Store, Google Play and Solana dApp Store listings are not live yet. See
 [SECURITY.md](SECURITY.md) for the official builds and how to verify one.
 
 <p align="center">
@@ -35,10 +35,12 @@ Each claim names what proves it; [docs/security.md](docs/security.md) has the fu
   AndroidKeystore, with only ciphertext on disk. No escrow, no server-side
   backup, no code path that transmits key material.
 - **Hardware wallets keep their key off the phone entirely.** A Ledger signs over
-  BLE, and on Android a wallet can be backed by the device's own Seed Vault
-  (Solana Mobile) — Android-only, and Solana-only, because Seed Vault defines
-  exactly one signing purpose. Either way mallow stores no key and no signature
-  is produced without an approval the user gives outside this app. The Seed Vault
+  BLE; a Keystone signs Solana and Ethereum transactions air-gapped, by QR code
+  in both directions ([docs/keystone.md](docs/keystone.md)); and on Android a
+  wallet can be backed by the device's own Seed Vault (Solana Mobile) —
+  Android-only, and Solana-only, because Seed Vault defines exactly one signing
+  purpose. In every case mallow stores no key and no signature is produced
+  without an approval the user gives outside this app. The Seed Vault
   option only appears when the OS actually provides one, decided by a runtime
   probe rather than by the device model, which any ROM can claim.
 - **Social sign-in wallets have a different custody model**
@@ -59,12 +61,26 @@ Each claim names what proves it; [docs/security.md](docs/security.md) has the fu
   one you asked for; an unreachable simulation endpoint errors the transfer
   rather than proceeding unchecked
   (`_assertSimulation` in [`ethereum_transfer_service.dart`](lib/features/send/services/ethereum_transfer_service.dart)).
-- **There is no third-party signing surface.** No WalletConnect, no Mobile Wallet
-  Adapter, no in-app browser, no deep-link signing intent. The wallet signs only
-  what its own flows produce, so no outside site or app can put a transaction in
-  front of you. Seed Vault does not change this: it is a key store the app calls
-  into, not a service the app offers — nothing outside mallow can ask it to sign
-  through us.
+- **Websites ask for signatures through the in-app browser or WalletConnect.**
+  There is no Mobile Wallet Adapter endpoint and no `mallowwallet://` signing
+  intent. Another app can open a web page in the browser (the share sheet does
+  this) or hand over a WalletConnect `wc:` link, as can a QR code on another
+  device; either way the most it starts is a connection you must approve. A
+  website can then ask to sign on Solana, Ethereum and Tezos. In the browser the
+  origin comes from the platform rather than the page; over WalletConnect the
+  website names itself, so the proposal shows WalletConnect's Verify result and
+  an unmatched domain needs a press-and-hold. A connection is granted per origin
+  (or per session) and per address. Both surfaces share one request lane, the
+  same kill switches and step-up auth, and nothing is signed without your
+  approval on a native review screen. Transactions are simulated and shown as
+  decoded effects; if the simulation service is unreachable the review says so
+  and the transaction can still be signed. Each signature is checked against
+  the approved address before it is returned. WalletConnect exists only in a
+  build with `WALLETCONNECT_PROJECT_ID` set. See
+  [docs/security.md](docs/security.md#scope-first-party-flows-the-in-app-browser-and-walletconnect).
+  Seed Vault adds no surface: it is a key store the app calls into, not a
+  service the app offers, so a website reaches a Seed Vault wallet only through
+  those two, and the OS then shows its own approval as well.
 
 ### What this repository does not prove
 
@@ -177,8 +193,7 @@ You are welcome to. Three things to know before you distribute a build:
 | [docs/architecture.md](docs/architecture.md) | Structure, naming, state management, the standalone packages |
 | [docs/api.md](docs/api.md) | Endpoints and the `/v1` vs `/v2` split |
 | [docs/workflow.md](docs/workflow.md) | CLI commands and testing |
-| [docs/artwork_state.md](docs/artwork_state.md) | How an artwork's action state is derived |
-| [docs/keystone.md](docs/keystone.md) | Keystone hardware-wallet QR support — a design note for work not yet built |
+| [docs/keystone.md](docs/keystone.md) | Keystone hardware wallets: connecting, QR signing, what is stored |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Build steps, CI gates, DCO sign-off |
 | [SECURITY.md](SECURITY.md) | Disclosure policy and how to verify a genuine build |
 | [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) | Bundled third-party material and its licences |

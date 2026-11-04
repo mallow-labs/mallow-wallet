@@ -288,7 +288,7 @@ void main() {
       );
       // The service picks the gateway behind a 307 — but the host it lands on
       // can 404/403 the player, and without the direct candidates behind it
-      // that ends playback with nothing left to try (decision 24).
+      // that ends playback with nothing left to try.
       expect(result, [
         'https://images.example.com/original/ipfs%3A%2F%2F$cid%2Fv.mp4',
         'https://ipfs.example.com/ipfs/$cid/v.mp4',

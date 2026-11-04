@@ -15,6 +15,7 @@ import '../../../core/analytics/analytics_service.dart';
 import '../../../core/config/remote_config.dart';
 import '../../../core/crypto/wallet_manager.dart';
 import '../../../core/data/mallow_tokens.dart';
+import '../../../core/network/solana_pay_tags.dart';
 import '../../../core/network/solana_rpc_service.dart';
 import '../../../core/result/app_failure.dart';
 import '../../../core/result/result.dart';
@@ -99,6 +100,12 @@ sealed class SendEvent with _$SendEvent {
   }) = SendSetSource;
 
   const factory SendEvent.setMaxAmount() = SendSetMaxAmount;
+
+  /// A Solana Pay request's references and memo, which every Solana transfer
+  /// this bloc builds, simulates or prices from then on carries. The other
+  /// chains have no such tags and ignore it.
+  const factory SendEvent.setPaymentTags(SolanaPayTags tags) =
+      SendSetPaymentTags;
 
   /// Applies the fee tier / custom fee the user picked on the Edit Gas Fee
   /// sheet (Ethereum only). Updates the confirm-step fee display and the fee
@@ -226,6 +233,7 @@ class SendBloc extends Bloc<SendEvent, SendState> {
     on<SendSetToken>(_onSetToken);
     on<SendSetSource>(_onSetSource);
     on<SendSetMaxAmount>(_onSetMaxAmount);
+    on<SendSetPaymentTags>(_onSetPaymentTags);
     on<SendSetEthGasSelection>(_onSetEthGasSelection);
     on<SendEstimateFee>(_onEstimateFee);
     on<SendValidateAndProceed>(_onValidateAndProceed);
@@ -292,6 +300,11 @@ class SendBloc extends Bloc<SendEvent, SendState> {
   String? _solMaxRecipient;
   String? _solMaxAmount;
 
+  /// Set by [SendSetPaymentTags]. Applied wherever a Solana transfer
+  /// instruction is made, so the simulated, priced and signed transactions
+  /// stay the same transaction.
+  SolanaPayTags _payTags = const SolanaPayTags();
+
   bool get _isTezos => _chain == Chain.tezos;
   bool get _isEthereum => _chain == Chain.ethereum;
 
@@ -321,6 +334,12 @@ class SendBloc extends Bloc<SendEvent, SendState> {
     _ethPrepared = null;
     _ethPreparedRecipient = null;
     _ethPreparedAmountRaw = null;
+  }
+
+  void _onSetPaymentTags(SendSetPaymentTags event, Emitter<SendState> emit) {
+    _payTags = event.tags;
+    // A Max priced without the memo bid for less compute than it now needs.
+    _clearSolMaxPlan();
   }
 
   void _onSetRecipient(SendSetRecipient event, Emitter<SendState> emit) {
@@ -407,10 +426,24 @@ class SendBloc extends Bloc<SendEvent, SendState> {
         current.copyWith(recipientError: _validateAddress(current.recipient)),
       );
     }
-    // Prime the native-SOL balance the amount guard reads. The source is
-    // chosen two steps before the amount is typed, so this has landed by the
-    // time it matters; if it hasn't, the guard simply stays quiet.
+    // Prime the native-SOL balance the amount guard reads. A typed send picks
+    // the source two steps before the amount, so this has usually landed by
+    // the time it matters. A payment request fills the amount and asks for
+    // the review straight away, before it can land, so the review reads the
+    // balance itself ([_onValidateAndProceed]).
     if (_chain == Chain.solana) unawaited(_primeSolBalance());
+  }
+
+  /// Read (and cache) the funding wallet's native-SOL balance. Returns false
+  /// when the read failed, which leaves the cached balance as it was.
+  Future<bool> _readSolBalance() async {
+    try {
+      final address = await _walletManager.getAddress();
+      _solLamports = await _rpcService.getBalanceForAddress(address);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Read (and cache) the funding wallet's native-SOL balance, then re-run
@@ -419,12 +452,7 @@ class SendBloc extends Bloc<SendEvent, SendState> {
   /// Re-validation goes through [SendSetAmount] rather than an emit from here:
   /// this runs outside an event handler, where the emitter is not ours to use.
   Future<void> _primeSolBalance() async {
-    try {
-      final address = await _walletManager.getAddress();
-      _solLamports = await _rpcService.getBalanceForAddress(address);
-    } catch (_) {
-      return;
-    }
+    if (!await _readSolBalance()) return;
     // Both reads above are awaited outside an event handler, so the send screen
     // may have been popped — and this bloc closed — while they ran. Adding to a
     // closed bloc throws, and there is no form left to re-validate anyway.
@@ -669,6 +697,7 @@ class SendBloc extends Bloc<SendEvent, SendState> {
       final plan = await _rpcService.planSolTransferFee(
         destination: recipient,
         provisionalLamports: provisional > 0 ? provisional : 1,
+        tags: _payTags,
       );
       final maxLamports = balance - plan.feeLamports;
       if (maxLamports <= 0) return '0';
@@ -814,6 +843,22 @@ class SendBloc extends Bloc<SendEvent, SendState> {
     if (_isEthereum) {
       await _validateAndProceedEthereum(current, emit);
       return;
+    }
+
+    // The amount field only checks native SOL against a balance it already
+    // has, and stays quiet while it has none. A payment request asks for the
+    // review before the read [_onSetSource] started can land, so read it here
+    // when it is still missing and check the amount again: an amount the
+    // wallet cannot pay stops on the amount step with the field's own error
+    // instead of reaching the confirm step. A failed read still lets the
+    // review go on, as the field does, and the confirm step checks again.
+    if (current.token == null) {
+      if (_solLamports == null) await _readSolBalance();
+      final amountError = _validateAmount(current.amount, null);
+      if (amountError != null) {
+        emit(current.copyWith(isValidating: false, amountError: amountError));
+        return;
+      }
     }
 
     final result = await Result.guard(() async {
@@ -1209,6 +1254,7 @@ class SendBloc extends Bloc<SendEvent, SendState> {
           pinnedBudget: isSolMaxAmount(current.amountString, current.recipient)
               ? _solMaxBudget
               : null,
+          tags: _payTags,
         );
       } else {
         debugPrint('[SendBloc] building SPL transfer tx');
@@ -1220,6 +1266,7 @@ class SendBloc extends Bloc<SendEvent, SendState> {
           destination: current.recipient,
           tokenMint: current.token!.mint,
           amount: TokenAmount.toInt(rawAmount),
+          tags: _payTags,
         );
       }
       final execResult = await _executor.execute(
@@ -1611,10 +1658,12 @@ class SendBloc extends Bloc<SendEvent, SendState> {
       if (current.token == null) {
         // SOL transfer
         final lamports = TokenAmount.solToLamports(current.amountString);
-        final instruction = SystemInstruction.transfer(
-          fundingAccount: sourceKey,
-          recipientAccount: destinationKey,
-          lamports: TokenAmount.toInt(lamports),
+        final instructions = _payTags.apply(
+          SystemInstruction.transfer(
+            fundingAccount: sourceKey,
+            recipientAccount: destinationKey,
+            lamports: TokenAmount.toInt(lamports),
+          ),
         );
         // A Max is priced to leave the account at exactly zero, and that only
         // holds for the fee its pinned prefix bids. Simulating the bare
@@ -1625,9 +1674,9 @@ class SendBloc extends Bloc<SendEvent, SendState> {
         final pinned = isSolMaxAmount(current.amountString, current.recipient)
             ? _solMaxBudget
             : null;
-        message = pinned == null
-            ? Message.only(instruction)
-            : Message(instructions: [...pinned.instructions, instruction]);
+        message = Message(
+          instructions: [...?pinned?.instructions, ...instructions],
+        );
       } else {
         // SPL / SPL-2022 token transfer — source account and its owning token
         // program come from one live [findOwnedTokenAccount] read, mirroring the
@@ -1675,13 +1724,15 @@ class SendBloc extends Bloc<SendEvent, SendState> {
           current.amountString,
           current.token!.decimals,
         );
-        instructions.add(
-          TokenInstruction.transfer(
-            source: sourceAta,
-            destination: destinationAta,
-            owner: sourceKey,
-            amount: TokenAmount.toInt(rawAmount),
-            tokenProgram: programType,
+        instructions.addAll(
+          _payTags.apply(
+            TokenInstruction.transfer(
+              source: sourceAta,
+              destination: destinationAta,
+              owner: sourceKey,
+              amount: TokenAmount.toInt(rawAmount),
+              tokenProgram: programType,
+            ),
           ),
         );
 

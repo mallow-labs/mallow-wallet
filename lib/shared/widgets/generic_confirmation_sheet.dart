@@ -89,7 +89,8 @@ class GenericConfirmationSheet extends StatelessWidget {
     final hasSimulationBanner = simulation != null && simulation!._shouldRender;
 
     return Container(
-      padding: padding,
+      // The handle brings its own gap from the sheet's top edge.
+      padding: showHandle ? padding.copyWith(top: 0) : padding,
       decoration: BoxDecoration(
         color: backgroundColor ?? colors.bgPrimary,
         borderRadius: BorderRadius.vertical(top: Radius.circular(topRadius)),

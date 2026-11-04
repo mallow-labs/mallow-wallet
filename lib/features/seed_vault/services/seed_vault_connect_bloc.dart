@@ -108,6 +108,14 @@ class SeedVaultToggleAccount extends SeedVaultConnectEvent {
   final int index;
 }
 
+/// Name the not-yet-imported account at derivation [index]. A blank [name]
+/// clears it back to the default `Account NN`.
+class SeedVaultRenameAccount extends SeedVaultConnectEvent {
+  const SeedVaultRenameAccount(this.index, this.name);
+  final int index;
+  final String name;
+}
+
 class SeedVaultImportRequested extends SeedVaultConnectEvent {
   const SeedVaultImportRequested();
 }
@@ -154,6 +162,7 @@ class SeedVaultAccountsLoaded extends SeedVaultConnectState {
     required this.includeLegacy,
     required this.selectedKeys,
     required this.baseCounter,
+    this.customNames = const {},
   });
 
   final List<PickerAccount> accounts;
@@ -163,6 +172,10 @@ class SeedVaultAccountsLoaded extends SeedVaultConnectState {
   /// Next global account number when the picker opened; the live `Account NN`
   /// preview numbers selected cards ascending from here.
   final int baseCounter;
+
+  /// Names the user typed in the picker, keyed by derivation index. Applied
+  /// when the account is created on import; see [previewAccountNames].
+  final Map<int, String> customNames;
 }
 
 class SeedVaultImporting extends SeedVaultConnectState {
@@ -208,6 +221,7 @@ class SeedVaultConnectBloc
     on<SeedVaultSetIncludeLegacy>(_onSetIncludeLegacy);
     on<SeedVaultToggleWallet>(_onToggleWallet);
     on<SeedVaultToggleAccount>(_onToggleAccount);
+    on<SeedVaultRenameAccount>(_onRenameAccount);
     on<SeedVaultImportRequested>(_onImport);
   }
 
@@ -225,6 +239,9 @@ class SeedVaultConnectBloc
   /// Selected wallets keyed by [PickerWallet.key], held across re-renders so
   /// the legacy toggle doesn't drop an existing selection.
   final _selectedByKey = <String, PickerWallet>{};
+
+  /// Names the user typed in the picker, keyed by derivation index.
+  Map<int, String> _customNames = const {};
 
   List<PickerAccount> _lastAccounts = const [];
   bool _includeLegacy = false;
@@ -408,6 +425,7 @@ class SeedVaultConnectBloc
         includeLegacy: _includeLegacy,
         selectedKeys: _selectedKeys,
         baseCounter: _baseAccountNumber,
+        customNames: _customNames,
       ),
     );
   }
@@ -452,6 +470,22 @@ class SeedVaultConnectBloc
         _selectedByKey[w.key] = w;
       }
     }
+    _emitAccountsLoaded(emit);
+  }
+
+  void _onRenameAccount(
+    SeedVaultRenameAccount event,
+    Emitter<SeedVaultConnectState> emit,
+  ) {
+    if (state is! SeedVaultAccountsLoaded) return;
+    final names = renamePickerAccount(
+      accounts: _lastAccounts,
+      customNames: _customNames,
+      index: event.index,
+      name: event.name,
+    );
+    if (names == null) return;
+    _customNames = names;
     _emitAccountsLoaded(emit);
   }
 
@@ -532,12 +566,14 @@ class SeedVaultConnectBloc
           _walletName(scheme),
           derivationIndex: selected.accountIndex,
           derivationScheme: scheme,
+          accountName: _customNames[selected.accountIndex],
         );
         wallets.add(wallet);
         await _markAsUserWallet(selected.key);
       }
 
       _selectedByKey.clear();
+      _customNames = const {};
 
       // Switch the session to the imported account so the drawer/home header
       // show its name. Skipped when the active Profile already links one of
@@ -558,13 +594,16 @@ class SeedVaultConnectBloc
       emit(const SeedVaultConnectError('One or more wallets already exist'));
       _trackImportFailed(FailureReason.unknown);
     } on GraphSyncException {
-      // Importing an address a view-only wallet already holds supersedes that
-      // wallet, and pruning it from the recovery graph is the commit point of
-      // its removal. Named here so the user reads the reason instead of the raw
-      // keystore error AppFailure.from would put in the message.
+      // Either superseding a view-only wallet at an address could not prune
+      // it from the recovery graph (nothing added), or a wallet's row landed
+      // and the graph write after it failed — so the copy claims neither; a
+      // retry of the second case is refused as a duplicate. Named here so the
+      // user reads the reason instead of the raw keystore error
+      // AppFailure.from would put in the message.
       emit(
         const SeedVaultConnectError(
-          'Could not update recovery data. Please try again.',
+          'Could not update recovery data. Check your wallet list '
+          'before trying again.',
         ),
       );
       _trackImportFailed(FailureReason.unknown);

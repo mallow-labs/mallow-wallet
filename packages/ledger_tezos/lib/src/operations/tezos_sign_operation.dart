@@ -7,7 +7,7 @@ import '../tezos_apdu.dart';
 /// SIGN — a SINGLE APDU exchange of the Tezos app's streamed sign command.
 ///
 /// The Tezos app signs in multiple APDUs: packet 0 carries the BIP32 path
-/// (P1=0x00), then the Micheline message is streamed in chunks (P1=0x01, the
+/// (P1=0x00), then the watermarked payload is streamed in chunks (P1=0x01, the
 /// final chunk ORs in [TezosApdu.p1Last]=0x80). The BLE gateway completes one
 /// operation per response, so each APDU MUST be its own `sendOperation` — the
 /// orchestration lives in `TezosLedgerApp.signMessage`, and this class models a
@@ -52,7 +52,7 @@ class TezosSignOperation extends LedgerRawOperation<Uint8List> {
     if (!expectSignature) {
       // Path / intermediate chunk: the device acks with a 2-byte status word.
       // 0x9000 = continue; anything else is a device error to surface.
-      if (available >= 2) {
+      if (available == 2) {
         final statusWord = _statusWord(reader);
         if (statusWord == 0x9000) return Uint8List(0);
         throw _deviceError(statusWord);
@@ -63,17 +63,21 @@ class TezosSignOperation extends LedgerRawOperation<Uint8List> {
       );
     }
 
-    // Final chunk: a 64-byte signature on success, else a 2-byte status word.
-    if (available < 64) {
-      if (available >= 2) {
-        throw _deviceError(_statusWord(reader));
-      }
+    // Some transports retain the status word, others strip it. Accept only
+    // the exact Ed25519 signature with an optional successful status word.
+    if (available == 2) throw _deviceError(_statusWord(reader));
+    if (available != 64 && available != 66) {
       throw LedgerDeviceException(
-        message: 'Unexpected response length: $available bytes',
+        message: 'Unexpected signature response length: $available bytes',
         connectionType: ConnectionType.ble,
       );
     }
-    return reader.read(64);
+    final signature = reader.read(64);
+    if (available == 66) {
+      final status = _statusWord(reader);
+      if (status != 0x9000) throw _deviceError(status);
+    }
+    return signature;
   }
 
   int _statusWord(ByteDataReader reader) {
@@ -84,8 +88,7 @@ class TezosSignOperation extends LedgerRawOperation<Uint8List> {
 
   LedgerDeviceException _deviceError(int statusWord) => LedgerDeviceException(
         errorCode: statusWord,
-        message:
-            'Tezos message signing failed (0x${statusWord.toRadixString(16)})',
+        message: 'Tezos signing failed (0x${statusWord.toRadixString(16)})',
         connectionType: ConnectionType.ble,
       );
 }

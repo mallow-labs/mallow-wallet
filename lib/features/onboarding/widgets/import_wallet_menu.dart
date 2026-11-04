@@ -24,6 +24,9 @@ class ImportWalletMenu extends StatelessWidget {
   final Future<SocialAuthResult?> Function() onGoogleSignIn;
   final Future<SocialAuthResult?> Function() onAppleSignIn;
   final VoidCallback onPrivateKeyTap;
+
+  /// Hardware-wallet import. One button for every device: the caller opens the
+  /// chooser (or the Ledger scan when Ledger is the only device on offer).
   final VoidCallback onHardwareWalletTap;
   final VoidCallback onRecoveryPhraseTap;
 

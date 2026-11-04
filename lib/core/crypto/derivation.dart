@@ -348,6 +348,26 @@ class MultiChainDerivation {
     );
   }
 
+  /// EIP-55 Ethereum address at `0/[index]` under a BIP-44 account xpub — the
+  /// compressed secp256k1 [publicKey] and [chainCode] of `m/44'/60'/0'`, as a
+  /// Keystone exports it. The public-key-only twin of
+  /// [getEthereumAddressAtIndex]: the same `m/44'/60'/0'/0/[index]` address,
+  /// derived without the seed.
+  static String ethereumAddressFromAccountXpub(
+    Uint8List publicKey,
+    Uint8List chainCode,
+    int index,
+  ) {
+    final node = bip32.BIP32
+        .fromPublicKey(publicKey, chainCode)
+        .derive(0)
+        .derive(index);
+    final uncompressed = decompressPublicKey(node.publicKey);
+    return EthereumAddress(
+      publicKeyToAddress(uncompressed.sublist(1)),
+    ).eip55With0x;
+  }
+
   /// EIP-55 checksum an Ethereum address (e.g. the lowercase hex a Ledger
   /// device returns), so it displays identically to mnemonic-derived addresses.
   static String checksumEthereumAddress(String address) =>
@@ -399,6 +419,74 @@ class MultiChainDerivation {
     ).signPersonalMessageToUint8List(Uint8List.fromList(message));
     return '0x${bytesToHex(sig)}';
   }
+
+  /// secp256k1-sign a 32-byte EIP-712 [digest] with the key at [index]. No
+  /// prefix is applied: the digest is already domain-separated by its
+  /// `0x1901` header. Only ever pass a digest this app computed itself from
+  /// typed data the user reviewed — this is the raw primitive that a website's
+  /// `eth_sign` would abuse, and that method is deliberately not offered.
+  /// Returns the 65-byte `r‖s‖v` (v = 27/28) signature.
+  static Uint8List signEthereumTypedDataDigest(
+    String mnemonic,
+    int index,
+    Uint8List digest,
+  ) {
+    final seed = bip39.mnemonicToSeed(mnemonic.trim().toLowerCase());
+    final node = bip32.BIP32.fromSeed(seed).derivePath(ethereumHdPath(index));
+    final priv = node.privateKey;
+    if (priv == null) {
+      throw StateError('Failed to derive Ethereum private key at index $index');
+    }
+    return signEthereumTypedDataDigestWithKey(priv, digest);
+  }
+
+  /// [signEthereumTypedDataDigest] with an imported raw private key.
+  static Uint8List signEthereumTypedDataDigestWithKey(
+    Uint8List privateKey,
+    Uint8List digest,
+  ) {
+    if (digest.length != 32) {
+      throw ArgumentError('An EIP-712 digest is 32 bytes');
+    }
+    final sig = sign(digest, privateKey);
+    return Uint8List.fromList([
+      ...padUint8ListTo32(unsignedIntToBytes(sig.r)),
+      ...padUint8ListTo32(unsignedIntToBytes(sig.s)),
+      sig.v,
+    ]);
+  }
+
+  /// The address that produced the 65-byte `r‖s‖v` [signature] over the
+  /// 32-byte [digest], lower-cased with `0x`, or null when nothing recovers.
+  /// Accepts v as 0/1 or 27/28.
+  static String? recoverEthereumAddress(Uint8List digest, Uint8List signature) {
+    if (digest.length != 32 || signature.length != 65) return null;
+    final v = signature[64] < 27 ? signature[64] + 27 : signature[64];
+    if (v != 27 && v != 28) return null;
+    try {
+      final publicKey = ecRecover(
+        digest,
+        MsgSignature(
+          bytesToUnsignedInt(signature.sublist(0, 32)),
+          bytesToUnsignedInt(signature.sublist(32, 64)),
+          v,
+        ),
+      );
+      return '0x${bytesToHex(publicKeyToAddress(publicKey))}';
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The EIP-191 `personal_sign` digest of [message]: keccak256 of
+  /// `\x19Ethereum Signed Message:\n<length>` followed by the bytes.
+  static Uint8List ethereumPersonalMessageDigest(List<int> message) =>
+      keccak256(
+        Uint8List.fromList([
+          ...utf8.encode('\x19Ethereum Signed Message:\n${message.length}'),
+          ...message,
+        ]),
+      );
 
   /// Sign a fully-populated Ethereum [transaction] with the secp256k1 key at
   /// [index] (HD path), returning the raw signed bytes for
@@ -713,6 +801,37 @@ class MultiChainDerivation {
     return encodeTezosEdpk(keypair.publicKey.bytes);
   }
 
+  /// Signs an already packed off-chain payload without changing its bytes.
+  static Future<String> signTezosPayload(
+    String mnemonic,
+    int index,
+    Uint8List payload, {
+    void Function()? ensureActive,
+  }) async {
+    final node = await ED25519_HD_KEY.derivePath(
+      "m/44'/1729'/$index'/0'",
+      bip39.mnemonicToSeed(mnemonic.trim().toLowerCase()),
+    );
+    return signTezosPayloadWithSeed(
+      Uint8List.fromList(node.key),
+      payload,
+      ensureActive: ensureActive,
+    );
+  }
+
+  static Future<String> signTezosPayloadWithSeed(
+    Uint8List seed,
+    Uint8List payload, {
+    void Function()? ensureActive,
+  }) async {
+    final keypair = await Ed25519HDKeyPair.fromPrivateKeyBytes(
+      privateKey: seed,
+    );
+    final hash = Blake2bDigest(digestSize: 32).process(payload);
+    ensureActive?.call();
+    return encodeTezosEdsig((await keypair.sign(hash)).bytes);
+  }
+
   /// Sign a locally-forged Tezos operation group ([forgedHex] from
   /// `forgeOperationGroup`) with the Ed25519 key at [index] (HD path).
   ///
@@ -721,7 +840,12 @@ class MultiChainDerivation {
   /// signature and `signedOperationHex` (`forgedHex ++ raw-signature-hex`), the
   /// payload `/injection/operation` expects.
   static Future<({String signature, String signedOperationHex})>
-  signTezosOperation(String mnemonic, int index, String forgedHex) async {
+  signTezosOperation(
+    String mnemonic,
+    int index,
+    String forgedHex, {
+    void Function()? ensureActive,
+  }) async {
     final seed = bip39.mnemonicToSeed(mnemonic.trim().toLowerCase());
     final node = await ED25519_HD_KEY.derivePath(
       "m/44'/1729'/$index'/0'",
@@ -730,16 +854,22 @@ class MultiChainDerivation {
     final keypair = await Ed25519HDKeyPair.fromPrivateKeyBytes(
       privateKey: node.key,
     );
+    ensureActive?.call();
     return _signTezosForgedBytes(keypair, forgedHex);
   }
 
   /// Sign a forged Tezos operation with a raw 32-byte Ed25519 seed (imported
   /// `edsk` path). Mirrors [signTezosOperation] without the HD derivation step.
   static Future<({String signature, String signedOperationHex})>
-  signTezosOperationWithSeed(Uint8List seed, String forgedHex) async {
+  signTezosOperationWithSeed(
+    Uint8List seed,
+    String forgedHex, {
+    void Function()? ensureActive,
+  }) async {
     final keypair = await Ed25519HDKeyPair.fromPrivateKeyBytes(
       privateKey: seed,
     );
+    ensureActive?.call();
     return _signTezosForgedBytes(keypair, forgedHex);
   }
 

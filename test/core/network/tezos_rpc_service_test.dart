@@ -329,4 +329,53 @@ void main() {
       expect(confirmed, isFalse);
     });
   });
+  for (final status in ['applied', 'failed', 'backtracked']) {
+    test(
+      'browser inclusion distinguishes $status from missing operations',
+      () async {
+        final rpc = _StubTezosRpcService(
+          getResponses: {
+            '/chains/main/blocks/head/operation_hashes': [
+              ['op-test'],
+            ],
+            '/chains/main/blocks/head/operations/3': [
+              {
+                'hash': 'op-test',
+                'contents': [
+                  {
+                    'metadata': {
+                      'operation_result': {'status': status},
+                    },
+                  },
+                ],
+              },
+            ],
+            '/chains/main/blocks/head/header': {'level': 123},
+          },
+        );
+        final receipt = await rpc.getOperationInclusion('op-test');
+        expect(receipt?.applied, status == 'applied');
+        expect(receipt?.level, 123);
+      },
+    );
+  }
+  test(
+    'browser inclusion fails closed on missing operation metadata',
+    () async {
+      final rpc = _StubTezosRpcService(
+        getResponses: {
+          '/chains/main/blocks/head/operation_hashes': [
+            ['op-test'],
+          ],
+          '/chains/main/blocks/head/operations/3': [
+            {
+              'hash': 'op-test',
+              'contents': [<String, Object>{}],
+            },
+          ],
+        },
+      );
+      expect(await rpc.getOperationInclusion('op-test'), isNull);
+    },
+  );
 }

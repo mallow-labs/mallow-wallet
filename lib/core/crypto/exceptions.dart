@@ -80,22 +80,13 @@ class TransactionAuthCancelledException implements Exception {
   String toString() => 'TransactionAuthCancelledException: $message';
 }
 
-/// Thrown when a Tezos operation is signed with a wallet type that has no
-/// local Ed25519 seed: Ledger and view-only wallets.
-///
-/// The Tezos send flow signs locally, from a seed phrase, an imported `edsk`
-/// key, or a social wallet's stored seed (social rows go through the
-/// imported-key arm). Only on-device (Ledger) Tezos signing is unwired, so that
-/// path fails loud rather than silently producing no signature.
+/// Thrown when the Tezos wallet has neither a local key nor a supported
+/// hardware signing path (view-only, Seed Vault and Keystone).
 class TezosOperationSigningNotSupportedException implements Exception {
   TezosOperationSigningNotSupportedException([
-    this.message =
-        'Signing Tezos transactions is only supported for seed-phrase and '
-        'imported-key wallets.',
+    this.message = 'This wallet type does not support Tezos signing.',
   ]);
-
   final String message;
-
   @override
   String toString() => 'TezosOperationSigningNotSupportedException: $message';
 }
@@ -184,4 +175,22 @@ class SocialTransactionSigningNotSupportedException implements Exception {
   @override
   String toString() =>
       'SocialTransactionSigningNotSupportedException: $message';
+}
+
+/// Thrown instead of signing a login challenge that is not a sign-in for this
+/// app and this wallet; see `checkSolanaLoginChallenge`.
+///
+/// A [SigningException], so it surfaces as a signing failure. [reason] names
+/// the rule the challenge broke and never carries key material.
+class LoginChallengeRejectedException extends SigningException {
+  LoginChallengeRejectedException(this.reason)
+    : super(
+        'The sign-in request from the server was refused because $reason. '
+        'Nothing was signed.',
+      );
+
+  final String reason;
+
+  @override
+  String toString() => 'LoginChallengeRejectedException: $message';
 }

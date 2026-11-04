@@ -106,7 +106,7 @@ class _MockDio extends Mock implements Dio {}
 /// dispatched**. Asserting merely that `selectSourceWallet` was called passes
 /// while the flow is broken: the switch nulls `currentAddress` for the whole
 /// `/v0/login` round trip, and only the awaited login closes that window.
-/// Permissive kill-switch config. The entry gates added in Phase 4c read
+/// Permissive kill-switch config. The flow entry gates read
 /// [RemoteConfigService] before dispatching, so it must be in GetIt; nothing
 /// is killed here, which keeps behaviour identical to the pre-kill-switch
 /// baseline these tests were written against.
@@ -178,8 +178,8 @@ void main() {
   /// Wallets `selectSourceWallet` was pointed at, in order.
   late List<String> switches;
 
-  /// When true the next switch fails its `/v0/login` and rethrows — Phase 0's
-  /// contract for an unreachable backend.
+  /// When true the next switch fails its `/v0/login` and rethrows — the
+  /// switch's contract for an unreachable backend.
   late bool switchFails;
 
   /// When set, the switch parks mid-flight (session cleared, login pending)
@@ -316,14 +316,15 @@ void main() {
     when(
       () => sessionManager.sessionAddresses,
     ).thenReturn(const {activeAddress, otherAddress});
+    when(() => sessionManager.sessionWallets).thenReturn(const []);
     when(() => sessionManager.sessionWalletForAddress(any())).thenReturn(null);
     when(
       () => sessionManager.sessionWalletForAddressCaseInsensitive(any()),
     ).thenReturn(null);
     // Reproduces the live switch: the session is cleared synchronously —
     // nulling `currentAddress` — and only re-authenticates as the target once
-    // `/v0/login` returns an async gap later. Phase 0 makes `selectSourceWallet`
-    // await that login, so the address is the target when it RESOLVES. A
+    // `/v0/login` returns an async gap later. `selectSourceWallet` is written
+    // to await that login, so the address is the target when it RESOLVES. A
     // fire-and-forget caller would record `null` at dispatch.
     when(() => sessionManager.selectSourceWallet(any())).thenAnswer((
       invocation,
@@ -335,7 +336,7 @@ void main() {
       if (gate != null) await gate.future;
       await Future<void>.delayed(Duration.zero);
       if (switchFails) {
-        // T0.2 item 2: the selection is rolled back, so the previous wallet is
+        // The selection is rolled back, so the previous wallet is
         // still the signer when the error reaches the caller.
         active = activeAddress;
         throw Exception('login failed');

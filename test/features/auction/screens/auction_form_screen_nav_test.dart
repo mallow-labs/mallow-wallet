@@ -5,11 +5,13 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mallow_api/mallow_api.dart' show MallowApiClient;
 import 'package:mallow_wallet/core/analytics/analytics_service.dart';
 import 'package:mallow_wallet/core/network/solana_rpc_service.dart'
     show SolanaTransactionUnconfirmedException;
 import 'package:mallow_wallet/core/result/app_failure.dart';
 import 'package:mallow_wallet/core/services/preferences_service.dart';
+import 'package:mallow_wallet/core/services/token_price_service.dart';
 import 'package:mallow_wallet/di.dart';
 import 'package:mallow_wallet/features/auction/screens/auction_form_screen.dart';
 import 'package:mallow_wallet/features/auction/services/auction_bloc.dart';
@@ -17,9 +19,15 @@ import 'package:mallow_wallet/features/portfolio/services/portfolio_bloc.dart';
 import 'package:mallow_wallet/features/portfolio/services/token_balance_bloc.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:mallow_wallet/features/sell/services/trade_eligibility.dart';
+import 'package:mallow_wallet/shared/widgets/loading_indicator.dart';
 
 class MockAuctionBloc extends MockBloc<AuctionEvent, AuctionState>
     implements AuctionBloc {}
+
+/// [TokenPriceService] only hits the network in `start()`, which nothing here
+/// calls, so the pricing step's USD estimate stays hidden.
+class _FakeMallowApiClient extends Fake implements MallowApiClient {}
 
 class MockTokenBalanceBloc
     extends MockBloc<TokenBalanceEvent, TokenBalanceState>
@@ -68,6 +76,12 @@ void main() {
       );
     }
 
+    if (!sl.isRegistered<TokenPriceService>()) {
+      sl.registerLazySingleton<TokenPriceService>(
+        () => TokenPriceService(_FakeMallowApiClient()),
+      );
+    }
+
     final initial = reviewState(flow: const TxFlowIdle());
     whenListen(mockBloc, stateController.stream, initialState: initial);
     whenListen(
@@ -87,6 +101,43 @@ void main() {
     if (sl.isRegistered<AuctionBloc>()) sl.unregister<AuctionBloc>();
     if (sl.isRegistered<TokenBalanceBloc>()) sl.unregister<TokenBalanceBloc>();
   });
+
+  testWidgets(
+    'eligibility feedback updates inline and retry keeps the pipeline closed',
+    (tester) async {
+      tester.view.physicalSize = const Size(600, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: AuctionFormScreen(mintAccount: testArtwork.mintAccount),
+        ),
+      );
+      await tester.pumpAndSettle();
+      stateController.add(
+        reviewState(
+          flow: const TxFlowIdle(),
+        ).copyWith(listingEligibilityError: verifyingArtworkEligibility),
+      );
+      await tester.pump();
+      await tester.pump();
+      expect(find.text(verifyingArtworkEligibility), findsOneWidget);
+      expect(find.byType(MallowLoader), findsOneWidget);
+      stateController.add(
+        reviewState(flow: const TxFlowIdle()).copyWith(
+          listingEligibilityError: TradeEligibility.unverified.message,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(TradeEligibility.unverified.message!), findsOneWidget);
+      expect(find.text('Listing failed'), findsNothing);
+      await tester.tap(find.text('Try again'));
+      verify(
+        () => mockBloc.add(const AuctionEvent.retryEligibility()),
+      ).called(1);
+    },
+  );
 
   testWidgets(
     'a TxFlowSuccess → TxFlowSuccess (indexed-ack) transition does not '

@@ -7,6 +7,7 @@ import '../../core/session/session_manager.dart';
 import '../../di.dart';
 import '../theme/mallow_theme.dart';
 import '../utils/chain.dart';
+import 'app_snack_bar.dart';
 import 'confirm_sheet.dart';
 import 'mallow_sheet.dart';
 import 'tappable.dart';
@@ -40,7 +41,7 @@ Future<bool> guardViewOnly(BuildContext context) async {
 enum SendBlocker {
   /// No wallet in the session can sign a transfer on the chain — it is linked
   /// watch-only, or the session holds none there at all. The remedy is
-  /// importing a key, so the prompt routes to [AppRoutes.importWallet].
+  /// importing a key, so the prompt routes to [AppRoutes.addWalletGlobal].
   noSigner,
 
   /// A signable wallet exists, but the **globally selected** one — which
@@ -127,10 +128,70 @@ Future<SendBlocker?> sendBlocker({Chain? chain}) async {
       : SendBlocker.activeWalletViewOnly;
 }
 
+/// Pre-flight guard for a flow that signs a **Solana** transaction with the
+/// active wallet — every marketplace action on a Solana artwork (buy, offer,
+/// bid, raffle tickets, list, cancel, settle, claim).
+///
+/// [guardViewOnly] only asks whether the active wallet can sign, and a Tezos or
+/// Ethereum key can. Solana's executor signs with the global selection
+/// ([WalletInfo.bindsGlobalSigner]), and the request body names the active
+/// address as the buyer/seller. So a session whose only key is on another chain
+/// passed that guard and sent a `tz1…` buyer to a Solana builder, which
+/// rejected it as an invalid buyer.
+///
+///  * active wallet is Solana → [guardViewOnly]'s rule: proceed when it can
+///    sign, otherwise the view-only prompt (switching wallets is the remedy);
+///  * active wallet is on another chain, and the session holds a signable
+///    Solana wallet → re-point the signer to it and proceed;
+///  * no signable Solana wallet in the session → offer to import one.
+///
+/// [action] completes the import prompt's sentence ("Import one to [action].").
+///
+/// Returns `true` when the caller should abort. Always re-check
+/// `context.mounted` after awaiting.
+Future<bool> guardSolanaSigner(
+  BuildContext context, {
+  required String action,
+}) async {
+  final active = await sl<WalletRepository>().getActiveWallet();
+  if (!context.mounted) return true;
+  if (active == null) return false;
+  if (active.chainEnum == Chain.solana) {
+    if (active.canSign) return false;
+    await showViewOnlyPrompt(context);
+    return true;
+  }
+  final session = sl<SessionManager>();
+  final signer = session.sessionWalletForChain(Chain.solana);
+  if (signer == null) {
+    await _promptImportSigner(context, Chain.solana, action: action);
+    return true;
+  }
+  try {
+    await session.selectSourceWallet(signer);
+    return false;
+  } catch (_) {
+    if (context.mounted) {
+      AppSnackBar.show(
+        context,
+        "Couldn't switch to your Solana wallet. Please try again.",
+      );
+    }
+    return true;
+  }
+}
+
 /// The dead end a key would fix: offer the import route rather than the
 /// informational [showViewOnlyPrompt], whose only action is "Done".
-Future<void> _promptImportSigner(BuildContext context, Chain? chain) async {
-  final (title, message) = _noSignerCopy(chain);
+///
+/// [action] finishes the prompt's sentence; it defaults to sending the chain's
+/// assets, the dead end [guardCannotSend] reports.
+Future<void> _promptImportSigner(
+  BuildContext context,
+  Chain? chain, {
+  String? action,
+}) async {
+  final (title, message) = _noSignerCopy(chain, action);
   final go = await showConfirmSheet(
     context,
     title: title,
@@ -138,14 +199,14 @@ Future<void> _promptImportSigner(BuildContext context, Chain? chain) async {
     confirmLabel: 'Import wallet',
   );
   if ((go ?? false) && context.mounted) {
-    await context.push(AppRoutes.importWallet);
+    await context.push(AppRoutes.addWalletGlobal);
   }
 }
 
 /// Prompt copy for [SendBlocker.noSigner]. "Linked watch-only" and "no wallet
 /// on this chain at all" are different dead ends — collapsing them tells a user
 /// who linked a Solana wallet that they don't have one.
-(String, String) _noSignerCopy(Chain? chain) {
+(String, String) _noSignerCopy(Chain? chain, String? action) {
   if (chain == null) {
     return (
       'Watch-only wallet',
@@ -154,6 +215,7 @@ Future<void> _promptImportSigner(BuildContext context, Chain? chain) async {
     );
   }
   final label = chain.label;
+  final doing = action ?? 'send $label assets';
   // `sessionWalletsForChain` includes view-only, so a hit here — given the
   // caller already established there is no *signable* wallet on the chain —
   // means the session holds the address but not its key.
@@ -164,12 +226,12 @@ Future<void> _promptImportSigner(BuildContext context, Chain? chain) async {
       ? (
           'Watch-only wallet',
           'Your $label wallet is watch-only. Import its private key to '
-              'send $label assets.',
+              '$doing.',
         )
       : (
           'No $label wallet',
           'This account has no $label wallet that can sign. '
-              'Import one to send $label assets.',
+              'Import one to $doing.',
         );
 }
 

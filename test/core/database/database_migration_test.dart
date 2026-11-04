@@ -12,6 +12,12 @@ import 'package:mallow_wallet/core/database/database.dart';
 /// bump, forcing everyone through the "Restore wallet" screen. These tests
 /// pin the contract that upgrades from released schemas (>= 17) migrate
 /// stepwise and MUST NOT touch wallet rows.
+/// Undo the v23 step on a database created at the current schema.
+const _dropKeystoneColumns = [
+  'ALTER TABLE accounts DROP COLUMN master_fingerprint;',
+  'ALTER TABLE wallets DROP COLUMN master_fingerprint;',
+];
+
 void main() {
   late Directory tempDir;
   late File dbFile;
@@ -43,12 +49,63 @@ void main() {
         createdAt: 1700000000,
       ),
     );
+    // Every stepwise version below 23 predates the Keystone columns; leaving
+    // them in place would make the v23 step's ADD COLUMN collide.
+    if (version >= 17 && version < 23) {
+      for (final statement in _dropKeystoneColumns) {
+        await db.customStatement(statement);
+      }
+    }
     for (final statement in downgradeStatements) {
       await db.customStatement(statement);
     }
     await db.customStatement('PRAGMA user_version = $version;');
     await db.close();
   }
+
+  test(
+    'upgrade from schema 22 adds the Keystone fingerprint columns',
+    () async {
+      await seedDbAtVersion(22);
+
+      final db = MallowDatabase.forTesting(NativeDatabase(dbFile));
+      addTearDown(db.close);
+
+      final wallets = await db.getAllWallets();
+      expect(wallets, hasLength(1));
+      expect(wallets.single.masterFingerprint, isNull);
+
+      // Both new columns are writable and the account lookup reads its own.
+      await db.upsertAccount(
+        AccountsCompanion.insert(
+          id: 'ks-account',
+          kind: 'keystone',
+          name: 'Account 02',
+          avatarSeed: 'seed',
+          createdAt: 1700000000,
+          derivationIndex: const Value(0),
+          masterFingerprint: const Value(0x12345678),
+        ),
+      );
+      await db.upsertWalletEntry(
+        WalletsCompanion.insert(
+          id: 'ks-wallet',
+          accountId: const Value('ks-account'),
+          address: 'KeystoneAddre55',
+          name: 'Solana',
+          walletType: 'keystone',
+          createdAt: 1700000000,
+          masterFingerprint: const Value(0x12345678),
+        ),
+      );
+      expect((await db.getKeystoneAccount(0x12345678, 0))?.id, 'ks-account');
+      expect(await db.getKeystoneAccount(0x9ABCDEF0, 0), isNull);
+      expect(
+        (await db.getWalletById('ks-wallet'))?.masterFingerprint,
+        0x12345678,
+      );
+    },
+  );
 
   test('upgrade from schema 19 adds pending_evm_transactions only', () async {
     await seedDbAtVersion(
@@ -155,6 +212,9 @@ void main() {
     await seed.customStatement(
       'ALTER TABLE cached_jupiter_token_list DROP COLUMN daily_volume;',
     );
+    for (final statement in _dropKeystoneColumns) {
+      await seed.customStatement(statement);
+    }
     await seed.customStatement('PRAGMA user_version = 21;');
     await seed.close();
 

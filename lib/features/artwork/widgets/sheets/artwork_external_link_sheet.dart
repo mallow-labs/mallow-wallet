@@ -12,8 +12,8 @@ import 'artwork_sheet_frame.dart';
 /// (gumball / airdrop / store / jellybean). Links out to the artwork's web page
 /// until the in-app surface for these flows exists.
 ///
-/// Triggered by `gumball` ∨ `airdrop` ∨ `store` ∨ `jellybean` — see
-/// `docs/artwork_state.md`.
+/// Triggered by `gumball` ∨ `airdrop` ∨ `store` ∨ `jellybean` in
+/// `resolveArtworkActionState`.
 class ArtworkExternalLinkSheet extends StatelessWidget {
   const ArtworkExternalLinkSheet({required this.listingType, super.key});
 

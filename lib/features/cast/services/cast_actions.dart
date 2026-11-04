@@ -1,12 +1,13 @@
 import '../../../core/network/auth_service.dart';
-import '../../../core/network/hardware_verify_controller.dart';
 import '../../../di.dart';
+import '../../artwork/services/active_wallet_verification.dart';
 import '../models/cast_queue.dart';
 import 'cast_bloc.dart';
 
 /// Dispatches [CastEvent.castArtwork] for [item] after the standard
 /// pre-flight hardware check — if the active wallet is a hardware wallet
-/// without a cached signature, the user is shown the verify sheet first
+/// without a cached signature, its device signs one first (Ledger sheet,
+/// Seed Vault approval or Keystone QR exchange)
 /// and casting proceeds only on successful verification.
 Future<void> castArtworkWithVerify(CastQueueItem item) async {
   if (!await _ensureHardwareVerified()) return;
@@ -43,10 +44,12 @@ void addArtworksToCastQueue(List<CastQueueItem> items) {
   sl<CastBloc>().add(CastEvent.addItemsToQueue(items));
 }
 
+/// Signs, not just asks: Seed Vault's and Keystone's verify sheets collect
+/// consent and sign nothing, so treating that sheet's answer as "verified" cast
+/// without a wallet-sig. [ensureActiveWalletVerified] runs each device's whole
+/// handshake from this tap and caches the sig.
 Future<bool> _ensureHardwareVerified() async {
   final auth = sl<AuthService>();
   if (!await auth.currentWalletNeedsHardwareVerification()) return true;
-  final addr = auth.currentAddress;
-  if (addr == null) return false;
-  return sl<HardwareVerifyController>().requestVerification(addr);
+  return await ensureActiveWalletVerified() == null;
 }

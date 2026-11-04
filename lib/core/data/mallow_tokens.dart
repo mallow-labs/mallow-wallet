@@ -193,7 +193,7 @@ const List<MallowToken> _tokens = [
     decimals: 6,
     inputDecimals: 1,
     minListingPrice: 1000000,
-    coinGeckoId: 'jupiter',
+    coinGeckoId: 'jupiter-exchange-solana',
   ),
   MallowToken(
     symbol: 'BONK',

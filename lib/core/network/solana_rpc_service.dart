@@ -10,10 +10,12 @@ import 'package:solana/encoder.dart';
 import 'package:solana/solana.dart';
 
 import '../config/environment.dart';
+import '../crypto/solana_v1_transaction.dart';
 import '../crypto/wallet_manager.dart';
 import '../services/fee_config.dart';
 import '../services/priority_fee_service.dart';
 import '../services/tx_landed_slots.dart';
+import 'solana_pay_tags.dart';
 
 /// Result of a transaction simulation.
 class SimulationResult {
@@ -199,6 +201,25 @@ class SolanaRpcService {
     return result.value;
   }
 
+  /// Batched pre-simulation balances, at the simulation's commitment.
+  /// Missing accounts have zero lamports; the empty data slice avoids loading
+  /// token-account contents when only their rent funding matters.
+  Future<Map<String, int>> getAccountLamportsForAddresses(
+    List<String> addresses,
+  ) async {
+    if (addresses.isEmpty) return const {};
+    final result = await _rpcClient.getMultipleAccounts(
+      addresses,
+      commitment: Commitment.confirmed,
+      encoding: Encoding.base64,
+      dataSlice: const DataSlice(offset: 0, length: 0),
+    );
+    return {
+      for (var i = 0; i < addresses.length && i < result.value.length; i++)
+        addresses[i]: result.value[i]?.lamports ?? 0,
+    };
+  }
+
   /// Get SOL balance formatted as a double.
   ///
   /// Returns balance in SOL (e.g., 1.5 SOL).
@@ -311,6 +332,32 @@ class SolanaRpcService {
     }
   }
 
+  /// Send a signed v1 transaction. [sendTransaction] takes a `SignedTx`, which
+  /// cannot hold one: the `solana` package decodes only legacy and v0.
+  Future<String> sendWireTransaction(SolanaV1Transaction signedTx) async {
+    try {
+      return await _rpcClient.sendTransaction(
+        base64Encode(signedTx.toBytes()),
+        preflightCommitment: Commitment.confirmed,
+      );
+    } catch (e) {
+      final inspectUrl = _inspectorUrl(signedTx.messageBytes);
+      if (inspectUrl != null) {
+        _debugPrintInspectUrl(
+          '[RPC] sendWireTransaction preflight failed — inspect:',
+          inspectUrl,
+        );
+      }
+      rethrow;
+    }
+  }
+
+  /// The signed message inside [wire], whichever version it is.
+  static List<int> _messageBytesOf(List<int> wire) =>
+      SolanaV1Transaction.isV1Wire(wire)
+      ? SolanaV1Transaction.fromBytes(wire).messageBytes
+      : SignedTx.fromBytes(wire).compiledMessage.toByteArray().toList();
+
   /// Explorer tx-inspector link for the serialized (signature-stripped)
   /// [messageBytes], so a failed simulation's decoded instructions/accounts
   /// can be opened in the browser. Returns null outside debug builds — the
@@ -377,19 +424,26 @@ class SolanaRpcService {
   /// fresh probe here would re-price the transaction after the amount was
   /// frozen — leaving the account short of the new fee, or holding dust the
   /// runtime then rejects as rent-paying.
+  ///
+  /// [tags] carries a Solana Pay request's references and memo; see
+  /// [SolanaPayTags.apply]. A [pinnedBudget] must have been planned with the
+  /// same tags, as the memo adds compute.
   Future<String> buildSolTransferTx({
     required String destination,
     required int lamports,
     ComputeBudgetPlan? pinnedBudget,
+    SolanaPayTags tags = const SolanaPayTags(),
   }) async {
     final sourceAddress = await _walletManager.getAddress();
     final sourceKey = Ed25519HDPublicKey.fromBase58(sourceAddress);
     final destinationKey = Ed25519HDPublicKey.fromBase58(destination);
 
-    final instruction = SystemInstruction.transfer(
-      fundingAccount: sourceKey,
-      recipientAccount: destinationKey,
-      lamports: lamports,
+    final instructions = tags.apply(
+      SystemInstruction.transfer(
+        fundingAccount: sourceKey,
+        recipientAccount: destinationKey,
+        lamports: lamports,
+      ),
     );
 
     // A send with no compute-budget prefix bids the network's floor priority
@@ -397,10 +451,10 @@ class SolanaRpcService {
     // webapp puts these instructions on every transaction it builds; so do we.
     final prefix =
         pinnedBudget?.instructions ??
-        await buildComputeBudgetPrefix(instructions: [instruction]);
+        await buildComputeBudgetPrefix(instructions: instructions);
 
     return buildUnsignedTxBase64(
-      Message(instructions: [...prefix, instruction]),
+      Message(instructions: [...prefix, ...instructions]),
     );
   }
 
@@ -421,10 +475,14 @@ class SolanaRpcService {
   /// Throws when the wallet holds no account for [tokenMint] — there is nothing
   /// to transfer, and a transfer from a non-existent source would otherwise
   /// fail on-chain with the same opaque error after signing.
+  ///
+  /// [tags] carries a Solana Pay request's references and memo; the transfer
+  /// stays the last instruction, as the request's merchant expects.
   Future<String> buildSplTransferTx({
     required String destination,
     required String tokenMint,
     required int amount,
+    SolanaPayTags tags = const SolanaPayTags(),
   }) async {
     final sourceAddress = await _walletManager.getAddress();
     final sourceKey = Ed25519HDPublicKey.fromBase58(sourceAddress);
@@ -467,13 +525,15 @@ class SolanaRpcService {
       );
     }
 
-    instructions.add(
-      TokenInstruction.transfer(
-        source: sourceAta,
-        destination: destinationAta,
-        owner: sourceKey,
-        amount: amount,
-        tokenProgram: tokenProgramType,
+    instructions.addAll(
+      tags.apply(
+        TokenInstruction.transfer(
+          source: sourceAta,
+          destination: destinationAta,
+          owner: sourceKey,
+          amount: amount,
+          tokenProgram: tokenProgramType,
+        ),
       ),
     );
 
@@ -933,16 +993,17 @@ class SolanaRpcService {
   Future<SolTransferFeePlan> planSolTransferFee({
     required String destination,
     required int provisionalLamports,
+    SolanaPayTags tags = const SolanaPayTags(),
   }) async {
     final sourceAddress = await _walletManager.getAddress();
     final budget = await planComputeBudget(
-      instructions: [
+      instructions: tags.apply(
         SystemInstruction.transfer(
           fundingAccount: Ed25519HDPublicKey.fromBase58(sourceAddress),
           recipientAccount: Ed25519HDPublicKey.fromBase58(destination),
           lamports: provisionalLamports,
         ),
-      ],
+      ),
       // The Max amount is derived from this plan's fee, so the fee must be the
       // one the runtime charges, not one it re-derives from a default limit.
       alwaysSetUnitLimit: true,
@@ -1206,7 +1267,17 @@ class SolanaRpcService {
   /// blockhash lifetime instead of failing immediately. Parsing `err` untyped
   /// keeps every shape decodable and hands it to [_parseSimulationError], which
   /// already accepts both. RPC/transport faults still throw, as before.
-  Future<SolanaTxStatus?> transactionStatus(String signature) async {
+  Future<SolanaTxStatus?> transactionStatus(String signature) =>
+      _transactionStatus(signature, searchTransactionHistory: false);
+
+  /// Searches archival history when resolving a purchase from an earlier run.
+  Future<SolanaTxStatus?> transactionStatusWithHistory(String signature) =>
+      _transactionStatus(signature, searchTransactionHistory: true);
+
+  Future<SolanaTxStatus?> _transactionStatus(
+    String signature, {
+    required bool searchTransactionHistory,
+  }) async {
     final response = await Dio().post<Map<String, dynamic>>(
       _rpcUrl,
       options: Options(
@@ -1222,7 +1293,7 @@ class SolanaRpcService {
         'method': 'getSignatureStatuses',
         'params': [
           [signature],
-          {'searchTransactionHistory': false},
+          {'searchTransactionHistory': searchTransactionHistory},
         ],
       },
     );
@@ -1232,7 +1303,15 @@ class SolanaRpcService {
       throw Exception('getSignatureStatuses failed: $rpcError');
     }
     final value = (body?['result'] as Map<String, dynamic>?)?['value'];
+    if (searchTransactionHistory && (value is! List || value.length != 1)) {
+      throw const FormatException('Invalid transaction status response');
+    }
     final status = (value is List && value.isNotEmpty ? value.first : null);
+    if (searchTransactionHistory &&
+        status != null &&
+        status is! Map<String, dynamic>) {
+      throw const FormatException('Invalid transaction status entry');
+    }
     if (status is! Map<String, dynamic>) return null;
 
     final commitment = status['confirmationStatus'];
@@ -1244,6 +1323,9 @@ class SolanaRpcService {
     }
     return SolanaTxStatus(landed: landed, err: err);
   }
+
+  Future<int> finalizedBlockHeight() =>
+      _rpcClient.getBlockHeight(commitment: Commitment.finalized);
 
   /// True when [signature] landed *and executed successfully* at `confirmed`
   /// commitment or better. A landed tx whose runtime returned an error is not
@@ -1273,10 +1355,13 @@ class SolanaRpcService {
   /// error swallowed: the expected failures here are "already processed" (the
   /// tx we are chasing landed) and transient 429s, neither of which is a
   /// transaction failure.
-  Future<void> rebroadcastTransaction(SignedTx signedTx) async {
+  Future<void> rebroadcastTransaction(SignedTx signedTx) =>
+      _rebroadcastEncoded(signedTx.encode());
+
+  Future<void> _rebroadcastEncoded(String encoded) async {
     try {
       await _rpcClient.sendTransaction(
-        signedTx.encode(),
+        encoded,
         skipPreflight: true,
         preflightCommitment: Commitment.confirmed,
       );
@@ -1324,8 +1409,43 @@ class SolanaRpcService {
     Duration pollInterval = const Duration(seconds: 2),
     Duration expiryProbeAfter = const Duration(seconds: 15),
     Duration maxWait = const Duration(seconds: 90),
+  }) => _awaitConfirmation(
+    signature,
+    blockhash: rebroadcast.compiledMessage.recentBlockhash,
+    rebroadcast: () => rebroadcastTransaction(rebroadcast),
+    pollInterval: pollInterval,
+    expiryProbeAfter: expiryProbeAfter,
+    maxWait: maxWait,
+  );
+
+  /// [awaitConfirmationOrThrow] for a v1 transaction, re-broadcasting its wire
+  /// bytes.
+  Future<void> awaitWireConfirmationOrThrow(
+    String signature, {
+    required SolanaV1Transaction rebroadcast,
+    Duration pollInterval = const Duration(seconds: 2),
+    Duration expiryProbeAfter = const Duration(seconds: 15),
+    Duration maxWait = const Duration(seconds: 90),
+  }) {
+    final encoded = base64Encode(rebroadcast.toBytes());
+    return _awaitConfirmation(
+      signature,
+      blockhash: rebroadcast.recentBlockhash,
+      rebroadcast: () => _rebroadcastEncoded(encoded),
+      pollInterval: pollInterval,
+      expiryProbeAfter: expiryProbeAfter,
+      maxWait: maxWait,
+    );
+  }
+
+  Future<void> _awaitConfirmation(
+    String signature, {
+    required String blockhash,
+    required Future<void> Function() rebroadcast,
+    required Duration pollInterval,
+    required Duration expiryProbeAfter,
+    required Duration maxWait,
   }) async {
-    final blockhash = rebroadcast.compiledMessage.recentBlockhash;
     final stopwatch = Stopwatch()..start();
     // Polls to skip before the next expiry probe. Zero on the first eligible
     // poll so a caller that starts probing immediately still probes at once.
@@ -1369,7 +1489,7 @@ class SolanaRpcService {
           pollsUntilProbe = _expiryProbeEveryNPolls - 1;
         }
       }
-      await rebroadcastTransaction(rebroadcast);
+      await rebroadcast();
     }
 
     throw SolanaTransactionUnconfirmedException(signature);
@@ -1473,11 +1593,7 @@ class SolanaRpcService {
     // logged on the failure paths below. Null outside debug builds — see
     // [_inspectorUrl].
     final inspectUrl = kDebugMode
-        ? _inspectorUrl(
-            SignedTx.fromBytes(
-              base64Decode(encodedTransaction),
-            ).compiledMessage.toByteArray().toList(),
-          )
+        ? _inspectorUrl(_messageBytesOf(base64Decode(encodedTransaction)))
         : null;
     Future<TransactionStatusResult> simulate(List<String> addresses) =>
         _rpcClient.simulateTransaction(

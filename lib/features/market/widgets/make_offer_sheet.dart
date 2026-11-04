@@ -2,9 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../core/data/mallow_tokens.dart';
-import '../../../core/services/token_price_service.dart';
 import '../../../core/utils/price_formatter.dart';
-import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/utils/token_image_utils.dart';
 import '../../../shared/widgets/artwork_subject_header.dart';
@@ -12,6 +10,7 @@ import '../../../shared/widgets/mallow_button.dart';
 import '../../../shared/widgets/mallow_pill_field.dart';
 import '../../../shared/widgets/mallow_sheet.dart';
 import '../../../shared/widgets/sheet_drag_handle.dart';
+import '../../../shared/widgets/usd_estimate.dart';
 import '../models/market_price.dart';
 
 /// Bottom sheet for entering an offer amount: the
@@ -130,12 +129,16 @@ class _MakeOfferSheetState extends State<MakeOfferSheet> {
   @override
   Widget build(BuildContext context) {
     final colors = context.mallowColors;
-    final priceService = sl<TokenPriceService>();
     final best = widget.currentBestOffer;
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
       child: Container(
-        padding: const EdgeInsets.all(MallowTheme.spacing20),
+        padding: const EdgeInsets.fromLTRB(
+          MallowTheme.spacing20,
+          0,
+          MallowTheme.spacing20,
+          MallowTheme.spacing20,
+        ),
         decoration: BoxDecoration(
           color: colors.bgSurface,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
@@ -187,24 +190,11 @@ class _MakeOfferSheetState extends State<MakeOfferSheet> {
                 size: 20,
                 enlargeChainGlyph: true,
               ),
-              suffix: ValueListenableBuilder<Map<String, double>>(
-                valueListenable: priceService.prices,
-                builder: (context, _, _) {
-                  final amount = _displayAmount;
-                  final usd = amount == null
-                      ? null
-                      : priceService.usdValueOfRaw(
-                          _token.displayToRaw(amount),
-                          _token.mint,
-                        );
-                  if (usd == null) return const SizedBox.shrink();
-                  return Text(
-                    '~\$${usd.toStringAsFixed(2)}',
-                    style: MallowTheme.uiCaption.copyWith(
-                      color: colors.textSecondary,
-                    ),
-                  );
-                },
+              suffix: UsdEstimate(
+                rawAmount: _displayAmount == null
+                    ? null
+                    : _token.displayToRaw(_displayAmount!),
+                mint: _token.mint,
               ),
             ),
             if (best != null) ...[

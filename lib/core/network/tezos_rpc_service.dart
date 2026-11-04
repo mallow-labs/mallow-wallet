@@ -385,6 +385,53 @@ class TezosRpcService {
     return false;
   }
 
+  /// Inclusion alone does not mean success: a manager operation can land with
+  /// failed or backtracked contents. Browser receipts inspect every result.
+  Future<({bool applied, int? level})?> getOperationInclusion(
+    String opHash, {
+    int lookback = 3,
+  }) async {
+    for (var i = 0; i < lookback; i++) {
+      final block = i == 0 ? 'head' : 'head~$i';
+      final hashes = await rpcGet(
+        '/chains/main/blocks/$block/operation_hashes',
+      );
+      if (hashes is! List ||
+          !hashes.any((pass) => pass is List && pass.contains(opHash)))
+        continue;
+      final operations = await rpcGet(
+        '/chains/main/blocks/$block/operations/3',
+      );
+      if (operations is! List) continue;
+      for (final operation in operations) {
+        if (operation is! Map || operation['hash'] != opHash) continue;
+        final contents = operation['contents'];
+        if (contents is! List || contents.isEmpty) return null;
+        var applied = true;
+        for (final content in contents) {
+          final metadata = content is Map ? content['metadata'] : null;
+          final result = metadata is Map ? metadata['operation_result'] : null;
+          if (result is! Map || result['status'] is! String) return null;
+          if (result['status'] != 'applied') applied = false;
+          final internals = metadata['internal_operation_results'];
+          if (internals is List) {
+            for (final internal in internals) {
+              final outcome = internal is Map ? internal['result'] : null;
+              if (outcome is! Map || outcome['status'] is! String) return null;
+              if (outcome['status'] != 'applied') applied = false;
+            }
+          }
+        }
+        final header = await rpcGet('/chains/main/blocks/$block/header');
+        return (
+          applied: applied,
+          level: header is Map ? header['level'] as int? : null,
+        );
+      }
+    }
+    return null;
+  }
+
   /// Poll until [opHash] is included in a block or [timeout] elapses. Returns
   /// true on inclusion, false on timeout.
   ///

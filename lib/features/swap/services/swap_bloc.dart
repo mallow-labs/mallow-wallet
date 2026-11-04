@@ -9,18 +9,23 @@ import 'package:injectable/injectable.dart';
 import 'package:jupiter_aggregator/jupiter_aggregator.dart';
 import 'package:solana/encoder.dart';
 
+import '../../../core/analytics/analytics_events.dart';
+import '../../../core/analytics/transaction_ledger.dart';
 import '../../../core/config/remote_config.dart';
 import '../../../core/crypto/wallet_manager.dart';
 import '../../../core/data/mallow_tokens.dart' as mallow_tokens;
+import '../../../core/models/account.dart' show WalletType;
 import '../../../core/result/app_failure.dart';
 import '../../../core/result/result.dart';
 import '../../../core/security/transaction_auth_gate.dart';
 import '../../../core/services/preferences_service.dart';
 import '../../../core/services/priority_fee_service.dart';
 import '../../../core/services/token_price_service.dart';
+import '../../../core/services/transaction_executor.dart';
 import '../../../core/services/transaction_flow_state.dart';
 import '../../../core/services/transaction_pipeline.dart';
 import '../../../core/utils/token_amount.dart';
+import '../../../shared/utils/chain.dart';
 import '../../portfolio/models/token_balance.dart';
 import '../../portfolio/services/balance_optimistic_updater.dart';
 import '../data/swap_repository.dart';
@@ -64,17 +69,35 @@ sealed class SwapEvent with _$SwapEvent {
   }) = SwapIndexedAck;
 }
 
-/// Payload carried by [TxFlowReady] — the Ultra order and the derived
-/// display data the sheet needs.
+/// Payload carried by [TxFlowReady] — the quote for one of the two routes and
+/// the derived display data the sheet needs.
+///
+/// Exactly one of [order] and [classicQuote] is set. Most signers get an Ultra
+/// [order]; a Keystone gets a [classicQuote], because an Ultra order expires
+/// long before a QR round trip comes back (see
+/// [SwapRepository.getClassicQuote]).
 class SwapQuoteData extends Equatable {
   const SwapQuoteData({
-    required this.order,
     required this.outputAmount,
     required this.rate,
     required this.taker,
-  });
+    this.order,
+    this.classicQuote,
+    double? inUsdValue,
+    double? outUsdValue,
+  }) : assert((order == null) != (classicQuote == null), 'exactly one route'),
+       _inUsdValue = inUsdValue,
+       _outUsdValue = outUsdValue;
 
-  final UltraOrderResponseDto order;
+  /// The Ultra order — Jupiter compiled the transaction and lands it.
+  final UltraOrderResponseDto? order;
+
+  /// The classic quote — the app builds, signs and broadcasts the swap
+  /// itself through [TransactionExecutor].
+  final ClassicSwapQuote? classicQuote;
+
+  final double? _inUsdValue;
+  final double? _outUsdValue;
 
   /// Buy-side amount in display units.
   final double outputAmount;
@@ -87,11 +110,28 @@ class SwapQuoteData extends Equatable {
   /// be signed by another (wallet-switching-rollout).
   final String taker;
 
-  /// True when Jupiter returned a signable transaction for this order.
-  bool get canExecute => (order.transaction ?? '').isNotEmpty;
+  /// USD value of the sell side, when known.
+  double? get inUsdValue => _inUsdValue ?? order?.inUsdValue?.toDouble();
+
+  /// USD value of the buy side, when known.
+  double? get outUsdValue => _outUsdValue ?? order?.outUsdValue?.toDouble();
+
+  /// True when the quote can be executed: an Ultra order that came back with
+  /// a signable transaction, or any classic quote (its transaction is built
+  /// at execute time).
+  bool get canExecute =>
+      classicQuote != null || (order?.transaction ?? '').isNotEmpty;
 
   @override
-  List<Object?> get props => [order, outputAmount, rate, taker];
+  List<Object?> get props => [
+    order,
+    classicQuote,
+    outputAmount,
+    rate,
+    taker,
+    _inUsdValue,
+    _outUsdValue,
+  ];
 }
 
 /// Payload carried by [TxFlowSuccess] — what the success snackbar needs.
@@ -214,6 +254,7 @@ class SwapBloc extends Bloc<SwapEvent, SwapState> {
     this._priceService,
     this._preferences,
     this._priorityFee,
+    this._executor,
   ) : super(
         SwapState(
           slippageBps: _preferences.swapSlippageBps,
@@ -239,6 +280,7 @@ class SwapBloc extends Bloc<SwapEvent, SwapState> {
   final TokenPriceService _priceService;
   final PreferencesService _preferences;
   final PriorityFeeService _priorityFee;
+  final TransactionExecutor _executor;
 
   /// Incremented on every funding-wallet switch. An order request captures the
   /// epoch it started under, so a `getOrder` that was already in flight for the
@@ -391,6 +433,15 @@ class SwapBloc extends Bloc<SwapEvent, SwapState> {
     final epoch = _sourceEpoch;
     final result = await Result.guard(() async {
       final taker = await _walletManager.getAddress();
+      if (await _walletManager.walletTypeOf(taker) == WalletType.keystone) {
+        final classic = await _repository.getClassicQuote(
+          inputMint: sellToken.mint,
+          outputMint: buyToken.mint,
+          amount: rawAmount,
+          slippageBps: current.slippageBps,
+        );
+        return (taker: taker, order: null, classic: classic);
+      }
       final order = await _repository.getOrder(
         inputMint: sellToken.mint,
         outputMint: buyToken.mint,
@@ -399,7 +450,7 @@ class SwapBloc extends Bloc<SwapEvent, SwapState> {
         slippageBps: current.slippageBps,
         priorityFeeLamports: current.priorityFeeLamports,
       );
-      return (taker: taker, order: order);
+      return (taker: taker, order: order, classic: null);
     });
 
     // The form may have changed (or the user committed to the swap, or the
@@ -420,20 +471,33 @@ class SwapBloc extends Bloc<SwapEvent, SwapState> {
     switch (result) {
       case ResultSuccess(:final value):
         final inputAmount = double.tryParse(current.amount) ?? 0;
+        final classic = value.classic;
+        final rawOut = BigInt.parse(
+          classic?.quote.outAmount ?? value.order!.outAmount,
+        );
         final outputAmount = double.parse(
-          TokenAmount.formatTokenAmount(
-            BigInt.parse(value.order.outAmount),
-            buyToken.decimals,
-          ),
+          TokenAmount.formatTokenAmount(rawOut, buyToken.decimals),
         );
         emit(
           state.copyWith(
             flow: TxFlowReady(
               SwapQuoteData(
                 order: value.order,
+                classicQuote: classic,
                 outputAmount: outputAmount,
                 rate: inputAmount > 0 ? outputAmount / inputAmount : 0,
                 taker: value.taker,
+                // The classic quote prices only the sell side (its
+                // `swapUsdValue`); the buy side comes from the price cache.
+                inUsdValue: classic == null
+                    ? null
+                    : double.tryParse('${classic.quote.raw['swapUsdValue']}'),
+                outUsdValue: classic == null
+                    ? null
+                    : _priceService.usdValueOfRaw(
+                        rawOut.toInt(),
+                        buyToken.mint,
+                      ),
               ),
             ),
           ),
@@ -457,29 +521,11 @@ class SwapBloc extends Bloc<SwapEvent, SwapState> {
     final buyToken = current.buyToken;
     if (sellToken == null || buyToken == null) return;
 
-    final unsignedBase64 = quoteData.order.transaction;
-    if (unsignedBase64 == null || unsignedBase64.isEmpty) {
-      emit(
-        current.copyWith(
-          flow: TxFlowFailure(
-            AppFailure.validation(
-              quoteData.order.errorMessage ??
-                  quoteData.order.error ??
-                  'Unable to build swap transaction',
-            ),
-          ),
-        ),
-      );
-      return;
-    }
-
-    emit(current.copyWith(flow: const TxFlowSigning()));
-
-    // USD outflow for the step-up auth gate. Jupiter's order carries it;
-    // fall back to the price cache, and let null mean "unknown → require
-    // auth" (fail-closed).
+    // USD outflow for the step-up auth gate. The quote carries it; fall back
+    // to the price cache, and let null mean "unknown → require auth"
+    // (fail-closed).
     final usdOutflow =
-        quoteData.order.inUsdValue?.toDouble() ??
+        quoteData.inUsdValue ??
         _priceService.usdValueOfRaw(
           TokenAmount.toInt(
             TokenAmount.parseTokenAmount(current.amount, sellToken.decimals),
@@ -487,50 +533,43 @@ class SwapBloc extends Bloc<SwapEvent, SwapState> {
           sellToken.mint,
         );
 
-    // Sign locally, then hand the signed tx back to Jupiter's /execute,
-    // which broadcasts and confirms it. The compiled v0 transaction is
-    // preserved verbatim (blockhash, ALTs, any RFQ maker signature) — the
-    // auto-refresh keeps the order at most a few seconds old, and Ultra
-    // owns transaction landing, so no client-side blockhash rewrite or
-    // RPC broadcast happens here.
-    final result = await Result.guard(() async {
-      // Last line of defence against a stale quote: the order was compiled for
-      // `quoteData.taker`, but the signature comes from whichever wallet is
-      // active now. If a switch landed between the quote and this tap, refuse
-      // rather than sign someone else's transaction.
-      final signer = await _walletManager.getAddress();
-      if (signer != quoteData.taker) {
-        throw const AppFailure.validation(
-          'Wallet changed — refresh the quote before swapping',
+    final classicQuote = quoteData.classicQuote;
+    final order = quoteData.order;
+    final Result<String, AppFailure> result;
+    if (classicQuote != null) {
+      emit(current.copyWith(flow: const TxFlowSigning()));
+      result = await _executeClassic(
+        quote: classicQuote,
+        taker: quoteData.taker,
+        usdOutflow: usdOutflow,
+        current: current,
+        emit: emit,
+      );
+    } else {
+      final unsignedBase64 = order?.transaction;
+      if (order == null || unsignedBase64 == null || unsignedBase64.isEmpty) {
+        emit(
+          current.copyWith(
+            flow: TxFlowFailure(
+              AppFailure.validation(
+                order?.errorMessage ??
+                    order?.error ??
+                    'Unable to build swap transaction',
+              ),
+            ),
+          ),
         );
+        return;
       }
-      final outcome = await _authGate.authorize(
-        usdValue: usdOutflow,
-        flow: const FlowKey.solana(AppFlow.tokenSwap),
+      emit(current.copyWith(flow: const TxFlowSigning()));
+      result = await _executeUltra(
+        order: order,
+        unsignedBase64: unsignedBase64,
+        taker: quoteData.taker,
+        usdOutflow: usdOutflow,
+        emit: emit,
       );
-      final disabledMessage = outcome.disabledMessage;
-      if (disabledMessage != null) {
-        // A killed cell is NOT a user cancel: throwing the cancel type here
-        // would land in the sheet's silent-cancel branch and swallow the
-        // operator's message.
-        throw TransactionFlowDisabledException(disabledMessage);
-      }
-      if (outcome != TransactionAuthOutcome.allowed) {
-        throw TransactionAuthCancelledException(outcome);
-      }
-      final signed = await _walletManager.signCompiledTx(
-        unsignedTx: SignedTx.fromBytes(base64Decode(unsignedBase64)),
-      );
-      if (!isClosed) emit(state.copyWith(flow: const TxFlowBroadcasting()));
-      final response = await _repository.executeOrder(
-        signedTransaction: signed.encode(),
-        requestId: quoteData.order.requestId,
-      );
-      if (!response.isSuccess) {
-        throw AppFailure.network(response.error ?? 'Swap was not confirmed');
-      }
-      return response.signature ?? '';
-    });
+    }
 
     if (isClosed) return;
 
@@ -565,6 +604,129 @@ class SwapBloc extends Bloc<SwapEvent, SwapState> {
           ),
         );
     }
+  }
+
+  /// Ultra route: sign Jupiter's compiled order verbatim and hand it back to
+  /// `/execute`, which lands it.
+  Future<Result<String, AppFailure>> _executeUltra({
+    required UltraOrderResponseDto order,
+    required String unsignedBase64,
+    required String taker,
+    required double? usdOutflow,
+    required Emitter<SwapState> emit,
+  }) async {
+    // Sign locally, then hand the signed tx back to Jupiter's /execute,
+    // which broadcasts and confirms it. The compiled v0 transaction is
+    // preserved verbatim (blockhash, ALTs, any RFQ maker signature) — the
+    // auto-refresh keeps the order at most a few seconds old, and Ultra
+    // owns transaction landing, so no client-side blockhash rewrite or
+    // RPC broadcast happens here.
+    return Result.guard(() async {
+      // Last line of defence against a stale quote: the order was compiled for
+      // `taker`, but the signature comes from whichever wallet is
+      // active now. If a switch landed between the quote and this tap, refuse
+      // rather than sign someone else's transaction.
+      final signer = await _walletManager.getAddress();
+      if (signer != taker) {
+        throw const AppFailure.validation(
+          'Wallet changed — refresh the quote before swapping',
+        );
+      }
+      // An Ultra order would expire during a Keystone's QR exchange, after
+      // the user approved it on the device. Quotes for a Keystone take the
+      // classic route, so an Ultra order reaching here for one is a routing
+      // bug — refuse before the user approves something that cannot land.
+      if (await _walletManager.walletTypeOf(signer) == WalletType.keystone) {
+        throw const AppFailure.validation(
+          'Refresh the quote before swapping from a Keystone',
+        );
+      }
+      final outcome = await _authGate.authorize(
+        usdValue: usdOutflow,
+        flow: const FlowKey.solana(AppFlow.tokenSwap),
+      );
+      final disabledMessage = outcome.disabledMessage;
+      if (disabledMessage != null) {
+        // A killed cell is NOT a user cancel: throwing the cancel type here
+        // would land in the sheet's silent-cancel branch and swallow the
+        // operator's message.
+        throw TransactionFlowDisabledException(disabledMessage);
+      }
+      if (outcome != TransactionAuthOutcome.allowed) {
+        throw TransactionAuthCancelledException(outcome);
+      }
+      final signed = await _walletManager.signCompiledTx(
+        unsignedTx: SignedTx.fromBytes(base64Decode(unsignedBase64)),
+      );
+      if (!isClosed) emit(state.copyWith(flow: const TxFlowBroadcasting()));
+      final response = await _repository.executeOrder(
+        signedTransaction: signed.encode(),
+        requestId: order.requestId,
+      );
+      if (!response.isSuccess) {
+        throw AppFailure.network(response.error ?? 'Swap was not confirmed');
+      }
+      final signature = response.signature ?? '';
+      // Jupiter lands this one, so the executor never sees it.
+      recordSubmittedTransaction(
+        chain: Chain.solana,
+        flow: AppFlow.tokenSwap,
+        signature: signature,
+        walletAddress: () => signer,
+        confirmation: TxConfirmation.confirmed,
+      );
+      return signature;
+    });
+  }
+
+  /// Classic route: have Jupiter compile the swap for [taker], then sign,
+  /// broadcast and confirm it through [TransactionExecutor] — the shared path
+  /// that refreshes the blockhash before signing and, when a Keystone's
+  /// signature comes back after it expired, re-asks for one on a fresh
+  /// blockhash rather than failing.
+  Future<Result<String, AppFailure>> _executeClassic({
+    required ClassicSwapQuote quote,
+    required String taker,
+    required double? usdOutflow,
+    required SwapState current,
+    required Emitter<SwapState> emit,
+  }) async {
+    final built = await Result.guard(() async {
+      // Same stale-quote defence as the Ultra route: the transaction is
+      // compiled around the taker's accounts.
+      final signer = await _walletManager.getAddress();
+      if (signer != taker) {
+        throw const AppFailure.validation(
+          'Wallet changed — refresh the quote before swapping',
+        );
+      }
+      return _repository.buildClassicSwapTx(
+        quote: quote,
+        taker: taker,
+        slippageBps: current.slippageBps,
+        priorityFeeLamports: current.priorityFeeLamports,
+      );
+    });
+    final String tx;
+    switch (built) {
+      case ResultSuccess(:final value):
+        tx = value;
+      case ResultFailure():
+        return built;
+    }
+    return _executor.execute(
+      txsBase64: [tx],
+      usdValue: usdOutflow,
+      flow: const FlowKey.solana(AppFlow.tokenSwap),
+      rpcOverride: _repository.rpcService,
+      // Only a Keystone takes this route; there is no Ledger state to follow.
+      useLedger: false,
+      onStage: (event) {
+        if (event.stage == ExecutorStage.broadcasting && !isClosed) {
+          emit(state.copyWith(flow: const TxFlowBroadcasting()));
+        }
+      },
+    );
   }
 
   /// Correct the local balances straight from the confirmed swap's own

@@ -6,10 +6,14 @@ import 'package:mallow_wallet/core/data/mallow_tokens.dart';
 import 'package:mallow_wallet/core/services/token_price_service.dart';
 import 'package:mallow_wallet/di.dart';
 import 'package:mallow_wallet/features/market/widgets/place_bid_sheet.dart';
+import 'package:mallow_wallet/features/market/models/market_price.dart';
 import 'package:mallow_wallet/features/portfolio/models/token_balance.dart';
 import 'package:mallow_wallet/features/portfolio/services/token_balance_bloc.dart';
 import 'package:mallow_wallet/shared/widgets/artwork_sheet_image.dart';
 import 'package:mallow_wallet/shared/widgets/mallow_button.dart';
+import 'package:mallow_wallet/shared/theme/mallow_theme.dart';
+import 'package:mallow_wallet/shared/widgets/mallow_sheet.dart';
+import 'package:mallow_wallet/shared/widgets/sheet_drag_handle.dart';
 import 'package:mocktail/mocktail.dart';
 
 /// Fake client — [TokenPriceService] only hits the network in `start()`, which
@@ -88,6 +92,147 @@ void main() {
 
   VoidCallback? nextOnPressed(WidgetTester tester) =>
       tester.widget<MallowButton>(find.byType(MallowButton)).onPressed;
+
+  for (final screen in [const Size(400, 890), const Size(360, 640)]) {
+    testWidgets('fits above the keyboard on a $screen screen', (tester) async {
+      tester.view
+        ..physicalSize = screen
+        ..devicePixelRatio = 1
+        ..viewPadding = const FakeViewPadding(top: 24, bottom: 24);
+      addTearDown(tester.view.reset);
+      MarketPrice? submitted;
+      // Advance the route, resize and tap guard without waiting for the
+      // artwork loading shimmer to stop animating.
+      Future<void> pumpSheetLayout() async {
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+        await tester.pump(const Duration(seconds: 1));
+      }
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: MallowTheme.lightTheme,
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => showMallowSheet<void>(
+                  context: context,
+                  isScrollControlled: true,
+                  builder: (_) => SheetStepSwitcher(
+                    child: PlaceBidSheet(
+                      artworkTitle: 'Mini Toad #07',
+                      mintAccount: 'mint',
+                      artworkImageUrl: 'https://example.com/artwork.png',
+                      artistUsername: 'rahal_art',
+                      minBidRaw: 130000000,
+                      currentHighestBid: const MarketPrice(
+                        rawAmount: 120000000,
+                        currencyMint: solMint,
+                      ),
+                      auction: AuctionMetadata(
+                        startsAt: DateTime.now().subtract(
+                          const Duration(hours: 1),
+                        ),
+                        endsAt: DateTime.now().add(const Duration(hours: 1)),
+                        timeExtPeriod: 900,
+                        bidMint: solMint,
+                      ),
+                      tokenBalanceBloc: balanceBloc,
+                      onNext: (price) => submitted = price,
+                    ),
+                  ),
+                ),
+                child: const Text('Open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open'));
+      await pumpSheetLayout();
+      expect(tester.takeException(), isNull);
+
+      double scrollExtent() => tester
+          .state<ScrollableState>(
+            find
+                .descendant(
+                  of: find.byType(SingleChildScrollView),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          )
+          .position
+          .maxScrollExtent;
+      expect(scrollExtent(), 0, reason: 'the sheet grows before it scrolls');
+
+      double previewHeight() => tester
+          .widget<ArtworkSheetImage>(find.byType(ArtworkSheetImage))
+          .height;
+      expect(previewHeight(), 74);
+
+      // Leave 12px less room than the full preview needs: the artwork should
+      // give up that space while the form remains fully visible.
+      final sheetHeight = tester.getSize(find.byType(PlaceBidSheet)).height;
+      final keyboardForShrink =
+          maxSheetHeight(tester.element(find.byType(PlaceBidSheet))) -
+          (sheetHeight - 24) +
+          12;
+      tester.view.viewInsets = FakeViewPadding(bottom: keyboardForShrink);
+      await pumpSheetLayout();
+      expect(previewHeight(), closeTo(62, 0.5));
+      expect(scrollExtent(), closeTo(0, 0.5));
+      expect(tester.takeException(), isNull);
+
+      tester.view.viewInsets = const FakeViewPadding();
+      await pumpSheetLayout();
+      expect(previewHeight(), 74);
+
+      const keyboardHeight = 330.0;
+      tester.view.viewInsets = const FakeViewPadding(bottom: keyboardHeight);
+      await pumpSheetLayout();
+      expect(tester.takeException(), isNull);
+
+      final handle = find.descendant(
+        of: find.byType(SheetDragHandle),
+        matching: find.byType(DecoratedBox),
+      );
+      expect(
+        tester.getRect(handle).top -
+            tester.getRect(find.byType(PlaceBidSheet)).top,
+        7,
+        reason: 'the handle should sit near the top edge of the sheet',
+      );
+      final buttonRect = tester.getRect(find.byType(MallowButton));
+      expect(
+        buttonRect.bottom,
+        lessThanOrEqualTo(screen.height - keyboardHeight),
+      );
+      expect(buttonRect.top, greaterThan(24));
+
+      if (screen.height == 640) {
+        expect(previewHeight(), 48);
+        expect(scrollExtent(), greaterThan(0));
+      }
+      await tester.ensureVisible(find.byType(TextField));
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byType(TextField).hitTestable(), findsOneWidget);
+      expect(tester.getRect(find.byType(MallowButton)), buttonRect);
+
+      await tester.enterText(find.byType(TextField), '0.13');
+      await pumpSheetLayout();
+      await tester.tap(find.byType(MallowButton));
+      await tester.pump();
+      expect(submitted?.rawAmount, 130000000);
+      expect(tester.takeException(), isNull);
+
+      tester.view.viewInsets = const FakeViewPadding();
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(scrollExtent(), 0);
+      expect(previewHeight(), 74);
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets('shows the minimum bid hint in the bid currency', (tester) async {
     await tester.pumpWidget(buildSheet());

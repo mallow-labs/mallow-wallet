@@ -4,7 +4,8 @@ import 'package:bloc_test/bloc_test.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_wallet/core/crypto/wallet_manager.dart';
 import 'package:mallow_wallet/core/network/auth_service.dart';
-import 'package:mallow_wallet/core/network/hardware_verify_controller.dart';
+import 'package:mallow_wallet/core/models/account.dart';
+import 'package:mallow_wallet/core/session/session_manager.dart';
 import 'package:mallow_wallet/features/artwork/widgets/add_to_curation_sheet.dart';
 import 'package:mallow_wallet/features/curations/data/curation_repository.dart';
 import 'package:mallow_wallet/features/curations/services/curations_refresh_signal.dart';
@@ -58,7 +59,7 @@ ArtGroup _group({
   WalletManager,
   CurationRepository,
   AuthService,
-  HardwareVerifyController,
+  SessionManager,
 ])
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -67,7 +68,6 @@ void main() {
   late MockWalletManager mockWalletManager;
   late MockCurationRepository mockCurationRepository;
   late MockAuthService mockAuthService;
-  late MockHardwareVerifyController mockHardwareVerifyController;
 
   final artworks = [
     _artwork(mint: 'mint1', title: 'Apple'),
@@ -97,7 +97,6 @@ void main() {
     mockRepository,
     mockCurationRepository,
     mockAuthService,
-    mockHardwareVerifyController,
     mockWalletManager,
   );
 
@@ -107,7 +106,6 @@ void main() {
     mockWalletManager = MockWalletManager();
     mockCurationRepository = MockCurationRepository();
     mockAuthService = MockAuthService();
-    mockHardwareVerifyController = MockHardwareVerifyController();
 
     when(
       mockWalletManager.onWalletChanged,
@@ -895,6 +893,98 @@ void main() {
           isTrue,
         ),
       ],
+    );
+  });
+
+  group('PortfolioBloc private-curations verify', () {
+    late MockSessionManager mockSessionManager;
+    const hwAddr = 'HardwareAddr';
+
+    WalletInfo wallet(WalletType type) => WalletInfo(
+      id: 'id-$hwAddr',
+      address: hwAddr,
+      name: 'Hardware',
+      walletType: type,
+      chain: 'solana',
+    );
+
+    setUp(() {
+      mockSessionManager = MockSessionManager();
+      if (sl.isRegistered<SessionManager>()) sl.unregister<SessionManager>();
+      sl.registerSingleton<SessionManager>(mockSessionManager);
+      when(mockAuthService.currentAddress).thenReturn(hwAddr);
+      when(
+        mockAuthService.currentWalletNeedsHardwareVerification(),
+      ).thenAnswer((_) async => true);
+      when(
+        mockAuthService.hasValidWalletSigForAny(any),
+      ).thenAnswer((_) async => false);
+    });
+
+    tearDown(() async {
+      if (sl.isRegistered<SessionManager>()) {
+        await sl.unregister<SessionManager>();
+      }
+    });
+
+    // Seed Vault's and Keystone's verify sheets collect consent and sign
+    // nothing. Treating that consent as "verified" refetched without a
+    // wallet-sig, so the tap must run the device's whole handshake.
+    for (final type in [
+      WalletType.seedVault,
+      WalletType.keystone,
+      WalletType.ledger,
+    ]) {
+      blocTest<PortfolioBloc, PortfolioState>(
+        'a ${type.name} wallet signs a wallet-sig, then the CTA clears',
+        setUp: () {
+          when(
+            mockSessionManager.sessionWalletForAddress(hwAddr),
+          ).thenReturn(wallet(type));
+          when(
+            mockAuthService.signAndVerifyForWallet(any, any),
+          ).thenAnswer((_) async {});
+        },
+        build: buildBloc,
+        act: (bloc) async {
+          bloc.add(const PortfolioEvent.load());
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          bloc.add(const PortfolioEvent.verifyForPrivateCurations());
+        },
+        wait: const Duration(milliseconds: 50),
+        verify: (bloc) {
+          verify(
+            mockAuthService.signAndVerifyForWallet('id-$hwAddr', hwAddr),
+          ).called(1);
+          final state = bloc.state as PortfolioLoaded;
+          expect(state.isVerifyingCurations, isFalse);
+          expect(state.showVerifyPrivateCurationsCta, isFalse);
+        },
+      );
+    }
+
+    blocTest<PortfolioBloc, PortfolioState>(
+      'a cancelled device leaves the CTA up',
+      setUp: () {
+        when(
+          mockSessionManager.sessionWalletForAddress(hwAddr),
+        ).thenReturn(wallet(WalletType.keystone));
+        when(
+          mockAuthService.signAndVerifyForWallet(any, any),
+        ).thenThrow(HardwareVerificationCancelledException());
+      },
+      build: buildBloc,
+      act: (bloc) async {
+        bloc.add(const PortfolioEvent.load());
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        bloc.add(const PortfolioEvent.verifyForPrivateCurations());
+      },
+      wait: const Duration(milliseconds: 50),
+      verify: (bloc) {
+        final state = bloc.state as PortfolioLoaded;
+        expect(state.isVerifyingCurations, isFalse);
+        expect(state.showVerifyPrivateCurationsCta, isTrue);
+      },
     );
   });
 

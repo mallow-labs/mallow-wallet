@@ -3,7 +3,7 @@ part of '../artwork_detail_screen.dart';
 /// Map a resolved [ArtworkActionState] to the corresponding sheet widget.
 /// Returns null when no sheet should be pinned (collection view, owner
 /// who can't list, no-action state). The dispatcher itself lives in
-/// [resolveArtworkActionState] — see `docs/artwork_state.md`.
+/// [resolveArtworkActionState].
 ///
 /// All side-effect callbacks are passed in so this helper stays free of
 /// `setState`, instance state, and bloc reads.
@@ -62,15 +62,40 @@ Widget? _buildArtworkActionSheet({
 
   return switch (state) {
     ArtworkNoAction() => null,
+    ArtworkAuctionRefundedAction() => ArtworkSheetFrame(
+      child: Text(
+        'Auction refunded. The artwork is awaiting authorized recovery.',
+        style: TextStyle(color: context.mallowColors.textSecondary),
+      ),
+    ),
     ArtworkConnectWalletAction(:final label, :final subtitle) =>
       ArtworkConnectWalletSheet(label: label, subtitle: subtitle),
-    ArtworkBuyAction(:final userOwnOffer, :final block) => ArtworkBuySheet(
+    ArtworkImportWalletAction(:final action, :final watchOnly) =>
+      ArtworkImportWalletSheet(action: action, watchOnly: watchOnly),
+    ArtworkBuyAction(:final userOwnOffer, :final block, :final canMakeOffer) =>
+      ArtworkBuySheet(
+        artwork: artwork,
+        onBuy: () => onBuy(artwork),
+        onMakeOffer: () => onMakeOffer(artwork),
+        onCancelOffer: onCancelOffer,
+        isLoading: isMarketLoading,
+        userOwnOffer: userOwnOffer,
+        canMakeOffer: canMakeOffer,
+        block: block,
+      ),
+    ArtworkOpenSeaBuyAction(:final block) => OpenSeaListingSheet(
       artwork: artwork,
       onBuy: () => onBuy(artwork),
-      onMakeOffer: () => onMakeOffer(artwork),
-      onCancelOffer: onCancelOffer,
+      block: block,
+    ),
+    ArtworkMagicEdenBuyAction(:final block) => ArtworkBuySheet(
+      artwork: artwork,
+      onBuy: () => onBuy(artwork),
+      onMakeOffer: () {},
+      onCancelOffer: () {},
+      showOffers: false,
+      checkListedBalance: false,
       isLoading: isMarketLoading,
-      userOwnOffer: userOwnOffer,
       block: block,
     ),
     ArtworkBuyEditionAction(:final block) => ArtworkBuyEditionSheet(
@@ -84,18 +109,24 @@ Widget? _buildArtworkActionSheet({
       isLoading: isMarketLoading,
       block: block,
     ),
-    ArtworkOwnerUnlistedAction(:final canList, :final canSend) =>
+    ArtworkOwnerUnlistedAction(
+      :final canList,
+      :final canSend,
+      :final canAcceptOffer,
+    ) =>
       ArtworkOwnerSheet(
         artwork: artwork,
         canList: canList,
         canSend: canSend,
+        canAcceptOffer: canAcceptOffer,
         onList: () => onListUnlisted(artwork),
         onSend: () => onSendArtwork(artwork),
         highestOffer: highestOffer,
         onAcceptOffer: onAcceptHighestOffer,
         isLoading: isMarketLoading,
       ),
-    ArtworkOwnerListedAction() => ArtworkOwnerListedSheet(
+    ArtworkOwnerListedAction(:final canAcceptOffer) => ArtworkOwnerListedSheet(
+      canAcceptOffer: canAcceptOffer,
       artwork: artwork,
       onUpdateListing: () => onUpdateListing(artwork),
       onCancelListing: () => onCancelListing(artwork),
@@ -104,11 +135,12 @@ Widget? _buildArtworkActionSheet({
       onAcceptOffer: onAcceptHighestOffer,
       isLoading: isMarketLoading,
     ),
-    ArtworkUnlistedViewerAction(:final userOwnOffer) =>
+    ArtworkUnlistedViewerAction(:final userOwnOffer, :final canMakeOffer) =>
       ArtworkUnlistedViewerSheet(
         artwork: artwork,
         highestOffer: highestOffer,
         userOwnOffer: userOwnOffer,
+        canMakeOffer: canMakeOffer,
         onMakeOffer: () => onMakeOffer(artwork),
         onCancelOffer: onCancelOffer,
         isLoading: isMarketLoading,

@@ -97,6 +97,127 @@ void main() {
     );
 
     blocTest<ImportPrivateKeyBloc, ImportPrivateKeyState>(
+      'a key imported earlier is refused, not reopened',
+      // Importing the same key twice is a refusal. Only the retry of an
+      // import that failed its recovery-graph write (next test) completes as
+      // a duplicate.
+      build: () {
+        when(
+          mockRepo.addImportedKeyWallet(any, any),
+        ).thenThrow(DuplicateWalletException(testAddress));
+        return ImportPrivateKeyBloc(mockRepo, mockManager);
+      },
+      seed: () => const ImportPrivateKeyState.validated(
+        address: testAddress,
+        rawInput: Redacted(testInput),
+      ),
+      act: (bloc) => bloc.add(const ImportPrivateKeyEvent.importWallet()),
+      expect: () => [
+        const ImportPrivateKeyState.importing(),
+        const ImportPrivateKeyState.error(
+          'A wallet with this address is already on this device.',
+        ),
+      ],
+      verify: (_) {
+        verifyNever(mockRepo.completeImportedKeyRetry(any));
+        verifyNever(mockManager.switchWalletById(any));
+      },
+    );
+
+    test('the retry after a failed recovery-graph write opens the wallet '
+        'the first attempt stored', () async {
+      // A well-formed key, so validation passes for real on both attempts.
+      const evmKey =
+          '0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318';
+      var attempts = 0;
+      when(mockRepo.addImportedKeyWallet(any, any)).thenAnswer((_) async {
+        // The first attempt stores the key and row, then its graph write
+        // fails; the retry finds that row.
+        if (attempts++ == 0) throw GraphSyncException(Exception('keystore'));
+        throw DuplicateWalletException('held');
+      });
+      when(mockManager.notifyWalletDataChanged()).thenAnswer((_) async {});
+      when(mockManager.switchWalletById(any)).thenAnswer((_) async {});
+      var commits = 0;
+      when(mockRepo.completeImportedKeyRetry(any)).thenAnswer((_) async {
+        // The graph is still unwritable on the first retry: that must stay
+        // an error, never a success over a graph that does not name the key.
+        if (commits++ == 0) throw GraphSyncException(Exception('keystore'));
+        return testWallet;
+      });
+      final bloc = ImportPrivateKeyBloc(mockRepo, mockManager);
+      addTearDown(bloc.close);
+
+      Future<ImportPrivateKeyState> settle(ImportPrivateKeyEvent e) {
+        final next = bloc.stream.firstWhere(
+          (s) =>
+              s is ImportPrivateKeyValidated ||
+              s.maybeWhen(
+                imported: (_) => true,
+                error: (_) => true,
+                orElse: () => false,
+              ),
+        );
+        bloc.add(e);
+        return next;
+      }
+
+      await settle(const ImportPrivateKeyEvent.validateKey(Redacted(evmKey)));
+      expect(
+        await settle(const ImportPrivateKeyEvent.importWallet()),
+        const ImportPrivateKeyState.error(
+          'Could not update recovery data. Please try again.',
+        ),
+      );
+
+      await settle(const ImportPrivateKeyEvent.validateKey(Redacted(evmKey)));
+      expect(
+        await settle(const ImportPrivateKeyEvent.importWallet()),
+        const ImportPrivateKeyState.error(
+          'Could not update recovery data. Please try again.',
+        ),
+      );
+      verifyNever(mockManager.switchWalletById(any));
+
+      await settle(const ImportPrivateKeyEvent.validateKey(Redacted(evmKey)));
+      expect(
+        await settle(const ImportPrivateKeyEvent.importWallet()),
+        const ImportPrivateKeyState.imported(testWallet),
+      );
+      verify(mockManager.switchWalletById(testWalletId)).called(1);
+    });
+
+    blocTest<ImportPrivateKeyBloc, ImportPrivateKeyState>(
+      'a failed recovery-graph write asks for a retry and refreshes the '
+      'wallet set',
+      // The key may already be stored (the graph write comes last), so "could
+      // not import" can be false — and a retry then opens it as a duplicate.
+      // The raw cause must not reach the screen.
+      build: () {
+        when(
+          mockRepo.addImportedKeyWallet(any, any),
+        ).thenThrow(GraphSyncException(Exception('keystore detail')));
+        when(mockManager.notifyWalletDataChanged()).thenAnswer((_) async {});
+        return ImportPrivateKeyBloc(mockRepo, mockManager);
+      },
+      seed: () => const ImportPrivateKeyState.validated(
+        address: testAddress,
+        rawInput: Redacted(testInput),
+      ),
+      act: (bloc) => bloc.add(const ImportPrivateKeyEvent.importWallet()),
+      expect: () => [
+        const ImportPrivateKeyState.importing(),
+        const ImportPrivateKeyState.error(
+          'Could not update recovery data. Please try again.',
+        ),
+      ],
+      verify: (_) {
+        verify(mockManager.notifyWalletDataChanged()).called(1);
+        verifyNever(mockManager.switchWalletById(any));
+      },
+    );
+
+    blocTest<ImportPrivateKeyBloc, ImportPrivateKeyState>(
       'surfaces the validation message when the key cannot be parsed',
       // InvalidPrivateKeyException now classifies as AppFailureKind.validation,
       // so its message flows through Result.guard → AppFailure.message into the

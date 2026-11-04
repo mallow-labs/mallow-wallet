@@ -21,6 +21,7 @@ class ArtworkOwnerSheet extends StatelessWidget {
     super.key,
     this.canList = true,
     this.canSend = true,
+    this.canAcceptOffer = true,
     this.highestOffer,
     this.isLoading = false,
   });
@@ -38,6 +39,7 @@ class ArtworkOwnerSheet extends StatelessWidget {
   /// [canList]: a flagged artwork can still be sent, and a listing-blocked one
   /// must not lose its only way out of the app.
   final bool canSend;
+  final bool canAcceptOffer;
 
   /// Sends (transfers) the artwork to another wallet — secondary action that
   /// sits directly above the primary "List artwork" CTA.
@@ -68,7 +70,7 @@ class ArtworkOwnerSheet extends StatelessWidget {
             // hides commerce still shows the offer, but does not offer to
             // take it. `List artwork` is hidden upstream — the resolver forces
             // `canList` false — so this sheet needs no second check for it.
-            if (showNftCommerce) ...[
+            if (showNftCommerce && canAcceptOffer) ...[
               const SizedBox(height: MallowTheme.spacingMd),
               MallowButton(
                 label: 'Accept Offer',

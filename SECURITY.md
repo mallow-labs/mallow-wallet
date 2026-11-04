@@ -67,10 +67,14 @@ advisory, unless you would rather stay anonymous. Tell us which you prefer.
 
 ## Verifying you have a genuine build
 
-**mallow wallet is not on the App Store or Google Play yet.** It will be
-published to both, and this section will name the listings when it is. Saying so
-matters more than it looks: a document that points you at two listings that do
-not exist would have you accept *any* build claiming to be the store one.
+**mallow wallet is not on the App Store, Google Play or the Solana dApp Store
+yet.** It will be published to all three, and this section will name the
+listings when it is. Saying so matters more than it looks: a document that points
+you at listings that do not exist would have you accept *any* build claiming to
+be the store one.
+
+mallow's current dApp Store listing is an earlier app that wraps the mallow.art
+website, not this wallet. This wallet will replace it under the same listing.
 
 Until the listings are live, these are the only official builds:
 

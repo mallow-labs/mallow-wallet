@@ -11,8 +11,67 @@ const _filterPillGreen = Color(0xFF6DE49E);
 const _filterPillPurple = Color(0xFFC26DE4);
 const _filterPillPink = Color(0xFFE46DAE);
 
+/// What an artwork drilldown browses: the header label, and the explore
+/// constraint pinned on top of whatever the user picks in the filters sheet.
+///
+/// The search landing page's buttons are [SearchFilterType]s; an artwork's tag
+/// chip opens a [TagDrilldownTarget]. Both render through the same drilldown
+/// screen.
+abstract interface class ArtworkDrilldownTarget {
+  String get label;
+
+  /// Applies this drilldown's own explore constraint on top of [base].
+  ///
+  /// The constraint is pinned, not merged: the header promises "Auction",
+  /// "3D" or "#tag", so it always wins over whatever the user picked in the
+  /// filters sheet. The sheet hides the matching facet (see [pinsListingType],
+  /// [pinsSupplyType], [pinsCategory]) so no control is a silent no-op.
+  api.ExploreFilter pinTo(api.ExploreFilter base);
+
+  bool get pinsListingType;
+
+  bool get pinsSupplyType;
+
+  bool get pinsCategory;
+}
+
+/// A drilldown of every artwork carrying one free-form [tag], opened from the
+/// tag chips on the artwork page.
+@immutable
+final class TagDrilldownTarget implements ArtworkDrilldownTarget {
+  const TagDrilldownTarget(this.tag);
+
+  /// Sent to the explore API as-is: tag matching is exact, and the chip shows
+  /// the tag as the artwork stores it.
+  final String tag;
+
+  @override
+  String get label => '#$tag';
+
+  @override
+  api.ExploreFilter pinTo(api.ExploreFilter base) => base.copyWith(tags: [tag]);
+
+  @override
+  bool get pinsListingType => false;
+
+  @override
+  bool get pinsSupplyType => false;
+
+  /// Categories are tags too, so a category picked in the sheet would be
+  /// overwritten by the pinned tag.
+  @override
+  bool get pinsCategory => true;
+
+  @override
+  bool operator ==(Object other) =>
+      other is TagDrilldownTarget && other.tag == tag;
+
+  @override
+  int get hashCode => tag.hashCode;
+}
+
 /// Filter types available on the search landing page.
-enum SearchFilterType {
+enum SearchFilterType implements ArtworkDrilldownTarget {
   // Listing types
   auction('Auction', _filterPillBlue),
   buyNow('Buy now', _filterPillGreen),
@@ -53,6 +112,7 @@ enum SearchFilterType {
 
   const SearchFilterType(this.label, this.accentColor);
 
+  @override
   final String label;
   final Color accentColor;
 
@@ -78,12 +138,7 @@ enum SearchFilterType {
     _ => true,
   };
 
-  /// Applies this drilldown's own explore constraint on top of [base].
-  ///
-  /// The constraint is pinned, not merged: the header promises "Auction" or
-  /// "3D", so it always wins over whatever the user picked in the filters
-  /// sheet. The sheet hides the matching facet (see [pinsListingType],
-  /// [pinsSupplyType], [pinsCategory]) so no control is a silent no-op.
+  @override
   api.ExploreFilter pinTo(api.ExploreFilter base) => switch (this) {
     auction => base.copyWith(listingTypes: const ['auction']),
     buyNow => base.copyWith(listingTypes: const ['buy-now']),
@@ -95,16 +150,28 @@ enum SearchFilterType {
     },
   };
 
+  @override
   bool get pinsListingType => this == auction || this == buyNow;
 
+  @override
   bool get pinsSupplyType => this == oneOfOne || this == editions;
 
+  @override
   bool get pinsCategory => categoryTag != null;
 
   static const listingTypes = [auction, buyNow];
   static const browseTypes = [oneOfOne, editions, curations, exhibitions];
   static List<SearchFilterType> get categories =>
       values.where((v) => v.name.startsWith('category')).toList();
+
+  /// The category filter whose [categoryTag] is [tag], or null when [tag] is
+  /// not one of the landing page's categories.
+  static SearchFilterType? forCategoryTag(String tag) {
+    for (final c in values) {
+      if (c.categoryTag == tag) return c;
+    }
+    return null;
+  }
 }
 
 /// A single item in the filter results view.

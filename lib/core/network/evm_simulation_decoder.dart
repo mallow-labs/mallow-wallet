@@ -48,6 +48,12 @@ const _nativeTransferEmitter = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 
 const _zeroAddress = '0x0000000000000000000000000000000000000000';
 
+/// A simulation response whose effects cannot be decoded safely.
+/// Extends the RPC error so existing transfer gates keep failing closed.
+class EvmSimulationDecodeException extends EthereumRpcException {
+  const EvmSimulationDecodeException(super.message);
+}
+
 /// Decode the `result` of an `eth_simulateV1` call into the asset changes the
 /// transfer gate asserts on.
 ///
@@ -56,23 +62,43 @@ const _zeroAddress = '0x0000000000000000000000000000000000000000';
 /// with a non-null `error` and no changes — which is what the gate's revert
 /// branch already expects.
 ///
-/// Throws an [EthereumRpcException] when the response shape is not what we
-/// asked for, or when a known event cannot be decoded.
+/// Throws an [EvmSimulationDecodeException] when the response shape is not what
+/// we asked for, or when a known event cannot be decoded.
 EvmSimulationResult decodeSimulateV1(Object? result) {
+  try {
+    return _decodeSimulateV1(result);
+  } on FormatException {
+    throw const EvmSimulationDecodeException(
+      'simulation log contains malformed hex',
+    );
+  } on TypeError {
+    throw const EvmSimulationDecodeException('simulation field malformed');
+  }
+}
+
+EvmSimulationResult _decodeSimulateV1(Object? result) {
   if (result is! List || result.isEmpty) {
-    throw const EthereumRpcException('simulation returned no block result');
+    throw const EvmSimulationDecodeException(
+      'simulation returned no block result',
+    );
   }
   final block = result.first;
   if (block is! Map<String, dynamic>) {
-    throw const EthereumRpcException('simulation block result malformed');
+    throw const EvmSimulationDecodeException(
+      'simulation block result malformed',
+    );
   }
   final calls = block['calls'];
   if (calls is! List || calls.isEmpty) {
-    throw const EthereumRpcException('simulation returned no call result');
+    throw const EvmSimulationDecodeException(
+      'simulation returned no call result',
+    );
   }
   final call = calls.first;
   if (call is! Map<String, dynamic>) {
-    throw const EthereumRpcException('simulation call result malformed');
+    throw const EvmSimulationDecodeException(
+      'simulation call result malformed',
+    );
   }
 
   // `status` is "0x1" on success. Anything else is a revert: surface it as the
@@ -88,7 +114,7 @@ EvmSimulationResult decodeSimulateV1(Object? result) {
   final changes = <EvmAssetChange>[];
   for (final log in logs) {
     if (log is! Map<String, dynamic>) {
-      throw const EthereumRpcException('simulation log malformed');
+      throw const EvmSimulationDecodeException('simulation log malformed');
     }
     changes.addAll(_decodeLog(log));
   }
@@ -134,7 +160,7 @@ List<EvmAssetChange> _decodeLog(Map<String, dynamic> log) {
   // gate would otherwise see (a token send whose own change matches would pass
   // with the wallet's ETH leaving invisibly). Fail closed.
   if (emitter == _nativeTransferEmitter && topics.first != _transferTopic) {
-    throw const EthereumRpcException(
+    throw const EvmSimulationDecodeException(
       'native transfer trace log could not be decoded',
     );
   }
@@ -184,7 +210,9 @@ EvmAssetChange _decodeTransfer(
     );
   }
   if (topics.length != 3) {
-    throw const EthereumRpcException('Transfer log has unexpected topic count');
+    throw const EvmSimulationDecodeException(
+      'Transfer log has unexpected topic count',
+    );
   }
   final isNative = emitter == _nativeTransferEmitter;
   return EvmAssetChange(
@@ -206,7 +234,7 @@ EvmAssetChange _decodeTransferSingle(
   String data,
 ) {
   if (topics.length != 4) {
-    throw const EthereumRpcException(
+    throw const EvmSimulationDecodeException(
       'TransferSingle log has unexpected topic count',
     );
   }
@@ -230,14 +258,14 @@ List<EvmAssetChange> _decodeTransferBatch(
   String data,
 ) {
   if (topics.length != 4) {
-    throw const EthereumRpcException(
+    throw const EvmSimulationDecodeException(
       'TransferBatch log has unexpected topic count',
     );
   }
   final ids = _readDynamicArray(data, wordIndex: 0);
   final values = _readDynamicArray(data, wordIndex: 1);
   if (ids.length != values.length) {
-    throw const EthereumRpcException(
+    throw const EvmSimulationDecodeException(
       'TransferBatch ids and values length mismatch',
     );
   }
@@ -273,7 +301,9 @@ EvmAssetChange _decodeApproval(
 ) {
   final isNft = topics.length == 4;
   if (topics.length != 3 && !isNft) {
-    throw const EthereumRpcException('Approval log has unexpected topic count');
+    throw const EvmSimulationDecodeException(
+      'Approval log has unexpected topic count',
+    );
   }
   return EvmAssetChange(
     assetType: isNft ? 'ERC721' : 'ERC20',
@@ -295,7 +325,7 @@ EvmAssetChange _decodeApprovalForAll(
   String data,
 ) {
   if (topics.length != 3) {
-    throw const EthereumRpcException(
+    throw const EvmSimulationDecodeException(
       'ApprovalForAll log has unexpected topic count',
     );
   }
@@ -313,7 +343,9 @@ EvmAssetChange _decodeApprovalForAll(
 String _addressFromTopic(String topic) {
   final clean = topic.startsWith('0x') ? topic.substring(2) : topic;
   if (clean.length != 64) {
-    throw const EthereumRpcException('simulation log topic is not 32 bytes');
+    throw const EvmSimulationDecodeException(
+      'simulation log topic is not 32 bytes',
+    );
   }
   return '0x${clean.substring(24)}';
 }
@@ -326,7 +358,9 @@ BigInt _wordAt(String data, int index, {String? fromTopic}) {
   final clean = data.startsWith('0x') ? data.substring(2) : data;
   final start = index * 64;
   if (clean.length < start + 64) {
-    throw const EthereumRpcException('simulation log data is truncated');
+    throw const EvmSimulationDecodeException(
+      'simulation log data is truncated',
+    );
   }
   return evmHexToBigInt(clean.substring(start, start + 64));
 }
@@ -335,12 +369,16 @@ BigInt _wordAt(String data, int index, {String? fromTopic}) {
 List<BigInt> _readDynamicArray(String data, {required int wordIndex}) {
   final byteOffset = _wordAt(data, wordIndex);
   if (!byteOffset.isValidInt || byteOffset % BigInt.from(32) != BigInt.zero) {
-    throw const EthereumRpcException('simulation log array offset invalid');
+    throw const EvmSimulationDecodeException(
+      'simulation log array offset invalid',
+    );
   }
   final head = byteOffset.toInt() ~/ 32;
   final length = _wordAt(data, head);
   if (!length.isValidInt || length > BigInt.from(1024)) {
-    throw const EthereumRpcException('simulation log array length invalid');
+    throw const EvmSimulationDecodeException(
+      'simulation log array length invalid',
+    );
   }
   return [for (var i = 1; i <= length.toInt(); i++) _wordAt(data, head + i)];
 }

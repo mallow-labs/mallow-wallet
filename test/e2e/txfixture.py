@@ -88,7 +88,7 @@ SERVER_SIGNER = b58encode(bytes([7]) * 32)
 
 # Memo program: a readonly, unsigned account key that makes the single
 # instruction well-formed without needing any real accounts.
-MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
+MEMO_PROGRAM_ID = "Memo4c2pN8afCj432Lb7RMVKi9PbQnnW7ewFFaV3oAH"
 
 _INSTRUCTION_DATA = b"mallow-e2e"
 _DUMMY_SIGNATURE = bytes([0xAB]) * 64

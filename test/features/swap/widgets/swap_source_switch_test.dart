@@ -372,7 +372,7 @@ void main() {
     (tester) async {
       stubCandidates([candidate(walletA, 1), candidate(walletB, 5)]);
       // `selectSourceWallet` is async, so a failed switch arrives as a
-      // rejected future (the T0.2 rollback has already re-pointed the DB).
+      // rejected future (the switch's rollback has already re-pointed the DB).
       when(
         () => sessionManager.selectSourceWallet(any()),
       ).thenAnswer((_) => Future<void>.error(Exception('offline')));

@@ -25,7 +25,7 @@ import '../../../shared/utils/chain.dart';
 /// with the globally selected wallet ([WalletInfo.bindsGlobalSigner]), so the
 /// selection must move before the chosen source can sign; the switch (and its
 /// persistence) happens inside the sheet so a failed re-login keeps it open for
-/// retry rather than advancing the flow (send-wallet-select spec). For that
+/// retry rather than advancing the flow. For that
 /// chain this resolves only once the switch settles — including the awaited
 /// `/v0/login`, so `AuthService.currentAddress` is the chosen wallet by then.
 ///
@@ -41,12 +41,17 @@ import '../../../shared/utils/chain.dart';
 /// caller would keep displaying the old source, and the switch would complete
 /// anyway — leaving the displayed source and the wallet that actually signs in
 /// disagreement.
+///
+/// [selectWallet] commits a Solana switch. It defaults to
+/// [SessionManager.selectSourceWallet]; a caller that reaches the session
+/// through its own seam passes that instead.
 Future<WalletInfo?> showSendWalletSelectSheet(
   BuildContext context, {
   required Chain chain,
   required String tokenSymbol,
   required List<SendSourceCandidate> candidates,
   required String? activeWalletId,
+  Future<void> Function(WalletInfo wallet)? selectWallet,
 }) async {
   final outcome = SendWalletSwitchOutcome();
   final chosen = await showMallowSheet<WalletInfo>(
@@ -65,6 +70,7 @@ Future<WalletInfo?> showSendWalletSelectSheet(
         candidates: candidates,
         activeWalletId: activeWalletId,
         outcome: outcome,
+        selectWallet: selectWallet,
       ),
     ),
   );
@@ -100,6 +106,7 @@ class SendWalletSelectSheet extends StatefulWidget {
     required this.candidates,
     required this.activeWalletId,
     this.outcome,
+    this.selectWallet,
     super.key,
   });
 
@@ -111,6 +118,9 @@ class SendWalletSelectSheet extends StatefulWidget {
   /// Set by [showSendWalletSelectSheet] so a switch that is still in flight
   /// when the sheet is dismissed is still reported to the caller.
   final SendWalletSwitchOutcome? outcome;
+
+  /// Commits a Solana switch; null means [SessionManager.selectSourceWallet].
+  final Future<void> Function(WalletInfo wallet)? selectWallet;
 
   @override
   State<SendWalletSelectSheet> createState() => _SendWalletSelectSheetState();
@@ -139,9 +149,11 @@ class _SendWalletSelectSheetState extends State<SendWalletSelectSheet> {
     setState(() => _switchingId = candidate.wallet.id);
     // Registered before the await so a dismissal mid-switch can still be
     // reconciled by [showSendWalletSelectSheet].
-    final switching = sl<SessionManager>()
-        .selectSourceWallet(candidate.wallet)
-        .then<WalletInfo?>((_) => candidate.wallet);
+    final select =
+        widget.selectWallet ?? sl<SessionManager>().selectSourceWallet;
+    final switching = select(
+      candidate.wallet,
+    ).then<WalletInfo?>((_) => candidate.wallet);
     widget.outcome?.track(switching);
     try {
       await switching;
@@ -163,7 +175,7 @@ class _SendWalletSelectSheetState extends State<SendWalletSelectSheet> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        SheetDragHandle(color: colors.divider),
+        const SheetDragHandle(),
         Padding(
           padding: const EdgeInsets.symmetric(
             horizontal: MallowTheme.spacing20,
@@ -180,6 +192,7 @@ class _SendWalletSelectSheetState extends State<SendWalletSelectSheet> {
               const SizedBox(height: MallowTheme.spacingLg),
               for (final candidate in widget.candidates)
                 _WalletRow(
+                  key: ValueKey('wallet-select-${candidate.wallet.id}'),
                   candidate: candidate,
                   tokenSymbol: widget.tokenSymbol,
                   chain: widget.chain,
@@ -208,6 +221,7 @@ class _WalletRow extends StatelessWidget {
     required this.chain,
     required this.isSwitching,
     required this.onTap,
+    super.key,
   });
 
   final SendSourceCandidate candidate;

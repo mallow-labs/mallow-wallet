@@ -191,6 +191,12 @@ class SessionManager extends ChangeNotifier {
     LoginMode.account => _activeAccount?.name,
   };
 
+  /// The name to show beside a session wallet: its Account's name, or its
+  /// Profile's username. Null when [address] is not in this session. A
+  /// wallet's own stored name is an internal label and is never shown.
+  String? ownerNameFor(String address) =>
+      sessionWalletForAddress(address) == null ? null : displayName;
+
   /// Storage scope for per-session preferences that must stay isolated between
   /// sessions — currently the Active Networks setting. Returns the active
   /// profile's id in a Profile session (so each profile, and the account scope,
@@ -656,7 +662,7 @@ class SessionManager extends ChangeNotifier {
   // ---------------------------------------------------------------------------
 
   /// Re-point the active **signing** wallet to [wallet] for the send flow's
-  /// source-wallet picker (send-wallet-select spec). Remembers it as the
+  /// source-wallet picker. Remembers it as the
   /// owning account's default ([PreferencesService.setLastSolanaWalletId]) and
   /// re-anchors the active account to that wallet's account so per-chain
   /// resolution stays correct.

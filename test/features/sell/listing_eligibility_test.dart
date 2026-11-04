@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_api/mallow_api.dart';
 import 'package:mallow_wallet/features/artwork/models/on_chain_asset.dart';
 import 'package:mallow_wallet/features/sell/services/listing_eligibility.dart';
+import 'package:mallow_wallet/features/sell/services/trade_eligibility.dart';
 
 /// The webapp only lets a wallet list an artwork when one of two things is
 /// true: the artwork is demonstrably secondary (a verified sale, or a verified
@@ -12,6 +13,28 @@ import 'package:mallow_wallet/features/sell/services/listing_eligibility.dart';
 /// the webapp branch for branch: a mobile-only "yes" is a bypass, and a
 /// mobile-only "no" locks legitimate sellers out of their own artwork.
 void main() {
+  test('an approved creator cannot override v2 transfer restrictions', () {
+    expect(
+      evaluateListingEligibility(
+        user: const User(
+          roles: ['admin'],
+          username: 'artist',
+          imageUrl: 'image',
+          isTwitterVerified: true,
+        ),
+        artwork: const ArtworkListingFacts(
+          isFlagged: false,
+          creatorIsFlagged: false,
+          hasVerifiedSale: true,
+          hasOnChainAsset: true,
+          hasVerifiedCreator: true,
+          tradeEligibility: TradeEligibility.restricted,
+        ),
+      ),
+      ListingBlockReason.ineligibleAsset,
+    );
+  });
+
   const creatorAddress = 'creator-address';
 
   User user({

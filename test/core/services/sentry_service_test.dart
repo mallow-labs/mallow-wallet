@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_wallet/core/services/preferences_service.dart';
 import 'package:mallow_wallet/core/services/sentry_service.dart';
@@ -144,13 +146,14 @@ void main() {
       expect(out, isNot(contains('Nb2y')));
     });
 
-    test('still only truncates a plain wallet address', () {
+    test('fully redacts addresses indistinguishable from encoded seeds', () {
       const address = 'HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH';
 
       final out = SentryService.scrubString('owner $address');
 
       expect(out, isNot(contains(address)));
-      expect(out, contains('HN7c'));
+      expect(out, isNot(contains('HN7c')));
+      expect(out, contains('[REDACTED_KEY]'));
     });
   });
 
@@ -163,6 +166,102 @@ void main() {
 
       expect(event!.message!.formatted, contains('[REDACTED_KEY]'));
       expect(event.message!.formatted, isNot(contains('4c7a1f9b')));
+    });
+
+    test(
+      'filters every serialized event surface while preserving the stack',
+      () {
+        final event = SentryEvent.fromJson({
+          'event_id': '0123456789abcdef0123456789abcdef',
+          'message': {
+            'formatted': 'failure',
+            'params': [hexKey],
+          },
+          'contexts': {
+            'info': {'message': hexKey},
+            'custom': {
+              'nested': [
+                {'secretKey': 'short-sensitive-value'},
+              ],
+            },
+            'flutter_error_details': {'information': 'partial phrase fragment'},
+          },
+          'extra': {'value': hexKey},
+          'tags': {'value': hexKey},
+          'user': {'email': 'private@example.test'},
+          'request': {'url': 'https://example.test', 'data': 'partial phrase'},
+          'fingerprint': [hexKey],
+          'breadcrumbs': [
+            {'message': hexKey, 'category': hexKey},
+          ],
+          'exception': {
+            'values': [
+              {
+                'type': 'FormatException',
+                'value': hexKey,
+                'stacktrace': {
+                  'frames': [
+                    {
+                      'filename': 'wallet.dart',
+                      'function': 'sign',
+                      'lineno': 42,
+                      'vars': {'input': 'partial phrase fragment'},
+                      'context_line': 'partial phrase fragment',
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          'threads': {
+            'values': [
+              {
+                'id': 1,
+                'stacktrace': {
+                  'frames': [
+                    {
+                      'filename': 'other.dart',
+                      'vars': {'input': hexKey},
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          'future_sdk_field': {'payload': hexKey},
+        });
+        final clean = SentryService.beforeSend(event, Hint())!;
+        final json = jsonEncode(clean.toJson());
+        expect(json.contains(hexKey), isFalse);
+        expect(json.contains('short-sensitive-value'), isFalse);
+        expect(json.contains('partial phrase'), isFalse);
+        expect(json.contains('private@example.test'), isFalse);
+        expect(clean.eventId, event.eventId);
+        final frame = clean.exceptions!.single.stackTrace!.frames.single;
+        expect(frame.fileName, 'wallet.dart');
+        expect(frame.function, 'sign');
+        expect(frame.lineNo, 42);
+        expect(frame.vars, isEmpty);
+        expect(clean.throwable, isNull);
+      },
+    );
+
+    test(
+      'drops an event when serialization fails without exposing the error',
+      () {
+        expect(SentryService.beforeSend(_BrokenEvent(), Hint()), isNull);
+      },
+    );
+
+    test('removes hint attachments and screenshots', () {
+      final attachment = SentryAttachment.fromIntList([1, 2, 3], 'test.txt');
+      final hint = Hint.withAttachment(attachment)
+        ..screenshot = attachment
+        ..viewHierarchy = attachment;
+      expect(SentryService.beforeSend(SentryEvent(), hint), isNotNull);
+      expect(hint.attachments, isEmpty);
+      expect(hint.screenshot, isNull);
+      expect(hint.viewHierarchy, isNull);
     });
 
     test('scrubs a List<String> mnemonic in breadcrumb data (12 words)', () {
@@ -196,4 +295,9 @@ void main() {
       expect('${crumb.data}', contains('[REDACTED_KEY]'));
     });
   });
+}
+
+class _BrokenEvent extends SentryEvent {
+  @override
+  Map<String, dynamic> toJson() => throw StateError('synthetic private input');
 }

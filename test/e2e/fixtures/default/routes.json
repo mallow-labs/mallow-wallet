@@ -28,11 +28,11 @@
     "    Measured: 2 such aborts in one config-and-network run. That is an app",
     "    bug (an unguarded cache write after teardown,",
     "    home_feed_repository.dart:158) and it has to be fixed before the feed",
-    "    can be fixtured; the home-feed bucket is Phase 2 and owns both.",
+    "    can be fixtured; the home-feed fixtures will own both.",
     "  * GET /v2/health - not the app. It is the readiness probe",
     "    test/e2e/lib.sh uses to decide the mock is up.",
     "  * POST /v0/userWithDetails, GET /v0/txFees, POST /v1/bugReport - only",
-    "    reached by the listing / mint / bug-report flows, which are Phase 2-3.",
+    "    reached by the listing / mint / bug-report flows, which have no fixtures yet.",
     "    Their bodies belong with those fixtures, where a case can assert on",
     "    them."
   ],

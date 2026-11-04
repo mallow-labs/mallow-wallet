@@ -33,16 +33,19 @@ EXAMPLE=".env.example"
 # Knobs a .env.example entry would file under the wrong heading. The first two
 # are set by the test harness or by a developer, never by a deployment, so the
 # entry would tell a fork to configure something that is none of their
-# business. The last two are set by ONE platform's release lane, and .env is a
+# business. The next two are set by ONE platform's release lane, and .env is a
 # single file shared by both platforms — an entry there would hide a
 # per-platform decision in a cross-platform file, which is exactly what the
-# lane's comment says not to do. All four are documented in
+# lane's comment says not to do. BUILD_LABEL is per build, not per deployment:
+# .env is compiled into every build, so a value there would label the release
+# builds too, and those must carry none. All five are documented in
 # docs/configuration.md. Anything added here needs a reason on the same line.
 EXEMPT=(
   E2E_DISABLE_GL     # e2e only: disables the GL onboarding ring on emulators
   SHOW_UNRELEASED    # local dev only: reveals unreleased surfaces
   SHOW_NFT_COMMERCE  # iOS release lane only: passed as a literal --dart-define
   SHOW_SWAP          # iOS release lane only: passed as a literal --dart-define
+  BUILD_LABEL        # branch builds only: CI passes it as a literal --dart-define
 )
 
 # The extraction runs before the loop so its exit status is checked: inside

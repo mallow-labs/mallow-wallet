@@ -1,0 +1,22 @@
+{
+  "walletSeed": "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCws=",
+  "peerPublicKey": "511c34a1a2cb521df16bb246b8de8e7997ce235c7e76b22a3d7503a24819dd8a",
+  "peerCurveSecretKey": "708ceea4b59b859206ae644caa6d4f4dc81d025bf3e56d30b2cf9a2d4c1fe660",
+  "pairing": "2NpAndA5xd9riMF9Kpg9m7gpVkLki81aMT4NFRsQXTPPVghdfaSpe5m7YuEBiiQdJGX332MDobH9YxyeRc73Ure2dSMT1t7XimjzgaH9RBZxkRQypvaxtHvwkw9JBQ3HQVT3t8g1Nfuaq5X2vBwYvnyuv8pqx7DrsWhin7T4SymZdrxZ6G6VgYAc8Z1sTGxatzjpNLZFvL8HYXMm2FecpGyqFfKWFCa3VoVXRAGZAg9t2",
+  "pairingV3": "2NpAndA5xd9riMF9Kpg9m7gpVkLki81aMT4NFRsQXTPPVghdfaSpe5m7YuEBiiQdJGX332MDobH9YxyeRc73Ure2dSMT1t7XimjzgaH9RBZxkRQypvaxtHvwnKiQRXLcBoZasKwjGBdFonPF2idxbAn2waHP7QyTvkNrbZa9yyaoKgpjtF43hXihUWmrBxKENS18gKGPjKGABYuApLjQHEW7bswxMSfhfXQMZMRGv5djS",
+  "request": {
+    "id": "sdk-request",
+    "version": "2",
+    "type": "permission_request",
+    "senderId": "sdk-peer",
+    "network": {
+      "type": "mainnet"
+    },
+    "scopes": [
+      "sign",
+      "operation_request"
+    ]
+  },
+  "encryptedRequest": "cac78a68172569bf8a5277e850b49ec5b50ad55321982af03061316ebd5ab0507e8e11dfde56d18793b885f69d9e9fcb783f80e844c4b776c550d555dedb4686e54042e6496285056512a85213decc9404923ca8d228585faea39865e4d6869e6720fcb8e3f55ccb78e204d81d4d07b8d59dba05e2298eff47f23547c9899cbc01ec7cf16d65c9cd942835604523ae387a8d8e3fea05e20bf4d13df9cf14860851585623cff2aeef01f5e49e48f1570a6740061d1ec3de7b5a1e28d437d29cbdaa2b3d3ac2eb5224669d0186120c0d66113f22c2df7457bc348e710b35d98273e0ea2b582047f6317921879e85d6331372f0f9c1a5d6595a03e4bb8f",
+  "replyKey": "c2ed4ae354cf4b119a700ef370fc94c4c5d831f531bbfc67484d4925f8b76210"
+}

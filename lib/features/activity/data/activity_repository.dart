@@ -8,6 +8,49 @@ import '../../../core/data/address_scope_key.dart';
 import '../../../core/data/cache_freshness.dart';
 import '../../../core/database/database.dart';
 import '../../../core/utils/token_amount.dart';
+import '../../../shared/utils/chain.dart';
+
+/// The most Solana addresses one `GET /v2/activity` request may name. The
+/// backend answers a request over this with a 400, which fails the whole feed.
+const int kActivityMaxSolanaAddresses = 10;
+
+/// The most addresses of any chain one `GET /v2/activity` request may name.
+const int kActivityMaxAddresses = 30;
+
+/// A Tezos implicit-account address, the shape the backend routes to Tezos.
+final RegExp _tezosWalletPattern = RegExp(r'^tz[123].{33}$');
+
+/// [addresses] trimmed to what one `GET /v2/activity` request accepts: at most
+/// [kActivityMaxSolanaAddresses] Solana addresses and [kActivityMaxAddresses]
+/// in total.
+///
+/// A Profile session can hold more than that: the app links at most
+/// `kMaxProfileWallets`, but neither the backend nor the webapp holds a
+/// profile to that cap. An over-limit request is a 400 for the whole feed, so
+/// dropping the excess keeps the feed for the rest. Order is kept, so callers
+/// list the addresses they most need first. Empty and repeated addresses are
+/// skipped, since the backend ignores them too.
+///
+/// The backend counts as Solana every address that parses as an ed25519 key.
+/// Anything that is not an EVM or Tezos wallet address is counted as Solana
+/// here, which can only over-count, never let an over-limit request through.
+List<String> capActivityAddresses(List<String> addresses) {
+  final kept = <String>[];
+  final seen = <String>{};
+  var solana = 0;
+  for (final address in addresses) {
+    if (kept.length >= kActivityMaxAddresses) break;
+    if (address.isEmpty || !seen.add(address)) continue;
+    final isSolana =
+        !isEthereumAddress(address) && !_tezosWalletPattern.hasMatch(address);
+    if (isSolana) {
+      if (solana >= kActivityMaxSolanaAddresses) continue;
+      solana++;
+    }
+    kept.add(address);
+  }
+  return kept;
+}
 
 /// Repository for fetching and caching activity data.
 ///
@@ -37,7 +80,9 @@ class ActivityRepository {
   /// [addresses] is the REQUIRED plural set of session wallet addresses the
   /// feed aggregates over (sourced from `SessionManager.sessionWallets`). The
   /// backend routes each address by chain (Solana/EVM/Tezos), merges, and
-  /// paginates the combined result.
+  /// paginates the combined result. Only the first addresses within the
+  /// endpoint's limits are sent (see [capActivityAddresses]); the cache key
+  /// still covers the whole scope.
   ///
   /// Returns [api.ActivityListResponse] with activities and pagination info.
   /// The endpoint returns [ActivityListResponse] directly (no [ApiResponse]
@@ -52,7 +97,7 @@ class ActivityRepository {
     final typesString = types?.map((t) => t.name).join(',');
 
     final response = await _apiV2.getActivities(
-      addresses: addresses.join(','),
+      addresses: capActivityAddresses(addresses).join(','),
       page: page,
       limit: limit,
       types: typesString,

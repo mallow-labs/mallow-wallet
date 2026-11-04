@@ -17,8 +17,8 @@ import 'offer_action_buttons.dart';
 /// highest active offer (if any) — buyer, amount,
 /// age, same panel as the owner sheet — and a make-offer CTA.
 ///
-/// Triggered by (`viewer` ∨ `creator`) × `unlisted` — see
-/// `docs/artwork_state.md`.
+/// Triggered by (`viewer` ∨ `creator`) × `unlisted` in
+/// `resolveArtworkActionState`.
 class ArtworkUnlistedViewerSheet extends StatelessWidget {
   const ArtworkUnlistedViewerSheet({
     required this.artwork,
@@ -26,6 +26,7 @@ class ArtworkUnlistedViewerSheet extends StatelessWidget {
     required this.onCancelOffer,
     this.highestOffer,
     this.userOwnOffer = false,
+    this.canMakeOffer = true,
     this.isLoading = false,
     super.key,
   });
@@ -40,6 +41,7 @@ class ArtworkUnlistedViewerSheet extends StatelessWidget {
   /// True when the connected wallet has a live offer on this artwork —
   /// flips "Make offer" to "Cancel offer".
   final bool userOwnOffer;
+  final bool canMakeOffer;
 
   /// Opens the offer-amount input flow on the screen side and dispatches
   /// `MarketEvent.makeOfferV2`.
@@ -116,7 +118,7 @@ class ArtworkUnlistedViewerSheet extends StatelessWidget {
           // Make/update offer and its funding line go with `kShowNftCommerce`;
           // a store build that hides commerce keeps the offer status above
           // and, when this wallet already holds an offer, the way to cancel it.
-          if (showNftCommerce) ...[
+          if (showNftCommerce && canMakeOffer) ...[
             const SizedBox(height: MallowTheme.spacingMd),
             // The offer is funded in the artwork's currency (SOL when unlisted
             // artworks carry none).
@@ -134,6 +136,7 @@ class ArtworkUnlistedViewerSheet extends StatelessWidget {
             const SizedBox(height: MallowTheme.spacingMd),
             OfferActionButtons(
               userOwnOffer: true,
+              canMakeOffer: canMakeOffer,
               isLoading: isLoading,
               isPrimary: true,
               onMakeOffer: onMakeOffer,

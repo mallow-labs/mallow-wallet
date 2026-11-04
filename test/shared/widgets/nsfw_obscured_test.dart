@@ -217,4 +217,44 @@ void main() {
     await tester.pumpAndSettle();
     expect(prefs.showNsfw, isTrue);
   });
+
+  group('builder', () {
+    Widget builderHost({required bool nsfw}) => MaterialApp(
+      theme: MallowTheme.lightTheme,
+      home: Scaffold(
+        body: Center(
+          child: SizedBox(
+            width: 100,
+            height: 100,
+            child: NsfwObscured.builder(
+              nsfw: nsfw,
+              builder: (_, obscured) => Text(obscured ? 'poster' : 'live'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    // A web view composites outside the backdrop blur, so the builder is how
+    // a caller keeps one from being built at all under the frost.
+    testWidgets('builds the obscured child until revealed', (tester) async {
+      await setUpServices();
+      await tester.pumpWidget(builderHost(nsfw: true));
+      expect(find.text('poster'), findsOneWidget);
+      expect(find.text('live'), findsNothing);
+
+      await tester.tap(find.byType(NsfwObscured));
+      await tester.pumpAndSettle();
+      expect(find.text('live'), findsOneWidget);
+      expect(find.byType(BackdropFilter), findsNothing);
+    });
+
+    testWidgets('an unflagged artwork builds unobscured without '
+        'PreferencesService', (tester) async {
+      expect(sl.isRegistered<PreferencesService>(), isFalse);
+      await tester.pumpWidget(builderHost(nsfw: false));
+      expect(tester.takeException(), isNull);
+      expect(find.text('live'), findsOneWidget);
+    });
+  });
 }

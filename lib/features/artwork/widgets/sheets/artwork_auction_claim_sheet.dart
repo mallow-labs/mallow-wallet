@@ -9,8 +9,7 @@ import 'artwork_auction_live_panel.dart';
 import 'artwork_sheet_frame.dart';
 
 /// Role of the connected wallet relative to an ended auction. Drives the CTA
-/// label and visibility — see the auction-ended table in
-/// `docs/artwork_state.md`.
+/// label and visibility.
 enum AuctionEndedRole {
   /// Auction creator / NFT owner — settles or reclaims.
   seller,
@@ -25,7 +24,7 @@ enum AuctionEndedRole {
 
 /// Bottom sheet shown after an auction has ended.
 ///
-/// Triggered by `auction` × ended — see `docs/artwork_state.md`.
+/// Triggered by `auction` × ended in `resolveArtworkActionState`.
 class ArtworkAuctionClaimSheet extends StatelessWidget {
   const ArtworkAuctionClaimSheet({
     required this.artwork,

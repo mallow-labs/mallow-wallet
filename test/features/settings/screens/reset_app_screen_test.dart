@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:bloc_test/bloc_test.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_wallet/core/analytics/analytics_service.dart';
@@ -10,7 +11,9 @@ import 'package:mallow_wallet/core/network/auth_service.dart';
 import 'package:mallow_wallet/core/router/auth_state_notifier.dart';
 import 'package:mallow_wallet/core/security/app_lock_bloc.dart';
 import 'package:mallow_wallet/core/security/secure_storage.dart';
+import 'package:mallow_wallet/core/services/app_reset_service.dart';
 import 'package:mallow_wallet/di.dart';
+import 'package:mallow_wallet/features/browser/services/browser_data_clearer.dart';
 import 'package:mallow_wallet/features/settings/screens/reset_app_screen.dart';
 import 'package:mallow_wallet/shared/theme/mallow_theme.dart';
 import 'package:mocktail/mocktail.dart';
@@ -22,6 +25,10 @@ class _MockWalletManager extends Mock implements WalletManager {}
 class _MockAnalytics extends Mock implements AnalyticsService {}
 
 class _MockAuthNotifier extends Mock implements AuthStateNotifier {}
+
+class _MockBrowserDataClearer extends Mock implements BrowserDataClearer {}
+
+class _MockStorage extends Mock implements SecureWalletStorage {}
 
 class _MockAppLockBloc extends MockBloc<AppLockEvent, AppLockState>
     implements AppLockBloc {}
@@ -41,6 +48,8 @@ void main() {
   late _MockAnalytics analytics;
   late _MockAuthNotifier authNotifier;
   late _MockAppLockBloc appLock;
+  late _MockBrowserDataClearer browserDataClearer;
+  late _MockStorage storage;
   late GlobalKey<NavigatorState> navKey;
 
   setUpAll(() => registerFallbackValue(const AppLockEvent.init()));
@@ -52,6 +61,11 @@ void main() {
     analytics = _MockAnalytics();
     authNotifier = _MockAuthNotifier();
     appLock = _MockAppLockBloc();
+    // The real clearer talks to the WebView platform channels, which never
+    // answer under the test's fake clock; the wipe would stall on its first
+    // step. Its own behaviour is covered by the reset-service tests.
+    browserDataClearer = _MockBrowserDataClearer();
+    storage = _MockStorage();
     whenListen(
       appLock,
       const Stream<AppLockState>.empty(),
@@ -70,6 +84,9 @@ void main() {
       () => sl.isRegistered<AuthStateNotifier>()
           ? sl.unregister<AuthStateNotifier>()
           : null,
+      () => sl.isRegistered<SecureWalletStorage>()
+          ? sl.unregister<SecureWalletStorage>()
+          : null,
     ]) {
       unregister();
     }
@@ -77,11 +94,20 @@ void main() {
     sl.registerSingleton<WalletManager>(walletManager);
     sl.registerSingleton<AnalyticsService>(analytics);
     sl.registerSingleton<AuthStateNotifier>(authNotifier);
+    sl.registerSingleton<SecureWalletStorage>(storage);
 
+    when(
+      () => browserDataClearer.clearForAppReset(),
+    ).thenAnswer((_) async => const []);
     when(() => auth.logout()).thenAnswer((_) async {});
     when(() => walletManager.deleteWallet()).thenAnswer((_) async => const []);
     when(() => analytics.resetDeviceIdentity()).thenAnswer((_) async {});
     when(() => authNotifier.onLogout()).thenAnswer((_) async {});
+    // No app lock configured, so the screen's own gate passes without a
+    // prompt. The test that exercises the gate overrides this.
+    when(
+      () => storage.loadAuthFactors(),
+    ).thenAnswer((_) async => (hasPin: false, biometricEnabled: false));
   });
 
   tearDown(() {
@@ -89,7 +115,17 @@ void main() {
     sl.unregister<WalletManager>();
     sl.unregister<AnalyticsService>();
     sl.unregister<AuthStateNotifier>();
+    sl.unregister<SecureWalletStorage>();
   });
+
+  /// The real teardown over the mocked services, so the wallet wipe and its
+  /// reported failures reach the screen exactly as they do in the app.
+  AppResetService resetService() => AppResetService(
+    authService: auth,
+    walletManager: walletManager,
+    analytics: analytics,
+    browserDataClearer: browserDataClearer,
+  );
 
   Future<void> pumpScreen(WidgetTester tester) async {
     tester.view.physicalSize = const Size(400, 900);
@@ -100,7 +136,7 @@ void main() {
         value: appLock,
         child: MaterialApp(
           theme: MallowTheme.lightTheme,
-          home: const ResetAppScreen(),
+          home: ResetAppScreen(resetService: resetService()),
         ),
       ),
     );
@@ -125,7 +161,9 @@ void main() {
     );
     unawaited(
       navKey.currentState!.push(
-        MaterialPageRoute<void>(builder: (_) => const ResetAppScreen()),
+        MaterialPageRoute<void>(
+          builder: (_) => ResetAppScreen(resetService: resetService()),
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -148,6 +186,7 @@ void main() {
     await pumpScreen(tester);
     await armAndReset(tester);
 
+    verify(() => browserDataClearer.clearForAppReset()).called(1);
     verify(() => walletManager.deleteWallet()).called(1);
     verify(() => authNotifier.onLogout()).called(1);
     verify(() => appLock.add(const AppLockEvent.reset())).called(1);
@@ -225,6 +264,24 @@ void main() {
     // snack bar is the one step that needs it, so it is the one step skipped.
     expect(find.text(_partialWipeMessage), findsNothing);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('the screen re-authenticates before the wipe, and a failed gate '
+      'wipes nothing', (tester) async {
+    // Reached without the Security & Privacy gate, or long after it, the
+    // screen must still prove the user before erasing every key.
+    when(
+      () => storage.loadAuthFactors(),
+    ).thenThrow(PlatformException(code: 'read_failed'));
+
+    await pumpScreen(tester);
+    await armAndReset(tester);
+
+    verify(() => storage.loadAuthFactors()).called(1);
+    verifyNever(() => walletManager.deleteWallet());
+    verifyNever(() => browserDataClearer.clearForAppReset());
+    verifyNever(() => authNotifier.onLogout());
+    verifyNever(() => appLock.add(any()));
   });
 }
 

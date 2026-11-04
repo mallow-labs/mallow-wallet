@@ -5,6 +5,10 @@ import '../../artwork/services/artwork_bloc.dart' show ArtworkRoyaltySplit;
 /// addresses are impossible because this is mallow's controlled fee account.
 const kMallowFeeAddress = 'MFHHByMGfk84s3GZ8dZHaQQ3gbpQYc2NnQYPg2tRCSx';
 
+/// Shared seller-side disclosure for native payouts to other creators.
+const kCreatorWalletRentNotice =
+    'New creator wallets may need rent, paid from your proceeds.';
+
 /// Recipient label for proceeds rows.
 enum ProceedsLabel { you, creator, mallow }
 

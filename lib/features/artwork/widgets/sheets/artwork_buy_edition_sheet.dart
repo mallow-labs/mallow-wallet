@@ -18,8 +18,8 @@ import 'listing_disclosures.dart';
 /// Bottom sheet for limited-edition / open-edition listings (printable
 /// master). Shows price, supply progress, and an optional countdown.
 ///
-/// Triggered by `viewer` × `buyNow` × (`limitedEdition` ∨ `openEdition`) — see
-/// `docs/artwork_state.md`.
+/// Triggered by `viewer` × `buyNow` × (`limitedEdition` ∨ `openEdition`) in
+/// `resolveArtworkActionState`.
 class ArtworkBuyEditionSheet extends StatelessWidget {
   const ArtworkBuyEditionSheet({
     required this.artwork,

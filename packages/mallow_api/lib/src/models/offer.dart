@@ -26,8 +26,7 @@ enum OfferType {
 
 /// Filter for `POST /v1/offers`. Combine [buyer] + [nftMint] +
 /// `activeOnly: true` to detect whether a connected wallet already has a
-/// live offer on a given mint (the `userOwnOffer` signal documented in
-/// `docs/artwork_state.md`).
+/// live offer on a given mint (the `userOwnOffer` signal).
 //
 // Per-field `includeIfNull: false` — backend zod schema accepts missing
 // keys but rejects explicit `null`.

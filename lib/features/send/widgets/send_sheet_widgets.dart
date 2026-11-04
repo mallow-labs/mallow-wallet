@@ -69,7 +69,7 @@ class SendStepButtons extends StatelessWidget {
   final bool enabled;
 
   /// Active source wallet's address. When non-null, the "Your wallet" line is
-  /// rendered above the buttons (send-wallet-select spec).
+  /// rendered above the buttons.
   final String? sourceAddress;
 
   /// Tap handler for "Switch". Null hides the Switch action — used when only
@@ -115,7 +115,7 @@ class SendStepButtons extends StatelessWidget {
 }
 
 /// "Your wallet: `<addr>` · Switch" line shown above the bottom buttons on the
-/// recipient, amount, and confirm steps (send-wallet-select spec).
+/// recipient, amount, and confirm steps.
 class SendSourceLine extends StatelessWidget {
   const SendSourceLine({required this.address, this.onSwitch, super.key});
 
@@ -281,6 +281,49 @@ class SendWarningNotice extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Says the send pays a request, and who made it and why, in the request's
+/// own words. Under the step header of a send opened from a payment request.
+///
+/// The label and message are the requester's text, shown as given and capped
+/// to a few lines: anyone can print a QR code, so they describe the request
+/// rather than vouch for it.
+class SendRequestNote extends StatelessWidget {
+  const SendRequestNote({this.label, this.message, super.key});
+
+  final String? label;
+  final String? message;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.mallowColors;
+    final label = this.label?.trim();
+    final message = this.message?.trim();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          label == null || label.isEmpty
+              ? 'Payment request'
+              : 'Payment request from $label',
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: MallowTheme.uiMeta.copyWith(color: colors.textPrimary),
+        ),
+        if (message != null && message.isNotEmpty) ...[
+          const SizedBox(height: 2),
+          Text(
+            message,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: MallowTheme.uiCaption.copyWith(color: colors.textSecondary),
+          ),
+        ],
+      ],
     );
   }
 }

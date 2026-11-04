@@ -11,7 +11,6 @@ import '../../../shared/widgets/mallow_sheet.dart';
 import '../../../shared/widgets/mallow_svg_icon.dart';
 import '../../../shared/widgets/mallow_underline_tab_bar.dart';
 import '../../../shared/widgets/sheet_drag_handle.dart';
-import '../../../shared/widgets/sheet_overscroll_dismiss.dart';
 import '../../portfolio/models/token_balance.dart';
 import '../../portfolio/widgets/unverified_tokens_header.dart';
 
@@ -295,42 +294,38 @@ class _TokenSelectorModalState extends State<TokenSelectorModal> {
                             ),
                           ),
                   )
-                : SheetOverscrollDismiss(
-                    child: ListView.builder(
-                      keyboardDismissBehavior:
-                          ScrollViewKeyboardDismissBehavior.onDrag,
-                      padding: EdgeInsets.only(
-                        bottom: sheetBottomInset(context),
-                      ),
-                      // Reached only with rows on screen, and a browse tab with
-                      // rows has finished loading — so this trailing spinner is
-                      // always the catalog-search one.
-                      itemCount: rows.length + (loading ? 1 : 0),
-                      itemBuilder: (context, index) {
-                        if (index == rows.length) {
-                          return const Padding(
-                            padding: EdgeInsets.all(MallowTheme.spacingMd),
-                            child: Center(
-                              child: SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator.adaptive(
-                                  strokeWidth: 2,
-                                ),
+                : ListView.builder(
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
+                    padding: EdgeInsets.only(bottom: sheetBottomInset(context)),
+                    // Reached only with rows on screen, and a browse tab with
+                    // rows has finished loading — so this trailing spinner is
+                    // always the catalog-search one.
+                    itemCount: rows.length + (loading ? 1 : 0),
+                    itemBuilder: (context, index) {
+                      if (index == rows.length) {
+                        return const Padding(
+                          padding: EdgeInsets.all(MallowTheme.spacingMd),
+                          child: Center(
+                            child: SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator.adaptive(
+                                strokeWidth: 2,
                               ),
                             ),
-                          );
-                        }
-                        final token = rows[index];
-                        if (token is! TokenBalance) {
-                          return const UnverifiedTokensHeader();
-                        }
-                        return _TokenListTile(
-                          token: token,
-                          onTap: () => Navigator.of(context).pop(token),
+                          ),
                         );
-                      },
-                    ),
+                      }
+                      final token = rows[index];
+                      if (token is! TokenBalance) {
+                        return const UnverifiedTokensHeader();
+                      }
+                      return _TokenListTile(
+                        token: token,
+                        onTap: () => Navigator.of(context).pop(token),
+                      );
+                    },
                   ),
           ),
         ],

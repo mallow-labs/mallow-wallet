@@ -512,7 +512,7 @@ void main() {
       expect(broadcast.metadata?.imageUrl, 'https://example.com/nft.png');
     });
 
-    // WHY (FINDING 1, funds loss): a stale low gas limit from another flow's
+    // WHY (funds loss): a stale low gas limit from another flow's
     // persisted custom fee (e.g. a 25 200-gas native send) must never sign a
     // ~72 000-gas safeTransferFrom — it would mine an out-of-gas revert, burning
     // the fee and leaving the NFT unmoved. execute floors the override at the

@@ -18,6 +18,9 @@ class DigitalAsset {
     required this.permanentFreezeDelegateFrozen,
     required this.hasMasterEditionPlugin,
     this.delegated = false,
+    this.compressionFlags,
+    this.nonTransferable = false,
+    this.hasPermanentDelegate = false,
     this.owner,
     this.updateAuthority,
     this.currentSize,
@@ -48,6 +51,9 @@ class DigitalAsset {
       isCompressed: isCompressed,
     );
 
+    final compressionFlags = tokenStandard == TokenStandard.cnftV2
+        ? (compression['flags'] as num?)?.toInt()
+        : 0;
     final ownership = (json['ownership'] as Map<String, dynamic>?) ?? {};
     final authorities = (json['authorities'] as List<dynamic>?) ?? [];
     final supplyObj = (json['supply'] as Map<String, dynamic>?) ?? {};
@@ -185,8 +191,18 @@ class DigitalAsset {
       id: json['id'] as String,
       tokenStandard: tokenStandard,
       isMutable: json['mutable'] == true,
+      compressionFlags: compressionFlags,
+      nonTransferable:
+          ownership['non_transferable'] == true ||
+          ((compressionFlags ?? 0) & 4) != 0,
+      hasPermanentDelegate: const [
+        'permanent_freeze_delegate',
+        'permanent_transfer_delegate',
+        'permanent_burn_delegate',
+      ].any(plugins.containsKey),
       frozen:
           ownership['frozen'] == true ||
+          ((compressionFlags ?? 0) & 3) != 0 ||
           freezeDelegateFrozen ||
           permanentFreezeDelegateFrozen,
       delegated: ownership['delegated'] == true,
@@ -231,6 +247,27 @@ class DigitalAsset {
   /// Whether DAS reports a delegate on the token. For a pNFT this — not
   /// [frozen] — separates "staked or listed elsewhere" from "in the wallet".
   final bool delegated;
+
+  /// Bubblegum v2 leaf flags; null means DAS did not resolve them.
+  /// Any set bit prevents marketplace escrow entry.
+  final int? compressionFlags;
+  final bool nonTransferable;
+
+  /// Plugin presence, independent of authority type or current frozen state.
+  final bool hasPermanentDelegate;
+
+  /// Escrow must remain deliverable without a collection delegate's consent.
+  /// A missing or mismatched collection cannot prove that guarantee.
+  bool isCnftV2TradeEligible({DigitalAsset? collection}) =>
+      tokenStandard == TokenStandard.cnftV2 &&
+      compressionFlags == 0 &&
+      !frozen &&
+      !nonTransferable &&
+      (collectionKey == null ||
+          (collection != null &&
+              collection.id == collectionKey &&
+              collection.tokenStandard == TokenStandard.coreCollection &&
+              !collection.hasPermanentDelegate));
 
   /// Print current supply (NFT/pNFT) — 0 means eligible for burn
   final int supply;
@@ -352,6 +389,8 @@ class ArtworkPermissions {
     required this.canList,
     this.canDownload = false,
     this.canHide = false,
+    this.canTrade = false,
+    this.tokenStandard,
     this.onChainRoyaltyBps,
   });
 
@@ -359,6 +398,12 @@ class ArtworkPermissions {
   final bool canEdit;
   final bool canBurn;
   final bool canList;
+
+  /// Asset eligibility for marketplace entry, independent of the viewer.
+  final bool canTrade;
+
+  /// DAS-derived standard, independent of the indexer's cached spelling.
+  final TokenStandard? tokenStandard;
 
   /// True when the artwork's on-chain owner or update authority (creator)
   /// matches any address the user controls — an imported signable wallet, or a

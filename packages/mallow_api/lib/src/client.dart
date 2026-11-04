@@ -21,7 +21,12 @@ import 'generated/openapi.models.swagger.dart'
         ShowNsfwRequest,
         ShowNsfwResponse,
         StakingGetClaimTxRequest,
-        UpdateOwnerRequest;
+        UpdateOwnerRequest,
+        OpenSeaPurchaseQuote,
+        OpenSeaPurchaseQuoteRequest,
+        OpenSeaPurchasePrepareRequest,
+        OpenSeaPurchasePrepareResponse,
+        OpenSeaPurchaseConfirmRequest;
 import 'models/login.dart';
 import 'models/market.dart';
 import 'models/market_event.dart';
@@ -46,6 +51,19 @@ part 'client.g.dart';
 abstract class MallowApiClient {
   factory MallowApiClient(Dio dio, {String baseUrl, ParseErrorLogger? errorLogger}) =
       _MallowApiClient;
+
+  @POST('/v1/opensea/purchase/quote')
+  Future<ApiResponse<OpenSeaPurchaseQuote>> quoteOpenSeaPurchase(
+    @Body() OpenSeaPurchaseQuoteRequest request,
+  );
+
+  @POST('/v1/opensea/purchase/prepare')
+  Future<OpenSeaPurchasePrepareResponse> prepareOpenSeaPurchase(
+    @Body() OpenSeaPurchasePrepareRequest request,
+  );
+
+  @POST('/v1/opensea/purchase/confirm')
+  Future<void> confirmOpenSeaPurchase(@Body() OpenSeaPurchaseConfirmRequest request);
 
   // --- Home Feed ---
 

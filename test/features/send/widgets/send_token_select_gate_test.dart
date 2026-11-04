@@ -19,7 +19,7 @@ class MockTokenBalanceBloc
 
 class MockRemoteConfigService extends Mock implements RemoteConfigService {}
 
-/// Phase 4b — the send flow's entry gate.
+/// The send flow's entry gate.
 ///
 /// `showSendSheet` cannot be gated: neither the chain nor the native-vs-token
 /// split exists until a row here is tapped. So this picker is where the

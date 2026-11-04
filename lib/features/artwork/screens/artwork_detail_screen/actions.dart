@@ -7,9 +7,10 @@ part of '../artwork_detail_screen.dart';
 
 /// User-initiated action handlers for [_ArtworkDetailViewState] — buy /
 /// offer / bid / raffle entry points, plus the management actions
-/// (cancel listing, update listing, etc.). Each handler enforces the
-/// shared `guardViewOnly` + mounted gate before dispatching to the
-/// matching bloc.
+/// (cancel listing, update listing, etc.). Each handler enforces a signer
+/// gate + mounted check before dispatching to the matching bloc:
+/// `guardSolanaSigner` for every Solana marketplace action, `guardViewOnly`
+/// for the rest.
 extension _ArtworkDetailActions on _ArtworkDetailViewState {
   /// The currently loaded artwork, or null while the bloc is loading/errored.
   ArtworkDetails? _loadedArtwork() {
@@ -119,6 +120,78 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
   }
 
   Future<void> _onBuy(ArtworkDetails artwork) async {
+    if (artwork.lastSource == MarketSource.opensea &&
+        artwork.chain == 'ethereum') {
+      if (await guardFlowDisabled(
+        context,
+        const FlowKey(Chain.ethereum, AppFlow.fixedPriceBuy),
+      )) {
+        return;
+      }
+      if (!mounted || _marketSheetActive) return;
+      _marketSheetActive = true;
+      try {
+        final receipt = await showMallowSheet<OpenSeaPurchaseReceipt>(
+          context: context,
+          isScrollControlled: true,
+          isDismissible: false,
+          enableDrag: false,
+          builder: (_) => OpenSeaPurchaseSheet(artwork: artwork),
+        );
+        if (!mounted || receipt == null) return;
+        context.read<ArtworkBloc>().add(const ArtworkEvent.refresh());
+        context.read<TokenBalanceBloc>().add(const TokenBalanceEvent.refresh());
+      } finally {
+        _marketSheetActive = false;
+      }
+      return;
+    }
+
+    if (artwork.lastSource == MarketSource.magicEden) {
+      if (await guardFlowDisabled(
+        context,
+        const FlowKey.solana(AppFlow.fixedPriceBuy),
+      )) {
+        return;
+      }
+      if (!mounted) return;
+      if (await guardSolanaSigner(context, action: 'buy this artwork')) return;
+      if (!mounted || _marketSheetActive) return;
+      _marketSheetActive = true;
+      try {
+        final receipt = await showMallowSheet<MagicEdenPurchaseReceipt>(
+          context: context,
+          isScrollControlled: true,
+          isDismissible: false,
+          enableDrag: false,
+          builder: (_) => MagicEdenPurchaseSheet(artwork: artwork),
+        );
+        if (!mounted || receipt == null) return;
+        if (receipt.buyer == sl<AuthService>().currentAddress) {
+          _pendingClaims.add(artwork.mintAccount);
+          _optimisticPermissionPins.add(artwork.mintAccount);
+          setState(() {
+            _permissions = ArtworkPermissions(
+              canTransfer: true,
+              canEdit: false,
+              canBurn: false,
+              canList: true,
+              onChainRoyaltyBps: _permissions?.onChainRoyaltyBps,
+            );
+          });
+        }
+        context.read<ArtworkBloc>().add(
+          ArtworkEvent.optimisticClaimOwnership(
+            owner: receipt.buyer,
+            signature: receipt.signature,
+          ),
+        );
+        context.read<TokenBalanceBloc>().add(const TokenBalanceEvent.refresh());
+      } finally {
+        _marketSheetActive = false;
+      }
+      return;
+    }
     // Fixed-price buys and edition-print buys are separate builders behind
     // separate sheets ([ArtworkBuySheet] / [ArtworkBuyEditionSheet]) and
     // therefore separate cells. Resolved through the SAME shared helper
@@ -136,7 +209,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
     final buyFlow = printsEdition ? AppFlow.editionBuy : AppFlow.fixedPriceBuy;
     if (await guardFlowDisabled(context, FlowKey.solana(buyFlow))) return;
     if (!mounted) return;
-    if (await guardViewOnly(context)) return;
+    if (await guardSolanaSigner(context, action: 'buy this artwork')) return;
     if (!mounted) return;
     // SYOP ("set your own price"): the listing's on-chain price is 0 and the
     // buyer names the amount, so the flow gains an entry step and the entered
@@ -283,7 +356,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
   /// The escrowed own-offer amount the make-offer balance gate may net off the
   /// new price, or null when it must not.
   ///
-  /// The own-offer lookup is session-wide (A1b), but this is a **signing** gate:
+  /// The own-offer lookup is session-wide, but this is a **signing** gate:
   /// `CreateOfferTxRequest.buyer` is the ACTIVE wallet. [_onMakeOffer] re-points
   /// the signer to the maker (like [_onCancelOffer]) *before* it evaluates this,
   /// so an "Update offer" that genuinely re-bids credits the escrow it is about
@@ -312,12 +385,12 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
     }
     if (!mounted) return;
     // "Update offer" reaches this handler too, and the own-offer lookup is
-    // session-wide (A1b) — so the live offer may have been placed by a wallet
+    // session-wide — so the live offer may have been placed by a wallet
     // that is no longer active. `CreateOfferTxRequest.buyer` is the active
     // signer, so without re-pointing, "Update offer" would escrow a SECOND
     // full-price offer for the active wallet instead of re-bidding the existing
     // one. Mirror `_onCancelOffer`: switch to the maker before dispatching, and
-    // before `guardViewOnly` (A1d) so a watch-only active wallet can't block an
+    // before `guardSolanaSigner` so a watch-only active wallet can't block an
     // update whose maker is signable. Gate on `_userOwnOffer`, not on
     // `_userOwnOfferBuyer` alone: the maker outlives a cancel (it is held for
     // the reconcile poll), and a fresh offer must stay with the active wallet.
@@ -333,7 +406,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
       return;
     }
     if (!mounted) return;
-    if (await guardViewOnly(context)) {
+    if (await guardSolanaSigner(context, action: 'make an offer')) {
       await restoreSigner(previousSigner);
       return;
     }
@@ -417,7 +490,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
       return;
     }
     if (!mounted) return;
-    if (await guardViewOnly(context)) return;
+    if (await guardSolanaSigner(context, action: 'place a bid')) return;
     if (!mounted) return;
     final auction = artwork.auctionMetadata;
     final currencyMint = auction?.bidMint ?? artwork.currency;
@@ -592,7 +665,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
       return;
     }
     if (!mounted) return;
-    if (await guardViewOnly(context)) return;
+    if (await guardSolanaSigner(context, action: 'buy tickets')) return;
     if (!mounted) return;
     final raffleKey = artwork.raffleMetadata?.raffleAccount;
     if (raffleKey == null || raffleKey.isEmpty) return;
@@ -728,7 +801,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
     }
     if (!mounted) return;
     // Re-point the signer to the session wallet that actually holds the piece
-    // BEFORE `guardViewOnly` (A1d): the guard reads the *active* wallet, so
+    // BEFORE `guardSolanaSigner`: the guard reads the *active* wallet, so
     // running it first would block a watch-only active wallet even though a
     // signable session wallet is the authority. Post-switch it reads the newly
     // selected wallet, so it still blocks a view-only *active owner*.
@@ -740,7 +813,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
       return;
     }
     if (!mounted) return;
-    if (await guardViewOnly(context)) {
+    if (await guardSolanaSigner(context, action: 'accept this offer')) {
       await restoreSigner(previousSigner);
       return;
     }
@@ -875,7 +948,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
     // Snapshot the active signer so an abandoned transfer restores it. EVM
     // signs by holder wallet id (no active re-point), so nothing to snapshot.
     final previousSigner = isEvm ? null : activeSignerSnapshot();
-    // Signer first, guard second (A1d): `guardViewOnly` reads the *active*
+    // Signer first, guard second: `guardViewOnly` reads the *active*
     // wallet, so running it first blocks a watch-only active wallet even when
     // the holder is a signable session wallet. Post-switch it reads the newly
     // selected wallet, so a view-only active holder is still blocked.
@@ -954,7 +1027,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
     // builds against the active wallet as soon as the sheet opens, so the
     // re-point must happen up front — hence restore, not defer).
     final previousSigner = activeSignerSnapshot();
-    // Signer first, guard second — see `_handleTransfer` (A1d).
+    // Signer first, guard second — see `_handleTransfer`.
     if (!await ensureSigner(context, artwork.ownerAddress)) return;
     if (!mounted) return;
     if (await guardViewOnly(context)) {
@@ -1040,7 +1113,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
     //
     // `UpdateFixedPriceTxRequest.seller` is the active signer, so re-point to
     // the owning session wallet before the sheet opens — and before
-    // `guardViewOnly` (A1d).
+    // `guardSolanaSigner`.
     final previousSigner = activeSignerSnapshot();
     if (!await ensureSignerForAny(
       context,
@@ -1049,7 +1122,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
       return;
     }
     if (!mounted) return;
-    if (await guardViewOnly(context)) {
+    if (await guardSolanaSigner(context, action: 'manage this listing')) {
       await restoreSigner(previousSigner);
       return;
     }
@@ -1135,7 +1208,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
       return;
     }
     if (!mounted) return;
-    if (await guardViewOnly(context)) {
+    if (await guardSolanaSigner(context, action: 'manage this listing')) {
       await restoreSigner(previousSigner);
       return;
     }
@@ -1144,7 +1217,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
   }
 
   // ----- Action-sheet callback wrappers ---------------------------------
-  // Each wrapper enforces the shared `guardViewOnly` + mounted gate and
+  // Each wrapper enforces the shared `guardSolanaSigner` + mounted gate and
   // then dispatches the matching bloc event. Kept here so the dispatcher
   // function in `action_sheet.dart` stays bloc-/state-free.
 
@@ -1164,7 +1237,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
     // `CancelOfferTxRequest.buyer` is the active signer, and the offer may have
     // been placed by any wallet in the session (the own-offer lookup is
     // session-wide — see `_maybeLoadUserOwnOffer`). Re-point to that maker
-    // before dispatching, and before `guardViewOnly` (A1d).
+    // before dispatching, and before `guardSolanaSigner`.
     final previousSigner = activeSignerSnapshot();
     if (!await ensureSigner(
       context,
@@ -1176,7 +1249,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
       return;
     }
     if (!mounted) return;
-    if (await guardViewOnly(context)) {
+    if (await guardSolanaSigner(context, action: 'cancel your offer')) {
       await restoreSigner(previousSigner);
       return;
     }
@@ -1213,10 +1286,10 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
     // pushed sell flow (which relies on the active wallet being the holder), so
     // the re-point must happen up front; restore it once the flow returns.
     final previousSigner = activeSignerSnapshot();
-    // Signer first, guard second — see `_handleTransfer` (A1d).
+    // Signer first, guard second — see `_handleTransfer`.
     if (!await ensureSigner(context, artwork.ownerAddress)) return;
     if (!mounted) return;
-    if (await guardViewOnly(context)) {
+    if (await guardSolanaSigner(context, action: 'list this artwork')) {
       await restoreSigner(previousSigner);
       return;
     }
@@ -1254,12 +1327,12 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
     if (!mounted) return;
     // `CancelAuctionTxRequest.seller` is the active signer — re-point to the
     // auction's seller (a session wallet that need not be active) before
-    // dispatching, and before `guardViewOnly` (A1d).
+    // dispatching, and before `guardSolanaSigner`.
     final artwork = _loadedArtwork();
     final previousSigner = activeSignerSnapshot();
     if (!await ensureSigner(context, artwork?.auctionMetadata?.seller)) return;
     if (!mounted) return;
-    if (await guardViewOnly(context)) {
+    if (await guardSolanaSigner(context, action: 'manage this auction')) {
       await restoreSigner(previousSigner);
       return;
     }
@@ -1318,14 +1391,14 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
     if (!mounted) return;
     final artwork = _loadedArtwork();
     final auction = artwork?.auctionMetadata;
-    // A1a: resolve the signer FIRST. Everything below is derived from `me` —
+    // Resolve the signer FIRST. Everything below is derived from `me` —
     // the proceeds breakdown and the optimistic ownership bookkeeping — so it
     // must be computed against the post-switch signer, or a seller settling
     // from a non-active wallet gets a gas-only sheet with no proceeds line.
     // `SettleAuctionTxRequest.caller` is either side of the auction; the active
     // wallet wins over candidate order inside `ensureSignerForAny`, so a winner
     // tapping "Claim NFT" is never switched to the seller. Signer before
-    // `guardViewOnly` (A1d).
+    // `guardSolanaSigner`.
     final previousSigner = activeSignerSnapshot();
     if (!await ensureSignerForAny(context, [
       auction?.seller,
@@ -1334,7 +1407,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
       return;
     }
     if (!mounted) return;
-    if (await guardViewOnly(context)) {
+    if (await guardSolanaSigner(context, action: 'settle this auction')) {
       await restoreSigner(previousSigner);
       return;
     }
@@ -1433,7 +1506,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
       return;
     }
     if (!mounted) return;
-    if (await guardViewOnly(context)) {
+    if (await guardSolanaSigner(context, action: 'manage this raffle')) {
       await restoreSigner(previousSigner);
       return;
     }
@@ -1464,7 +1537,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
       return;
     }
     if (!mounted) return;
-    if (await guardViewOnly(context)) {
+    if (await guardSolanaSigner(context, action: 'claim this artwork')) {
       await restoreSigner(previousSigner);
       return;
     }
@@ -1495,7 +1568,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
       return;
     }
     if (!mounted) return;
-    if (await guardViewOnly(context)) {
+    if (await guardSolanaSigner(context, action: 'claim your proceeds')) {
       await restoreSigner(previousSigner);
       return;
     }

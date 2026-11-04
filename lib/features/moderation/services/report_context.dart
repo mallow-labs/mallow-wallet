@@ -5,6 +5,8 @@ import 'package:go_router/go_router.dart';
 import 'package:mallow_api/mallow_api.dart' as api;
 import 'package:package_info_plus/package_info_plus.dart';
 
+import '../../../core/config/environment.dart';
+
 /// The route pattern the user is looking at (e.g. `/artwork/:mint`), used as
 /// the report's `screen`. The *pattern*, not the resolved path — the target id
 /// is already its own field and repeating it here would just be noise.
@@ -36,9 +38,11 @@ Future<api.ReportContext> buildReportContext({required String screen}) async {
   } catch (_) {
     appVersion = null;
   }
+  final buildLabel = Config.buildLabel;
   return api.ReportContext(
     screen: screen,
     platform: platform,
     appVersion: appVersion,
+    buildLabel: buildLabel.isEmpty ? null : buildLabel,
   );
 }

@@ -10,8 +10,8 @@ import 'artwork_funding_source.dart';
 /// Bottom sheet shown to non-owners while an auction is active. Mirrors the
 /// webapp's `AuctionBidBox`.
 ///
-/// Triggered by (`viewer` ∨ `creator`) × `auction` × not-ended — see
-/// `docs/artwork_state.md`. The timed body (price + countdown header, the
+/// Triggered by (`viewer` ∨ `creator`) × `auction` × not-ended in
+/// `resolveArtworkActionState`. The timed body (price + countdown header, the
 /// final-window salmon progress bar, the highest-bid strip, and the
 /// ticker that auto-updates on new bids and auction end) lives in the shared
 /// [ArtworkAuctionLivePanel]; this sheet only supplies the CTA, which renders

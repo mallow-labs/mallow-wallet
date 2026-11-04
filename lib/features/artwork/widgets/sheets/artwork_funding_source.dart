@@ -16,8 +16,7 @@ import '../../../send/widgets/send_wallet_select_sheet.dart';
 import '../../../../shared/utils/chain.dart';
 
 /// "Your wallet: `<addr>` · Switch" source line above an artwork **funding**
-/// CTA — buy, make offer, place bid, buy raffle tickets. Part of the
-/// wallet-switching contract.
+/// CTA — buy, make offer, place bid, buy raffle tickets.
 ///
 /// Same shape as the send and staking pickers: candidates come from
 /// [SessionPortfolioAggregator.sendSourcesForMint] keyed on the flow's own

@@ -2,12 +2,14 @@ import 'dart:async';
 
 import 'package:bloc_test/bloc_test.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mallow_wallet/core/crypto/wallet_manager.dart';
 import 'package:mallow_wallet/core/models/account.dart';
 import 'package:mallow_wallet/core/network/auth_service.dart';
 import 'package:mallow_wallet/core/router/auth_state_notifier.dart';
+import 'package:mallow_wallet/core/security/secure_storage.dart';
 import 'package:mallow_wallet/core/services/wallet_repository.dart';
 import 'package:mallow_wallet/di.dart';
 import 'package:mallow_wallet/features/accounts/services/account_wallet_bloc.dart';
@@ -22,6 +24,8 @@ class _MockWalletManager extends Mock implements WalletManager {}
 class _MockAuth extends Mock implements AuthService {}
 
 class _MockAuthNotifier extends Mock implements AuthStateNotifier {}
+
+class _MockStorage extends Mock implements SecureWalletStorage {}
 
 class _MockAccountWalletBloc
     extends MockBloc<AccountWalletEvent, AccountWalletState>
@@ -97,6 +101,7 @@ void main() {
   late _MockAuth auth;
   late _MockAuthNotifier authNotifier;
   late _MockAccountWalletBloc accountWalletBloc;
+  late _MockStorage storage;
 
   setUp(() {
     repo = _MockRepo();
@@ -104,6 +109,7 @@ void main() {
     auth = _MockAuth();
     authNotifier = _MockAuthNotifier();
     accountWalletBloc = _MockAccountWalletBloc();
+    storage = _MockStorage();
 
     for (final register in <void Function()>[
       () => sl.registerSingleton<WalletRepository>(repo),
@@ -111,6 +117,7 @@ void main() {
       () => sl.registerSingleton<AuthService>(auth),
       () => sl.registerSingleton<AuthStateNotifier>(authNotifier),
       () => sl.registerSingleton<AccountWalletBloc>(accountWalletBloc),
+      () => sl.registerSingleton<SecureWalletStorage>(storage),
     ]) {
       register();
     }
@@ -128,6 +135,11 @@ void main() {
     when(() => walletManager.switchWalletById(any())).thenAnswer((_) async {});
     when(() => walletManager.clearWalletSelection()).thenAnswer((_) async {});
     when(() => authNotifier.onLogout()).thenAnswer((_) async {});
+    // No app lock configured, so the removal gate has nothing to ask for and
+    // passes. The tests below that exercise the gate override this.
+    when(
+      () => storage.loadAuthFactors(),
+    ).thenAnswer((_) async => (hasPin: false, biometricEnabled: false));
   });
 
   tearDown(() {
@@ -136,6 +148,7 @@ void main() {
     sl.unregister<AuthService>();
     sl.unregister<AuthStateNotifier>();
     sl.unregister<AccountWalletBloc>();
+    sl.unregister<SecureWalletStorage>();
   });
 
   Future<void> pumpScreen(WidgetTester tester) async {
@@ -350,5 +363,60 @@ void main() {
     // Let the error snack bar's own timer expire before the test ends.
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
+  });
+
+  testWidgets('removing a wallet whose key is stored here re-authenticates, '
+      'and a failed gate removes nothing', (tester) async {
+    // The gate cannot read the lock factors, so it denies: an unreadable
+    // store is not an unlocked one.
+    when(
+      () => storage.loadAuthFactors(),
+    ).thenThrow(PlatformException(code: 'read_failed'));
+
+    await pumpScreen(tester);
+    await openRemoveSheet(tester);
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+
+    verify(() => storage.loadAuthFactors()).called(1);
+    verifyNever(() => walletManager.removeWallet(any()));
+    expect(find.text('Edit wallet'), findsOneWidget);
+  });
+
+  testWidgets('a Ledger wallet is removed without a prompt: no key of its is '
+      'stored here', (tester) async {
+    when(() => repo.getWalletById('w-1')).thenAnswer((_) async => ledgerWallet);
+    when(
+      () => storage.loadAuthFactors(),
+    ).thenThrow(PlatformException(code: 'read_failed'));
+
+    await pumpScreen(tester);
+    await openRemoveSheet(tester);
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+
+    verifyNever(() => storage.loadAuthFactors());
+    verify(() => walletManager.removeWallet('w-1')).called(1);
+  });
+
+  testWidgets('with a PIN set the removal asks for it, and dismissing the '
+      'sheet removes nothing', (tester) async {
+    when(
+      () => storage.loadAuthFactors(),
+    ).thenAnswer((_) async => (hasPin: true, biometricEnabled: false));
+
+    await pumpScreen(tester);
+    await openRemoveSheet(tester);
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Enter your PIN'), findsOneWidget);
+    // Tap the barrier above the sheet: a dismissed sheet is not a pass.
+    await tester.tapAt(const Offset(200, 40));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Enter your PIN'), findsNothing);
+    verifyNever(() => walletManager.removeWallet(any()));
+    expect(find.text('Edit wallet'), findsOneWidget);
   });
 }

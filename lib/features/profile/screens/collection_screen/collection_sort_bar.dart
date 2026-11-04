@@ -1,9 +1,8 @@
 part of '../collection_screen.dart';
 
 /// Sort label + view-mode toggle row, with a fade-out gradient at the bottom.
-/// Used in two positions: in-flow at its natural scroll position
-/// ([topInset] = 0) and as a floating overlay at the top of the screen when
-/// pinning kicks in ([topInset] = system safe-area height).
+/// Used in two positions: in-flow at its natural scroll position, and as a
+/// floating overlay under a [PinnedTopBar] once pinning kicks in.
 class _CollectionSortBar extends StatelessWidget {
   const _CollectionSortBar({
     required this.sortLabel,
@@ -11,7 +10,6 @@ class _CollectionSortBar extends StatelessWidget {
     required this.viewModeIconAsset,
     required this.onSort,
     required this.onCycleViewMode,
-    this.topInset = 0,
     super.key,
   });
 
@@ -20,10 +18,6 @@ class _CollectionSortBar extends StatelessWidget {
   final String viewModeIconAsset;
   final ValueChanged<PortfolioSortOption> onSort;
   final VoidCallback onCycleViewMode;
-
-  /// Reserved at the very top of the bar. Set to the system safe-area
-  /// height for the floating overlay so the row clears the notch.
-  final double topInset;
 
   static const double _topPadding = MallowTheme.spacingMd;
   static const double _rowHeight = 24;
@@ -40,7 +34,7 @@ class _CollectionSortBar extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              SizedBox(height: topInset + _topPadding),
+              const SizedBox(height: _topPadding),
               SizedBox(
                 height: _rowHeight,
                 child: Padding(

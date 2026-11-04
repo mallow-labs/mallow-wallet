@@ -7,6 +7,7 @@ import '../../../core/models/account.dart';
 import '../../../core/network/auth_service.dart';
 import '../../../core/observability/app_logger.dart';
 import '../../../core/router/auth_state_notifier.dart';
+import '../../../core/security/reauth_gate.dart';
 import '../../../core/services/avatar_pool_service.dart';
 import '../../../core/services/wallet_repository.dart';
 import '../../../core/session/session_manager.dart';
@@ -31,8 +32,6 @@ import '../../receive/sheets/chain_visuals.dart';
 import '../widgets/settings_page_scaffold.dart';
 
 import '../../../shared/utils/chain.dart';
-
-const _maxNameLength = 32;
 
 /// What removing [account] destroys, in the user's words. Key material goes
 /// with the wallet rows and cannot be recovered from the app: an imported
@@ -89,6 +88,13 @@ Future<String> accountRemovalMessage(
       // held. The keys are in the device's Seed Vault and stay there.
       return 'This account and its wallets will be removed from this device. '
           'The keys stay in Seed Vault.';
+    }
+    if (_allOfType(account, WalletType.keystone)) {
+      // Its own arm for the reason the Seed Vault one gives: the fall-through
+      // below would ask the user to back up a recovery phrase this app has
+      // never held.
+      return 'This account and its wallets will be removed from this device. '
+          'The keys stay on your Keystone.';
     }
     if (_allOfType(account, WalletType.viewOnly)) {
       return 'This watch-only account will be removed from this device. No '
@@ -400,16 +406,18 @@ class _EditAccountScreenState extends State<EditAccountScreen> {
   /// (reusing the import path), then remove every newly-disabled one in a
   /// single all-or-nothing repository call. If a removed wallet was the active
   /// one, switch the session to its replacement — this is the only point a
-  /// re-auth can fire, mirroring the "Remove account" flow.
+  /// session re-auth can fire, mirroring the "Remove account" flow.
   ///
   /// Returns false when a change was refused, so the caller can keep the user
   /// here instead of popping as a successful save. Additions run first and are
   /// not part of the removals' all-or-nothing set: they only ever add a wallet
   /// the user asked for, so keeping one costs nothing. An addition can still
-  /// be refused on its own — importing an address a view-only wallet already
-  /// holds supersedes that wallet, and pruning it from the recovery graph is
-  /// the commit point of its removal — so a [GraphSyncException] there leaves
-  /// that chain unadded and stops the rest of the diff.
+  /// be refused on its own with a [GraphSyncException]: either superseding a
+  /// view-only wallet at the address could not prune it from the recovery
+  /// graph (nothing added), or the wallet row landed and the graph write after
+  /// it failed. Either way the rest of the diff stops. It also refuses,
+  /// removing nothing, when the additions did not land and the removals would
+  /// leave the account with no address.
   Future<bool> _applyAddressToggles(WalletRepository repo) async {
     final account = _account;
     if (account == null || _desiredEnabled.isEmpty) return true;
@@ -431,16 +439,17 @@ class _EditAccountScreenState extends State<EditAccountScreen> {
             WalletImportSelection(index: index, chain: chain, address: address),
           ]);
         } on GraphSyncException {
-          // The import superseded a view-only wallet on this address and could
-          // not prune it from the recovery graph — the commit point of that
-          // removal — so this chain was not added. Stop before the removals
-          // rather than deleting wallets on top of a half-applied diff; the
-          // caller re-reads the account, so the toggles show what really is on
-          // it instead of the edit the user did not get.
+          // Either superseding a view-only wallet on this address could not
+          // prune it from the recovery graph (nothing added), or the row
+          // landed and the graph write after it failed — so the copy claims
+          // neither. Stop before the removals rather than deleting wallets on
+          // top of a half-applied diff; the caller re-reads the account, so
+          // the toggles show what really is on it.
           if (mounted) {
             AppSnackBar.show(
               context,
-              'Could not update recovery data. The address was not added.',
+              'Could not update recovery data. Check this account\'s '
+              'addresses before trying again.',
               type: AppSnackBarType.error,
             );
           }
@@ -451,6 +460,27 @@ class _EditAccountScreenState extends State<EditAccountScreen> {
       }
     }
     if (removing.isEmpty) return true;
+
+    // The toggles keep one chain staged on, but staging is not landing: an
+    // addition skips an address some other signer already holds, without
+    // throwing. Removing the rest would then empty the account — and, when no
+    // other account uses its seed phrase, delete the phrase with no warning.
+    // Re-read what the additions really left before removing anything.
+    final removingIds = removing.map((w) => w.id).toSet();
+    final current = (await repo.getAccountViews()).where(
+      (a) => a.id == account.id,
+    );
+    if (current.isEmpty ||
+        current.first.wallets.every((w) => removingIds.contains(w.id))) {
+      if (mounted) {
+        AppSnackBar.show(
+          context,
+          'An account needs at least one address. Nothing was removed.',
+          type: AppSnackBarType.error,
+        );
+      }
+      return false;
+    }
 
     final String? replacementId;
     try {
@@ -495,8 +525,8 @@ class _EditAccountScreenState extends State<EditAccountScreen> {
 
       final removedMatch = accounts.where((a) => a.id == widget.accountId);
       if (removedMatch.isEmpty) {
-        // The account is already gone — removed from the list screen, or by a
-        // toggle that emptied it. There is nothing left to remove and nothing
+        // The account is already gone — removed from the list screen while
+        // this one was open. There is nothing left to remove and nothing
         // left to edit, so leave rather than sit on a dead button. [_load]
         // pops for the same reason when it can't find the account at all.
         context.pop();
@@ -516,6 +546,13 @@ class _EditAccountScreenState extends State<EditAccountScreen> {
         destructive: true,
       );
       if (confirmed != true || !mounted) return;
+      if (!await requireReauthForRemoval(
+            context,
+            removedMatch.first.wallets.map((w) => w.walletType),
+          ) ||
+          !mounted) {
+        return;
+      }
 
       // Open decision, deliberately not implemented: removing the last wallet
       // of a Seed Vault seed could also drop this app's authorization for that
@@ -584,7 +621,7 @@ class _EditAccountScreenState extends State<EditAccountScreen> {
   @override
   Widget build(BuildContext context) {
     final colors = context.mallowColors;
-    final remaining = _maxNameLength - _controller.text.length;
+    final remaining = kMaxAccountNameLength - _controller.text.length;
 
     return SettingsPageScaffold(
       title: 'Edit Account',
@@ -608,7 +645,7 @@ class _EditAccountScreenState extends State<EditAccountScreen> {
                           MallowPillField(
                             controller: _controller,
                             hintText: 'Name',
-                            maxLength: _maxNameLength,
+                            maxLength: kMaxAccountNameLength,
                             onChanged: (_) => setState(() {}),
                           ),
                           const SizedBox(height: 8),

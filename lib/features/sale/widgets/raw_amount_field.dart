@@ -4,9 +4,11 @@ import 'package:flutter/services.dart';
 import '../../../core/data/mallow_tokens.dart';
 import '../../../shared/utils/price_format.dart';
 import '../../../shared/widgets/mallow_pill_field.dart';
+import '../../../shared/widgets/usd_estimate.dart';
 
 /// [MallowPillField] wrapper that handles display↔raw-amount conversion,
 /// mid-edit preservation, and currency-decimal-aware input formatters.
+/// Shows the amount's live USD estimate at the trailing edge.
 ///
 /// [rawAmount] is the canonical bloc value (integer raw units).
 /// [onChanged] receives the new raw value after each keystroke.
@@ -92,6 +94,7 @@ class _RawAmountFieldState extends State<RawAmountField> {
         ),
       ],
       onChanged: _onChanged,
+      suffix: UsdEstimate(rawAmount: widget.rawAmount, mint: widget.token.mint),
     );
   }
 }

@@ -8,7 +8,8 @@
 /// REMOTE forging (RPC `helpers/forge/operations`) because origination is
 /// outside the local forge's scope — acceptable for setup; the FA2 *transfer*
 /// under test still goes through the local forge. Relies on `runOperation`'s
-/// valid dummy signature (PR #94) for the simulation step.
+/// syntactically valid dummy signature (`TezosRpcService.dummySignature`) for
+/// the simulation step.
 ///
 /// Existing fixtures (only re-run this after a testnet reset or to mint a
 /// fresh token supply):

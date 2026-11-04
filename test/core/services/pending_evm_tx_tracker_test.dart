@@ -259,6 +259,42 @@ void main() {
   });
 
   group('resolution', () {
+    test(
+      'durable observer saves before retiring a resolved nonce slot',
+      () async {
+        await registerBroadcast();
+        nonces(latest: 6, pending: 6);
+        when(
+          rpc.getTransactionReceipt('0xoriginal'),
+        ).thenAnswer((_) async => receipt(success: true));
+        var saved = false;
+        tracker.addResolutionObserver((resolution) async {
+          expect(resolution.kind, PendingTxResolutionKind.confirmed);
+          expect(await db.getPendingEvmTransactions(), hasLength(1));
+          saved = true;
+        });
+        await tracker.refreshNow();
+        expect(saved, isTrue);
+        expect(await db.getPendingEvmTransactions(), isEmpty);
+      },
+    );
+
+    test(
+      'failed durable observer keeps the nonce available for retry',
+      () async {
+        await registerBroadcast();
+        nonces(latest: 6, pending: 6);
+        when(
+          rpc.getTransactionReceipt('0xoriginal'),
+        ).thenAnswer((_) async => receipt(success: true));
+        tracker.addResolutionObserver(
+          (_) async => throw StateError('storage unavailable'),
+        );
+        await tracker.refreshNow();
+        expect(await db.getPendingEvmTransactions(), hasLength(1));
+      },
+    );
+
     test('a mined non-cancel candidate resolves as confirmed', () async {
       await registerBroadcast();
       nonces(latest: 6, pending: 6);

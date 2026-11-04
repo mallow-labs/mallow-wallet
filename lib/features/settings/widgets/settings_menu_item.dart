@@ -64,7 +64,7 @@ class SettingsMenuItem extends StatelessWidget {
                     color: context.mallowColors.textSecondary,
                   ),
                 ),
-              if (badge != null) _BadgePill(text: badge!),
+              if (badge != null) SettingsBadgePill(text: badge!),
               if (showChevron) ...[
                 const SizedBox(width: 8),
                 const MallowSvgIcon(
@@ -81,8 +81,9 @@ class SettingsMenuItem extends StatelessWidget {
   }
 }
 
-class _BadgePill extends StatelessWidget {
-  const _BadgePill({required this.text});
+/// The muted pill a settings row shows its count or summary in.
+class SettingsBadgePill extends StatelessWidget {
+  const SettingsBadgePill({required this.text, super.key});
 
   final String text;
 

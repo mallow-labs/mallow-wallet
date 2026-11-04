@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../../core/router/app_router.dart';
 import '../../../core/services/pending_evm_tx_tracker.dart';
 import '../../../di.dart';
+import '../../market/services/opensea_purchase.dart';
 import '../../../shared/widgets/app_snack_bar.dart';
 
 /// App-wide toast for a pending EVM transaction that just resolved.
@@ -36,6 +37,9 @@ class _PendingTxResolutionListenerState
     super.initState();
     final tracker = sl<PendingEvmTxTracker>();
     _sub = tracker.resolutions.listen(_onResolution);
+    // Install the durable purchase observer before a watcher pass can retire
+    // a sped-up or cancelled purchase after a process restart.
+    if (sl.isRegistered<OpenSeaPurchaseService>()) sl<OpenSeaPurchaseService>();
     tracker.start();
   }
 

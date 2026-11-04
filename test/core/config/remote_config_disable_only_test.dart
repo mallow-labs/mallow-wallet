@@ -35,6 +35,8 @@ void main() {
         }
       }
 
+      expect(RemoteConfig.permissive.browserEnabled, isTrue);
+      expect(const RemoteConfig(browserEnabled: false).browserEnabled, isFalse);
       expect(RemoteConfig.permissive.updateRequired, isFalse);
       expect(RemoteConfig.permissive.minimumVersion, isNull);
     });
@@ -75,6 +77,7 @@ void main() {
       // regression this test is here to catch.
       const knownFields = {
         'disabledMessages', // deny-list: presence == disabled
+        'browserEnabled', // defaults true: false only removes the shipped tab
         'minimumVersion', // force-upgrade floor
         'updateRequired', // force-upgrade verdict
         'updateMessage', // force-upgrade copy
@@ -90,8 +93,9 @@ void main() {
         reason: 'a known field disappeared — re-check the disable-only claim',
       );
 
-      // None of the four can turn anything on: three drive the force-upgrade
-      // wall (itself a *block*, not a reveal) and the fourth is a deny-list.
+      // Browser is shipped visibly in every variant and defaults to true,
+      // as asserted above. Exclude only that known disable-only field from
+      // the name heuristic; future enable fields still fail this guard.
       for (final suspect in [
         'enabled',
         'reveal',
@@ -100,7 +104,9 @@ void main() {
         'bucket',
       ]) {
         expect(
-          rendered.toLowerCase(),
+          rendered
+              .replaceAll(RegExp(r'browserEnabled: (true|false),?'), '')
+              .toLowerCase(),
           isNot(contains(suspect)),
           reason:
               'RemoteConfig gained a "$suspect"-shaped field. If it can reveal '
@@ -173,6 +179,7 @@ void main() {
         AppFlow.fixedPriceCancel,
         AppFlow.auctionCancel,
         AppFlow.auctionSettle,
+        AppFlow.auctionRefundWithdraw,
         AppFlow.offerCancel,
         AppFlow.raffleCancel,
         AppFlow.raffleClaimPrize,
@@ -194,6 +201,8 @@ void main() {
         AppFlow.collectionArtworksEdit,
         AppFlow.stakeNative,
         AppFlow.stakeLiquid,
+        AppFlow.browserTransaction,
+        AppFlow.browserMessage,
       ];
 
       for (final hatch in hatches) {

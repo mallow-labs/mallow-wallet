@@ -77,7 +77,7 @@ class _LedgerFlowBody extends StatelessWidget {
       builder: (context, state) {
         // Show account picker for all post-connection states.
         final showPicker = state.maybeWhen(
-          accountsLoaded: (_, _, _, _, _, _) => true,
+          accountsLoaded: (_, _, _, _, _, _, _) => true,
           loadingAccounts: (_) => true,
           importing: () => true,
           orElse: () => false,
@@ -130,7 +130,8 @@ class _ScanView extends StatelessWidget {
                 loadingAccounts: (_) => const _ConnectingIndicator(
                   label: 'Discovering accounts...',
                 ),
-                accountsLoaded: (_, _, _, _, _, _) => const SizedBox.shrink(),
+                accountsLoaded: (_, _, _, _, _, _, _) =>
+                    const SizedBox.shrink(),
                 importing: () =>
                     const _ConnectingIndicator(label: 'Importing...'),
                 imported: (_) => const SizedBox.shrink(),

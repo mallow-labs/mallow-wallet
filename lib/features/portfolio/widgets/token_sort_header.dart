@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/widgets/mallow_sheet.dart';
+import '../../../shared/widgets/sheet_drag_handle.dart';
 import '../../../shared/widgets/mallow_svg_icon.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
 
@@ -89,20 +90,11 @@ class _TokenSortSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
+        padding: const EdgeInsets.only(bottom: 8),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Drag handle
-            Container(
-              width: 36,
-              height: 4,
-              margin: const EdgeInsets.only(bottom: 16),
-              decoration: BoxDecoration(
-                color: context.mallowColors.dividerLight,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
+            const SheetDragHandle(bottomSpacing: 16),
             // Title
             Padding(
               padding: const EdgeInsets.symmetric(

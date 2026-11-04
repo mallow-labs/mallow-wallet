@@ -26,7 +26,7 @@ class MockSessionManager extends Mock implements SessionManager {}
 class MockSessionPortfolioAggregator extends Mock
     implements SessionPortfolioAggregator {}
 
-/// Phase 4b — the `solana:token-burn` entry gate.
+/// The `solana:token-burn` entry gate.
 void main() {
   const token = TokenBalance(
     mint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',

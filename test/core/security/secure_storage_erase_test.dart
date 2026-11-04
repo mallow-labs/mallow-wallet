@@ -86,6 +86,22 @@ void main() {
     storage = SecureWalletStorage(fss, vault);
   });
 
+  test(
+    'HTTP credentials survive metadata deletion and clear on app wipe',
+    () async {
+      const value = '{"test-site":{"username":"reader","password":"fixture"}}';
+      await storage.storeBrowserHttpCredentials(value);
+
+      expect(fssStore['browser.http_credentials.v1'], value);
+      expect(vaultStore, isEmpty);
+      await storage.deleteBrowserMetadata();
+      expect(await storage.loadBrowserHttpCredentials(), value);
+
+      await storage.clearAll();
+      expect(await storage.loadBrowserHttpCredentials(), isNull);
+    },
+  );
+
   test('erases vault items nobody passed ids for (orphans)', () async {
     // A seed whose id the app no longer knows (graph gone), an imported key,
     // the legacy per-account key, and the DB-key backup.

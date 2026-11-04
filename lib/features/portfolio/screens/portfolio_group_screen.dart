@@ -27,7 +27,10 @@ import '../../../shared/widgets/loading_indicator.dart';
 import '../../../shared/widgets/mallow_network_image.dart';
 import '../../../shared/widgets/mallow_refresh_indicator.dart';
 import '../../../shared/widgets/mallow_sheet.dart';
+import '../../../shared/widgets/sheet_drag_handle.dart';
 import '../../../shared/widgets/sheet_menu_row.dart';
+import '../../../shared/widgets/sliver_overscroll_anchored.dart';
+import '../../../shared/widgets/stable_width_text.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
 import '../../../shared/widgets/view_only_prompt.dart';
 import '../../artwork/models/on_chain_asset.dart';
@@ -890,6 +893,7 @@ class _PortfolioGroupScreenState extends State<PortfolioGroupScreen> {
         if (_followTarget != null)
           _HeaderActionButton(
             label: _isFollowing ? 'Following' : 'Follow',
+            reserveLabels: const ['Follow', 'Following'],
             foreground: _isFollowing
                 ? colors.textSecondary
                 : colors.textPrimary,
@@ -950,7 +954,7 @@ class _PortfolioGroupScreenState extends State<PortfolioGroupScreen> {
                         // --- Header bar: back · group type · kebab ---
                         SliverOpacity(
                           opacity: _topContentOpacity,
-                          sliver: SliverToBoxAdapter(
+                          sliver: SliverOverscrollAnchored(
                             child: Padding(
                               padding: EdgeInsets.only(
                                 left: MallowTheme.spacing20,
@@ -1159,11 +1163,16 @@ class _HeaderActionButton extends StatelessWidget {
     required this.label,
     this.iconAsset,
     this.foreground,
+    this.reserveLabels,
     this.onTap,
   });
 
   final String label;
   final String? iconAsset;
+
+  /// Every label this button can show, for a toggle (Follow / Following) that
+  /// must keep one width in both states. Defaults to just [label].
+  final List<String>? reserveLabels;
 
   /// Overrides the label/icon colour (e.g. the Follow/Following toggle).
   /// Defaults to textPrimary when enabled, textSecondary when disabled.
@@ -1201,7 +1210,11 @@ class _HeaderActionButton extends StatelessWidget {
                 ),
                 const SizedBox(width: MallowTheme.spacingXs),
               ],
-              Text(label, style: MallowTheme.uiCaption.copyWith(color: fg)),
+              StableWidthText(
+                label,
+                reserve: reserveLabels ?? [label],
+                style: MallowTheme.uiCaption.copyWith(color: fg),
+              ),
             ],
           ),
         ),
@@ -1241,18 +1254,7 @@ class _ArtistGroupSheet extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 12),
-            child: Container(
-              width: 60,
-              height: 3,
-              decoration: BoxDecoration(
-                color: colors.divider,
-                borderRadius: BorderRadius.circular(MallowTheme.radiusFull),
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
+          const SheetDragHandle(),
           _buildActions(context),
           SizedBox(height: MediaQuery.of(context).padding.bottom + 16),
         ],

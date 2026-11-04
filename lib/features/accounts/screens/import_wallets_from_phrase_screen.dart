@@ -155,6 +155,7 @@ class _ImportWalletsBody extends StatelessWidget {
         accounts: accounts,
         selectedKeys: state.selectedKeys,
         baseCounter: state.baseCounter,
+        customNames: state.customNames,
       );
       final extraSkeletons = state.isLoadingMore ? 1 : 0;
       final totalRows = accounts.length + extraSkeletons + 1;
@@ -182,6 +183,9 @@ class _ImportWalletsBody extends StatelessWidget {
             ),
             onToggleAccount: (i) => context.read<ImportWalletsBloc>().add(
               ImportWalletsEvent.toggleAccount(i),
+            ),
+            onRename: (name) => context.read<ImportWalletsBloc>().add(
+              ImportWalletsEvent.renameAccount(accounts[index].index, name),
             ),
           );
         },

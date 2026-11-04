@@ -44,6 +44,11 @@ abstract class ImportWalletsEvent with _$ImportWalletsEvent {
   const factory ImportWalletsEvent.showMore() = _ShowMore;
   const factory ImportWalletsEvent.toggleWallet(String key) = _ToggleWallet;
   const factory ImportWalletsEvent.toggleAccount(int index) = _ToggleAccount;
+
+  /// Name the not-yet-imported account at derivation [index]. A blank [name]
+  /// clears it back to the default `Account NN`.
+  const factory ImportWalletsEvent.renameAccount(int index, String name) =
+      _RenameAccount;
   const factory ImportWalletsEvent.setIncludeLegacy(bool include) =
       _SetIncludeLegacy;
   const factory ImportWalletsEvent.importSelected() = _ImportSelected;
@@ -69,6 +74,9 @@ abstract class ImportWalletsState with _$ImportWalletsState {
     // preview numbers selected cards ascending from here. See
     // [previewAccountNames].
     @Default(1) int baseCounter,
+    // Names the user typed in the picker, keyed by derivation index. Applied
+    // when the account is created on import; see [previewAccountNames].
+    @Default({}) Map<int, String> customNames,
   }) = ImportWalletsLoaded;
   const factory ImportWalletsState.imported(List<WalletInfo> wallets) =
       _Imported;
@@ -94,6 +102,7 @@ class ImportWalletsBloc extends Bloc<ImportWalletsEvent, ImportWalletsState> {
     on<_ShowMore>(_onShowMore);
     on<_ToggleWallet>(_onToggleWallet);
     on<_ToggleAccount>(_onToggleAccount);
+    on<_RenameAccount>(_onRenameAccount);
     on<_SetIncludeLegacy>(_onSetIncludeLegacy);
     on<_ImportSelected>(_onImportSelected);
   }
@@ -274,6 +283,22 @@ class ImportWalletsBloc extends Bloc<ImportWalletsEvent, ImportWalletsState> {
     emit(current.copyWith(selectedKeys: selected));
   }
 
+  void _onRenameAccount(
+    _RenameAccount event,
+    Emitter<ImportWalletsState> emit,
+  ) {
+    final current = state;
+    if (current is! ImportWalletsLoaded) return;
+    final names = renamePickerAccount(
+      accounts: current.accounts,
+      customNames: current.customNames,
+      index: event.index,
+      name: event.name,
+    );
+    if (names == null) return;
+    emit(current.copyWith(customNames: names));
+  }
+
   Future<void> _onSetIncludeLegacy(
     _SetIncludeLegacy event,
     Emitter<ImportWalletsState> emit,
@@ -427,7 +452,11 @@ class ImportWalletsBloc extends Bloc<ImportWalletsEvent, ImportWalletsState> {
         _pendingMnemonic = null;
       }
 
-      return _walletRepo.importAccountsFromPhrase(seedPhraseId, selections);
+      return _walletRepo.importAccountsFromPhrase(
+        seedPhraseId,
+        selections,
+        accountNames: current.customNames,
+      );
     });
 
     switch (result) {

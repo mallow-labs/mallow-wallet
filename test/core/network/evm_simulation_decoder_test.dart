@@ -301,6 +301,58 @@ void main() {
   });
 
   group('decodeSimulateV1 — reverts and malformed responses', () {
+    test('a non-indexed Transfer fails as a decode and RPC error', () {
+      expect(
+        () => decodeSimulateV1(
+          okResult([
+            log(
+              emitter: token,
+              topics: [transferTopic],
+              data: '0x${word(1)}${word(2)}${word(1500)}',
+            ),
+          ]),
+        ),
+        throwsA(
+          allOf(
+            isA<EthereumRpcException>(),
+            isA<EvmSimulationDecodeException>().having(
+              (e) => e.message,
+              'message',
+              'Transfer log has unexpected topic count',
+            ),
+          ),
+        ),
+      );
+    });
+
+    test('malformed hex is reported as a decode error', () {
+      expect(
+        () => decodeSimulateV1(
+          okResult([
+            log(
+              emitter: token,
+              topics: [transferTopic, addrTopic(owner), addrTopic(recipient)],
+              data: '0x${'z' * 64}',
+            ),
+          ]),
+        ),
+        throwsA(isA<EvmSimulationDecodeException>()),
+      );
+    });
+
+    test('malformed field types are reported as a decode error', () {
+      expect(
+        () => decodeSimulateV1([
+          {
+            'calls': [
+              {'status': 1},
+            ],
+          },
+        ]),
+        throwsA(isA<EvmSimulationDecodeException>()),
+      );
+    });
+
     test('surfaces a revert as an error the gate can block on', () {
       final result = decodeSimulateV1([
         {

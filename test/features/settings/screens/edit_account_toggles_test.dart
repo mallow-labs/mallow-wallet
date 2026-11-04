@@ -286,7 +286,10 @@ void main() {
             as List<WalletImportSelection>;
     expect(selections.single.address, tezosAddress);
     expect(
-      find.text('Could not update recovery data. The address was not added.'),
+      find.text(
+        "Could not update recovery data. Check this account's addresses "
+        'before trying again.',
+      ),
       findsOneWidget,
     );
     // The refusal stops the whole diff: deleting the Ethereum wallet on top of
@@ -306,5 +309,57 @@ void main() {
       tester.widget<MallowToggle>(find.byType(MallowToggle).at(2)).value,
       isTrue,
     );
+  });
+
+  testWidgets('an addition that silently skips its address cannot let the '
+      'removals empty the account', (tester) async {
+    when(
+      () => repo.deriveAccountsForPicker(
+        any(),
+        startIndex: any(named: 'startIndex'),
+        count: any(named: 'count'),
+      ),
+    ).thenAnswer(
+      (_) async => AccountPickerInfo(
+        accounts: [
+          AccountAddresses(
+            index: 0,
+            solanaStandard: solanaWallet.address,
+            ethereum: ethWallet.address,
+            tezos: tezosAddress,
+          ),
+        ],
+        alreadyImported: {solanaWallet.address, ethWallet.address},
+      ),
+    );
+    // Another signer already holds the Tezos address, so the import skips it
+    // without throwing — the staged "on" never lands.
+    when(
+      () => repo.importAccountsFromPhrase(any(), any()),
+    ).thenAnswer((_) async => const <WalletInfo>[]);
+
+    await pumpScreen(tester);
+    expect(find.byType(MallowToggle), findsNWidgets(3));
+
+    // Tezos on, then Solana and Ethereum off: allowed, because the staged
+    // Tezos counts as the address the account keeps.
+    await tester.tap(find.byType(MallowToggle).at(1));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(MallowToggle).at(0));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(MallowToggle).at(2));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(MallowButton, 'Done'));
+    await tester.pumpAndSettle();
+
+    verify(() => repo.importAccountsFromPhrase(any(), any())).called(1);
+    // Removing both would empty the account and, with no other account on
+    // its seed, delete the recovery phrase.
+    verifyNever(() => repo.removeWallets(any()));
+    expect(
+      find.text('An account needs at least one address. Nothing was removed.'),
+      findsOneWidget,
+    );
+    expect(find.text('Edit Account'), findsOneWidget);
   });
 }

@@ -15,8 +15,8 @@ import 'artwork_auction_live_panel.dart';
 /// the webapp). Once a bid lands the button is removed entirely — the seller is
 /// committed and just watches the live auction until it settles.
 ///
-/// Triggered by `owner` × `auction` × not-ended — see
-/// `docs/artwork_state.md`.
+/// Triggered by `owner` × `auction` × not-ended in
+/// `resolveArtworkActionState`.
 class ArtworkAuctionOwnerSheet extends StatelessWidget {
   const ArtworkAuctionOwnerSheet({
     required this.artwork,

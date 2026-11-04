@@ -5,19 +5,21 @@
 # release tree returns five, none of them secret — and a check that fails every
 # PR from day one is a check contributors learn to ignore.
 #
-# The allowlist below is deliberately narrow. It suppresses two *shapes* that
-# cannot be a credential for any provider gitleaks knows about, and nothing
-# else. It does not allowlist a path, a file type, or a directory: a real key
-# committed to a test file is still caught.
+# The allowlists below are deliberately narrow. The first suppresses *shapes*
+# that cannot be a credential for any provider gitleaks knows about. The second
+# names exact test-vector values, and only inside the one fixture that holds
+# them. Neither allowlists a path on its own, a file type, or a directory: a
+# real key committed to a test file is still caught.
 
 [extend]
 useDefault = true
 
 [[allowlists]]
 description = """
-On-chain addresses. A wallet's source is full of them — program IDs, mint
-addresses, token contracts — and they are public identifiers by construction:
-every one is readable from the chain by anyone, and none authenticates anything.
+On-chain addresses and public keys. A wallet's source is full of them — program
+IDs, mint addresses, token contracts, revealed Tezos keys — and they are public
+identifiers by construction: every one is readable from the chain by anyone,
+and none authenticates anything.
 They are high-entropy strings assigned to a constant, which is exactly the
 generic-api-key heuristic, so they match it and always will.
 
@@ -34,4 +36,27 @@ regexes = [
   '''\b[1-9A-HJ-NP-Za-km-z]{32,44}\b''',
   # EVM addresses: 0x plus exactly 40 hex characters, no more and no less.
   '''\b0x[a-fA-F0-9]{40}\b''',
+  # Tezos Ed25519 public keys: `edpk` plus 50 base58 characters. The secret-key
+  # prefix is `edsk`, so a private key never matches this.
+  '''\bedpk[1-9A-HJ-NP-Za-km-z]{50}\b''',
+]
+
+[[allowlists]]
+description = """
+The Beacon transport test vector. Its peer X25519 secret and reply key are
+deterministic values generated with the Beacon SDK so the Dart codec can be
+checked against an independent implementation; the encrypted request in the
+same file is sealed with them, so they cannot be swapped for placeholders.
+They protect nothing.
+
+Both conditions must hold: the exact values, and only in that file. A different
+key in the fixture, or these values anywhere else, is still reported.
+"""
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)test/features/browser/fixtures/tezos_beacon_v2\.json$''']
+regexTarget = "match"
+regexes = [
+  '''708ceea4b59b859206ae644caa6d4f4dc81d025bf3e56d30b2cf9a2d4c1fe660''',
+  '''c2ed4ae354cf4b119a700ef370fc94c4c5d831f531bbfc67484d4925f8b76210''',
 ]

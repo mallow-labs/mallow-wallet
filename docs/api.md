@@ -110,8 +110,12 @@ renders a network failure as an indistinguishable blank screen. See
 
 ## Authentication
 
-Sessions are established by signing a timestamped message with a local wallet;
-the resulting login token and wallet-signature JWT are carried as cookies.
+Solana ownership is proved by signing the complete Sign in with Solana message
+returned by `POST /v0/authToken` with `format: "siws"`. The message binds the
+domain, wallet address, nonce, issued-at time and expiry. Sign it verbatim and
+submit the same message and format to `/v0/authToken/verify`. Ledger carries the
+same message in a signed memo transaction. Ethereum and Tezos retain their
+chain-specific nonce messages. Session and wallet-signature JWTs travel as cookies.
 
 Nothing credential-bearing is set globally — the same `Dio` instance also
 carries third-party traffic — so each header is attached by a host-guarded

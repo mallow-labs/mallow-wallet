@@ -33,6 +33,7 @@ The Dart packages under `packages/` are written to stand alone and may be useful
 | `ledger_solana` | Solana app bindings for Ledger hardware wallets |
 | `ledger_ethereum` | Ethereum app bindings for Ledger hardware wallets |
 | `ledger_tezos` | Tezos app bindings for Ledger hardware wallets |
+| `keystone_ur` | Pure-Dart Uniform Resources (animated QR) codec and the Keystone hardware wallet's Solana and Ethereum message types |
 | `jupiter_aggregator` | Typed client for Jupiter's Ultra, classic swap, and price APIs |
 | `mallow_api` | Generated client for the backend, from the vendored `openapi/openapi.yaml` |
 

@@ -17,8 +17,8 @@ import 'cast_service.dart';
 /// Used in development, on simulators, and as the fallback on devices without
 /// Chromecast/AirPlay support.
 ///
-/// Registered in [RegisterModule.castService] so Phase 5/6 can swap to
-/// Chromecast/AirPlay implementations without touching annotations.
+/// Registered in [RegisterModule.castService] so Chromecast/AirPlay
+/// implementations can be swapped in without touching annotations.
 class LocalCastService implements CastService {
   final _deviceController = StreamController<List<CastDevice>>.broadcast();
   final _sessionController = StreamController<CastSessionState>.broadcast();

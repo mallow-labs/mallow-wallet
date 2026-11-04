@@ -35,7 +35,6 @@ void main() {
       final walletManager = MockWalletManager();
       final curationRepository = MockCurationRepository();
       final authService = MockAuthService();
-      final hardwareVerifyController = MockHardwareVerifyController();
       final freshArtworks = Completer<PortfolioArtworksResult>();
       final castBloc = _MockCastBloc();
 
@@ -66,7 +65,6 @@ void main() {
         repository,
         curationRepository,
         authService,
-        hardwareVerifyController,
         walletManager,
       );
       await sl.reset();

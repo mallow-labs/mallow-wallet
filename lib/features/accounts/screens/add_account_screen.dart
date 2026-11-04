@@ -11,12 +11,13 @@ import '../../../shared/widgets/mallow_header.dart';
 import '../../../shared/widgets/menu_row.dart';
 import '../../onboarding/widgets/create_wallet_menu.dart';
 import '../../seed_vault/widgets/seed_vault_entry.dart';
+import 'hardware_wallet_chooser_screen.dart';
 
 /// Full-screen menu for adding a new account.
 ///
 /// Options:
 /// - Create new account (new seed or social sign-in)
-/// - Connect hardware wallet (the live Ledger BLE scan, not a placeholder)
+/// - Connect hardware wallet (the Ledger / Keystone chooser)
 /// - Import from Seed Vault (only on a device that has one)
 /// - Add from recovery phrase (only when existing phrases exist)
 /// - Import recovery phrase
@@ -96,9 +97,7 @@ class _AddAccountScreenState extends State<AddAccountScreen> {
               MenuRow(
                 icon: 'assets/icons/hardware_wallet.svg',
                 label: 'Connect hardware wallet',
-                onTap: () {
-                  context.push(AppRoutes.ledgerScan);
-                },
+                onTap: () => openHardwareWalletImport(context),
               ),
               // Renders nothing unless this device actually has Seed Vault, so
               // a plain Android phone and iOS show no Seed Vault surface at all.

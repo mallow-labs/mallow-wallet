@@ -172,4 +172,78 @@ void main() {
       );
     });
   });
+
+  group('storeListingUrl', () {
+    Future<String?> package(String? name) async => name;
+
+    test('the dApp Store build opens the dApp Store listing', () async {
+      final url = await storeListingUrl(
+        packageNameLoader: () => package('art.mallow.twa'),
+        platform: TargetPlatform.android,
+      );
+      expect(url.toString(), 'solanadappstore://details?id=art.mallow.twa');
+    });
+
+    test('every other Android build opens the Play listing', () async {
+      final url = await storeListingUrl(
+        packageNameLoader: () => package('com.mallow.wallet.android'),
+        platform: TargetPlatform.android,
+      );
+      expect(
+        url.toString(),
+        'https://play.google.com/store/apps/details?id=com.mallow.wallet.android',
+      );
+    });
+
+    test('a failed package lookup falls back to Play, never throws', () async {
+      final url = await storeListingUrl(
+        packageNameLoader: () => package(null),
+        platform: TargetPlatform.android,
+      );
+      expect(url.host, 'play.google.com');
+    });
+
+    test('iOS opens the App Store listing, whatever the package', () async {
+      final url = await storeListingUrl(
+        packageNameLoader: () => package('art.mallow.twa'),
+        platform: TargetPlatform.iOS,
+      );
+      expect(url.toString(), 'https://apps.apple.com/app/id6758995397');
+    });
+  });
+
+  group('openStoreListing', () {
+    test('launches the listing and reports whether it opened', () async {
+      final launched = <Uri>[];
+      final opened = await openStoreListing(
+        urlLoader: () async => Uri.parse('solanadappstore://details?id=x'),
+        launcher: (url) async {
+          launched.add(url);
+          return true;
+        },
+      );
+      expect(opened, isTrue);
+      expect(launched.single.scheme, 'solanadappstore');
+    });
+
+    test(
+      'a launcher that returns false or throws reads as not opened',
+      () async {
+        expect(
+          await openStoreListing(
+            urlLoader: () async => Uri.parse('https://x.invalid'),
+            launcher: (_) async => false,
+          ),
+          isFalse,
+        );
+        expect(
+          await openStoreListing(
+            urlLoader: () async => Uri.parse('https://x.invalid'),
+            launcher: (_) async => throw StateError('no app'),
+          ),
+          isFalse,
+        );
+      },
+    );
+  });
 }

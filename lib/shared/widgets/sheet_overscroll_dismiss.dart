@@ -1,25 +1,37 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 
 /// Bridges top-edge overscroll on an inner scrollable into pull-to-dismiss on
-/// the enclosing modal sheet. Wrap a sheet body whose primary content is a
-/// vertical [ListView]/[CustomScrollView]/etc. — when the scrollable sits at
-/// offset 0 and the user keeps dragging down, the sheet follows the finger via
-/// [Transform.translate]. While pulled, an upward drag retracts the sheet back
-/// to zero before content begins to scroll again. On release:
+/// the enclosing modal sheet. `mallowSheetRoute` wraps every drag-enabled
+/// sheet in this, so sheets never add it themselves — nesting two would move
+/// the sheet twice per drag.
+///
+/// The route's own [BottomSheet] drag already moves the sheet from any patch
+/// that doesn't scroll. A scrollable wins the gesture arena over it, though,
+/// and the app-wide [BouncingScrollPhysics] makes every scrollable claim drags
+/// even when its content fits — so without this, a sheet could only be pulled
+/// down by its non-scrolling chrome. When a vertical scrollable sits at its top
+/// and the user keeps dragging down, the sheet follows the finger via
+/// [Transform.translate]; a drag that starts mid-list scrolls the content
+/// first and only moves the sheet once the list reaches its top. While pulled,
+/// an upward drag retracts the sheet back to zero before content begins to
+/// scroll again. On release:
 ///   * if downward flick velocity ≥ [dismissVelocity] (px/s), or
-///   * the translation ≥ [dismissThreshold] × scrollable viewport height,
+///   * the translation ≥ [dismissThreshold] × the sheet's height,
 /// the route is popped; otherwise the translation animates back to zero.
 ///
 /// Forces a hybrid scroll physics on descendant scrollables (via
-/// [ScrollConfiguration]) that clamps the top edge — so pull-down past offset
-/// 0 is reported as an [OverscrollNotification] for pull-to-dismiss — but
-/// preserves [BouncingScrollPhysics]' spring at the bottom edge.
+/// [ScrollConfiguration]) that clamps the top edge of vertical scrollables —
+/// so pull-down past offset 0 is reported as an [OverscrollNotification] for
+/// pull-to-dismiss — but preserves [BouncingScrollPhysics]' spring at the
+/// bottom edge and on horizontal scrollables.
 ///
-/// Sheets that pass an explicit `physics:` to their inner scrollable will
-/// bypass this — omit `physics:` for this wrapper to work.
+/// Scrollables that pass an explicit `physics:` bypass this — omit `physics:`
+/// on a sheet's scrollable for pull-to-dismiss to reach it.
 class SheetOverscrollDismiss extends StatefulWidget {
   const SheetOverscrollDismiss({
     required this.child,
@@ -34,8 +46,8 @@ class SheetOverscrollDismiss extends StatefulWidget {
   /// regardless of how far the sheet has been pulled.
   final double dismissVelocity;
 
-  /// Fraction of the inner scrollable's viewport height. If the sheet has
-  /// been pulled down at least this far on release, it dismisses.
+  /// Fraction of the sheet's height. If the sheet has been pulled down at
+  /// least this far on release, it dismisses.
   final double dismissThreshold;
 
   @override
@@ -45,7 +57,6 @@ class SheetOverscrollDismiss extends StatefulWidget {
 class _SheetOverscrollDismissState extends State<SheetOverscrollDismiss>
     with SingleTickerProviderStateMixin {
   double _offset = 0;
-  double _viewportHeight = 0;
   Offset? _lastPointerPosition;
   VelocityTracker _velocity = VelocityTracker.withKind(PointerDeviceKind.touch);
 
@@ -132,7 +143,7 @@ class _SheetOverscrollDismissState extends State<SheetOverscrollDismiss>
     _lastPointerPosition = null;
     if (_offset <= 0) return;
     final velocityY = _velocity.getVelocity().pixelsPerSecond.dy;
-    final threshold = _viewportHeight * widget.dismissThreshold;
+    final threshold = (context.size?.height ?? 0) * widget.dismissThreshold;
     // A strong upward flick is an explicit cancel: honour it over position so a
     // fast "put it back" swipe never dismisses even from past the threshold —
     // velocity direction beats how far the sheet was pulled.
@@ -141,10 +152,18 @@ class _SheetOverscrollDismissState extends State<SheetOverscrollDismiss>
         !cancelFlick &&
         (velocityY > widget.dismissVelocity || _offset > threshold);
     if (dismiss) {
-      Navigator.of(context).maybePop();
+      unawaited(_dismiss(velocityY));
     } else {
       _animateBack(velocityY);
     }
+  }
+
+  Future<void> _dismiss(double velocityY) async {
+    final route = ModalRoute.of(context);
+    await Navigator.of(context).maybePop();
+    // A [PopScope] can veto the pop; settle back instead of leaving the sheet
+    // stranded where the finger let go.
+    if (mounted && (route?.isCurrent ?? false)) _animateBack(velocityY);
   }
 
   void _animateBack(double velocityY) {
@@ -156,10 +175,13 @@ class _SheetOverscrollDismissState extends State<SheetOverscrollDismiss>
 
   bool _onScroll(ScrollNotification n) {
     if (n.metrics.axis != Axis.vertical) return false;
+    // Only a finger drag moves the sheet. A fling that coasts into the top
+    // also overscrolls, but no pointer-up follows to settle or dismiss it, so
+    // honouring it would strand the sheet part-way down.
     if (n is OverscrollNotification &&
+        n.dragDetails != null &&
         n.overscroll < 0 &&
-        n.metrics.pixels <= 0) {
-      _viewportHeight = n.metrics.viewportDimension;
+        n.metrics.pixels <= n.metrics.minScrollExtent) {
       _setOffset(_offset - n.overscroll);
     }
     return false;
@@ -188,13 +210,14 @@ class _SheetOverscrollDismissState extends State<SheetOverscrollDismiss>
   }
 }
 
-/// Clamps the top edge (mirrors [ClampingScrollPhysics]) so pull-down past
-/// offset 0 is reported as an [OverscrollNotification], while leaving the
-/// bottom edge alone so [BouncingScrollPhysics]' rubber-band + spring-back
-/// remains at end-of-content.
+/// Clamps the top edge of a vertical scrollable (mirrors
+/// [ClampingScrollPhysics]) so pull-down past offset 0 is reported as an
+/// [OverscrollNotification], while leaving the bottom edge alone so
+/// [BouncingScrollPhysics]' rubber-band + spring-back remains at
+/// end-of-content. Horizontal scrollables keep plain bouncing physics.
 ///
-/// When [frozen] is true the scrollable is pinned — user drag deltas produce
-/// no scroll movement (the wrapper consumes them via pointer events to
+/// When [frozen] is true a vertical scrollable is pinned — user drag deltas
+/// produce no scroll movement (the wrapper consumes them via pointer events to
 /// retract the pulled sheet).
 class _ClampTopBouncePhysics extends BouncingScrollPhysics {
   const _ClampTopBouncePhysics({this.frozen, super.parent});
@@ -207,12 +230,15 @@ class _ClampTopBouncePhysics extends BouncingScrollPhysics {
 
   @override
   double applyPhysicsToUserOffset(ScrollMetrics position, double offset) {
-    if (frozen?.value ?? false) return 0;
+    if (position.axis == Axis.vertical && (frozen?.value ?? false)) return 0;
     return super.applyPhysicsToUserOffset(position, offset);
   }
 
   @override
   double applyBoundaryConditions(ScrollMetrics position, double value) {
+    if (position.axis != Axis.vertical) {
+      return super.applyBoundaryConditions(position, value);
+    }
     if (value < position.pixels &&
         position.pixels <= position.minScrollExtent) {
       return value - position.pixels;

@@ -165,17 +165,15 @@ class AppFailure {
     return AppFailure.unknown(error.toString(), error);
   }
 
-  /// Best-effort user-facing copy for a [DioException]. Prefers the
-  /// server-provided `message`/`error` field when present so backend
-  /// copy (e.g. "Listing not found") wins over framework-default strings.
+  /// Best-effort user-facing copy for a [DioException]. Prefers the message
+  /// the server sent so backend copy (e.g. "Listing not found", or why a trade
+  /// was refused) wins over framework-default strings.
   static String _dioMessage(DioException error) {
     final response = error.response;
     if (response != null) {
       final data = response.data;
-      if (data is Map) {
-        final msg = data['message'] ?? data['error'];
-        if (msg is String && msg.isNotEmpty) return msg;
-      }
+      final serverMessage = _serverMessage(data);
+      if (serverMessage != null) return serverMessage;
       // Plain-text error bodies (e.g. proxy/gateway responses).
       if (data is String && data.isNotEmpty && data.length <= 200) {
         return data;
@@ -189,6 +187,37 @@ class AppFailure {
       DioExceptionType.connectionError => 'Could not reach the server',
       _ => 'Network request failed',
     };
+  }
+
+  /// The server's own copy out of a JSON error body, or null when it carries
+  /// none. Tried in this order:
+  ///
+  /// - `{ "error": { "message": "…" } }` — the envelope the backend answers
+  ///   every refusal with. Reading only a top-level string skipped it, so each
+  ///   of those refusals rendered as `Request failed (403)` and the reason the
+  ///   backend gave never reached the user;
+  /// - `{ "err": { "message": "…" } }` — the envelope before that one;
+  /// - `{ "message": "…" }` and `{ "error": "…" }` — flat bodies, which other
+  ///   services send.
+  ///
+  /// The backend answers a genuine 500 with a fixed generic message, so nothing
+  /// internal comes through here.
+  static String? _serverMessage(Object? data) {
+    if (data is! Map) return null;
+    final error = data['error'];
+    final legacy = data['err'];
+    final candidates = <Object?>[
+      if (error is Map) error['message'],
+      if (legacy is Map) legacy['message'],
+      data['message'],
+      error,
+    ];
+    for (final candidate in candidates) {
+      if (candidate is String && candidate.trim().isNotEmpty) {
+        return candidate.trim();
+      }
+    }
+    return null;
   }
 
   final AppFailureKind kind;

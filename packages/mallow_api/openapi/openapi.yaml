@@ -37,11 +37,14 @@ components:
           description: Split the primary-sale proceeds among the on-chain creators by their shares. Omitted or `false` pays the seller instead, with royalties still going to the creators.
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - seller
         - buyer
@@ -250,6 +253,15 @@ components:
         disablePrimarySplit:
           type: boolean
           description: Whether primary-sale proceeds splitting is disabled for this auction.
+        hasFeeOverride:
+          type: boolean
+          description: Whether this auction uses its fee override instead of the resolved marketplace fee.
+        overrideFeeBps:
+          type: number
+          description: Auction-specific marketplace fee in basis points. Only applies when `hasFeeOverride` is true.
+        cnftRefunded:
+          type: boolean
+          description: Terminal cNFT bidder refund, including auctions with no bids.
         pubkey:
           type: string
           description: This account's own address (base58) — the AuctionConfig PDA.
@@ -285,6 +297,9 @@ components:
         - minBidIncrement
         - absoluteIncrement
         - disablePrimarySplit
+        - hasFeeOverride
+        - overrideFeeBps
+        - cnftRefunded
         - pubkey
         - program
       description: Raw decoded MallowAuction `AuctionConfig` account. Amounts and timestamps are the exact on-chain values (base units, unix seconds) rather than the curated forms the marketplace reads return. `null` when the account does not exist at the node's confirmed view.
@@ -295,6 +310,11 @@ components:
           type: string
           minLength: 1
           description: Wallet address the nonce is issued for. EVM addresses are canonicalized server-side.
+        format:
+          type: string
+          enum:
+            - siws
+          description: Request a complete Sign in with Solana message instead of a legacy nonce.
       required:
         - address
     AuthTokenResponse:
@@ -302,7 +322,7 @@ components:
       properties:
         result:
           type: string
-          description: Opaque nonce. Valid for 15 minutes and consumed by the first successful verify.
+          description: "With format siws: the complete message to sign, valid for 5 minutes. Otherwise: a legacy nonce valid for 15 minutes. Consumed by successful verification."
       required:
         - result
     AuthTokenVerifyRequest:
@@ -312,15 +332,22 @@ components:
           type: string
           minLength: 1
           description: The address that signed.
+        format:
+          type: string
+          enum:
+            - siws
+          description: Verify the complete server-issued Sign in with Solana message.
         message:
           type: string
           minLength: 1
-          description: "The human-readable half of the signed payload. The server appends `\\n\\ntoken:<nonce>` before verifying, so sign that concatenation, not this string alone."
+          description: "With format siws: the complete server-issued message, signed verbatim. Otherwise: the human-readable prefix; sign it followed by `\\n\\ntoken:<nonce>`."
         signature:
           type: string
+          minLength: 1
           description: Signature over the payload. Either this or `tx` is required.
         tx:
           type: string
+          minLength: 1
           description: Serialized transaction carrying the payload in a memo instruction, for wallets that cannot sign arbitrary messages. Either this or `signature` is required.
         chain:
           type: string
@@ -334,11 +361,22 @@ components:
       required:
         - address
         - message
-      oneOf:
-        - required:
-            - signature
-        - required:
-            - tx
+      allOf:
+        - anyOf:
+            - type: object
+              properties:
+                signature:
+                  type: string
+                  minLength: 1
+              required:
+                - signature
+            - type: object
+              properties:
+                tx:
+                  type: string
+                  minLength: 1
+              required:
+                - tx
     AuthTokenVerifyResponse:
       type: object
       properties:
@@ -359,6 +397,68 @@ components:
           $ref: "#/components/schemas/LoginUserDetails"
       required:
         - expiresAt
+    BidRefund:
+      type: object
+      properties:
+        claim:
+          type: string
+        mint:
+          type: string
+        amount:
+          type: string
+          pattern: ^\d+$
+          description: Raw token units or SOL lamports as a decimal string; recorded debt aggregates across auctions and excludes unsolicited donations.
+      required:
+        - claim
+        - mint
+        - amount
+    BidRefundClaim:
+      type: object
+      properties:
+        claim:
+          type: string
+        bidder:
+          type: string
+        mint:
+          type: string
+        rentPayer:
+          type: string
+        amount:
+          type: string
+          pattern: ^\d+$
+          description: Recorded bidder debt in base units; zero means the sponsor can recover the deposit.
+        closable:
+          type: boolean
+          description: True when recorded debt is zero and any token vault can be closed or swept.
+        releasable:
+          type: boolean
+          default: false
+          description: True when recorded debt can be released to the original bidder wallet (SOL) or a bidder-owned token account. Token release uses the canonical ATA when usable, with a sponsor-funded new account as fallback when it is blocked; missing ATA or fallback account rent is paid by the sponsor. Fallback account rent belongs to the bidder.
+      required:
+        - claim
+        - bidder
+        - mint
+        - rentPayer
+        - amount
+        - closable
+    BidRefundClaimsResponse:
+      type: object
+      properties:
+        claims:
+          type: array
+          items:
+            $ref: "#/components/schemas/BidRefundClaim"
+      required:
+        - claims
+    BidRefundsResponse:
+      type: object
+      properties:
+        refunds:
+          type: array
+          items:
+            $ref: "#/components/schemas/BidRefund"
+      required:
+        - refunds
     BidTxRequest:
       type: object
       properties:
@@ -370,15 +470,18 @@ components:
           description: Mint address of the artwork under auction (base58).
         bidAmount:
           type: integer
-          description: Bid amount in the auction's bid currency base units. Must be a positive integer that clears both the reserve price and the current bid plus its minimum increment.
+          description: "Bid amount in the auction's bid currency base units. Must be a positive integer that clears both the reserve price and the current bid plus its minimum increment. Native SOL bids must also meet the cluster Rent::minimum_balance(0); the effective reserve is max(reservePrice, native minimum). Below-minimum bids fail on-chain with BidTooLow (6007)."
           format: uint64
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - bidder
         - asset
@@ -474,16 +577,19 @@ components:
           $ref: "#/components/schemas/TokenStandard"
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - authority
         - asset
         - tokenStandard
-      description: Permanently destroys an asset and reclaims its rent. Accepts `nft`, `pnft`, `cnft`, `core` and `core-collection` only.
+      description: Permanently destroys an asset and reclaims its rent. Accepts `nft`, `pnft`, `cnft`, `cnft-v2`, `core` and `core-collection` only.
     BuyEditionTxItem:
       type: object
       properties:
@@ -534,11 +640,14 @@ components:
           description: Core collection the buyer must hold an asset from to pass the allowlist (base58).
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - buyer
         - masterEdition
@@ -579,11 +688,14 @@ components:
           description: "Share slug of the curation the buyer browsed the artwork from, written to the transaction as a `curation:<slug>` memo for referral attribution."
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
         swapQuote:
           $ref: "#/components/schemas/JupiterQuote"
       required:
@@ -593,6 +705,10 @@ components:
     BuyFixedPriceTxResponse:
       type: object
       properties:
+        creatorRentTopUpLamports:
+          type: string
+          pattern: ^\d+$
+          description: Deprecated informational creator rent estimate in lamports; never add it to the buyer payment or required balance. Native creator rent is funded from the seller's proceeds. The buyer pays exactly the sale price, subject to maxPrice; network, protocol and setup costs are separate.
         tx:
           type: string
           description: base64-encoded VersionedTransaction that performs the purchase. Absent only in a split response, where `swapTx` is present instead.
@@ -618,11 +734,14 @@ components:
           format: uint32
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - buyer
         - raffleKey
@@ -639,11 +758,14 @@ components:
           description: Mint address of the artwork under auction (base58).
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - seller
         - asset
@@ -659,11 +781,14 @@ components:
           description: Mint address of the listed artwork (base58).
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - seller
         - asset
@@ -679,11 +804,14 @@ components:
           description: Mint address the offer was made on (base58). Must match the offer, or the request is rejected.
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - buyer
         - asset
@@ -699,11 +827,14 @@ components:
           description: Address of the raffle account (base58).
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - creator
         - raffleKey
@@ -754,11 +885,14 @@ components:
           description: Address of the raffle account (base58). The raffle must already be drawn.
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - authority
         - raffleKey
@@ -774,15 +908,41 @@ components:
           description: Address of the raffle account (base58).
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - creator
         - raffleKey
       description: "Pays out a completed raffle's ticket revenue. Proceeds are split on-chain: the marketplace cut to mallow, royalties to the on-chain creators, the remainder to `creator`. Independent of prize delivery."
+    CloseBidRefundClaimTxRequest:
+      type: object
+      properties:
+        rentPayer:
+          type: string
+          minLength: 1
+          description: Recorded claim rent payer, who signs and receives the recovered rent.
+        claim:
+          type: string
+          minLength: 1
+        targetPriorityFeeLamports:
+          type: integer
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
+          format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
+        blockhash:
+          type: string
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
+      required:
+        - rentPayer
+        - claim
     CollectionDetail:
       type: object
       properties:
@@ -806,6 +966,9 @@ components:
           type: integer
         floor:
           type: number
+        floorUsd:
+          type: number
+          description: Lowest estimated USD value among the collection's buy-now listings priced in SOL or USDC, whichever marketplace they are on. An estimate from the hourly valuation, not an amount any listing charges. Absent when no such listing has a valuation. Independent of `floor`.
         usdVolume:
           type: number
         collectorCount:
@@ -870,6 +1033,9 @@ components:
         floor:
           type: number
           description: Lowest active listing price, in SOL.
+        floorUsd:
+          type: number
+          description: Lowest estimated USD value among the collection's buy-now listings priced in SOL or USDC, whichever marketplace they are on. An estimate from the hourly valuation, not an amount any listing charges. Absent when no such listing has a valuation. Independent of `floor`.
         usdVolume:
           type: number
           description: All-time traded volume, in USD.
@@ -962,11 +1128,14 @@ components:
           description: Free-form note written on-chain alongside the auction.
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - seller
         - asset
@@ -1051,11 +1220,14 @@ components:
           description: mallow group id that ties several listings together as one drop.
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - seller
         - asset
@@ -1099,11 +1271,14 @@ components:
           description: Restrict the offer to 1/1 artworks, so it cannot be filled with an edition print.
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - buyer
         - asset
@@ -1239,7 +1414,7 @@ components:
         - private
         - public
         - featured
-    DeviceTokenRegisterRequest:
+    DeviceTokenSyncRequest:
       type: object
       properties:
         token:
@@ -1250,17 +1425,16 @@ components:
           enum:
             - ios
             - android
+        addresses:
+          type: array
+          items:
+            type: string
+            minLength: 1
+          maxItems: 200
       required:
         - token
         - platform
-    DeviceTokenUnregisterRequest:
-      type: object
-      properties:
-        token:
-          type: string
-          minLength: 1
-      required:
-        - token
+        - addresses
     EditCollectionArtworksRequest:
       type: object
       properties:
@@ -1295,11 +1469,14 @@ components:
           description: Master-edition addresses to remove from the collection (base58).
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - authority
         - parentCollection
@@ -1442,11 +1619,14 @@ components:
           description: Ids of mallow unlockable-content records to attach, replacing the current set.
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
         editTarget:
           type: string
           enum:
@@ -1506,6 +1686,14 @@ components:
     EventsByMintBody:
       type: object
       properties:
+        pagination:
+          type: string
+          enum:
+            - cursor
+        cursor:
+          type: string
+          maxLength: 100
+          pattern: "^\\d{1,16}:(?:null|-?\\d{1,12}):[a-f0-9]{24}$"
         page:
           type: integer
           minimum: 0
@@ -1518,6 +1706,21 @@ components:
           description: Results per page. Defaults to 5.
         mode:
           $ref: "#/components/schemas/EventMode"
+        activityTypes:
+          type: array
+          items:
+            type: string
+            enum:
+              - List
+              - Delist
+              - Sale
+              - Bid
+              - Offer
+              - Buy
+              - Mint
+              - Edit
+              - Relist
+          maxItems: 9
       required:
         - page
         - mode
@@ -1552,6 +1755,16 @@ components:
           type:
             - number
             - "null"
+        tokenStandard:
+          type: string
+          enum:
+            - fa1.2
+            - fa2
+          description: Tezos FA token standard.
+        tokenId:
+          type: string
+          pattern: ^\d+$
+          description: Tezos token id as an unsigned decimal string.
       required:
         - contractAddress
         - symbol
@@ -1774,6 +1987,129 @@ components:
           description: Total matching exhibitions, across all pages.
       required:
         - result
+    ExploreFilter:
+      type: object
+      properties:
+        mode:
+          $ref: "#/components/schemas/ExploreMode"
+        quickFilters:
+          type: array
+          items:
+            type: string
+            maxLength: 64
+          maxItems: 20
+        search:
+          type:
+            - string
+            - "null"
+          maxLength: 200
+        gumballKey:
+          type:
+            - string
+            - "null"
+          maxLength: 128
+        jellybeanKey:
+          type:
+            - string
+            - "null"
+          maxLength: 128
+        parentEdition:
+          type:
+            - string
+            - "null"
+          maxLength: 128
+        supplyType:
+          type:
+            - string
+            - "null"
+          maxLength: 64
+        artists:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        collectors:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        tags:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        collections:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        mintAccounts:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        currencyMints:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        marketplaces:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        listingTypes:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        marketTypes:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        mediaTypes:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        otherTypes:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        aspects:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        priceRange:
+          type:
+            - object
+            - "null"
+          properties:
+            min:
+              type:
+                - number
+                - "null"
+            max:
+              type:
+                - number
+                - "null"
+      required:
+        - mode
     ExploreMode:
       type:
         - string
@@ -1793,12 +2129,7 @@ components:
         sort:
           $ref: "#/components/schemas/ExploreSort"
         filter:
-          type: object
-          properties:
-            mode:
-              $ref: "#/components/schemas/ExploreMode"
-          required:
-            - mode
+          $ref: "#/components/schemas/ExploreFilter"
         page:
           type: integer
           minimum: 0
@@ -1940,6 +2271,9 @@ components:
             - string
             - "null"
           description: ISO 8601 timestamp when bidding closes, or `null` when the auction has no end time.
+        refunded:
+          type: boolean
+          description: True when the auction is terminal after a bidder refund, including a refund with no bids.
         isSettled:
           type: boolean
           description: "Always `false` on this read: settlement closes the AuctionConfig account, and a closed account is reported as a null auction instead."
@@ -1953,6 +2287,7 @@ components:
         - bidCount
         - startsAt
         - endsAt
+        - refunded
         - isSettled
       description: Decoded live auction state. `null` when no AuctionConfig exists for the mint — it was never created, or it was settled or cancelled and the account closed.
     GetBidTxRequest:
@@ -1963,9 +2298,12 @@ components:
           minLength: 1
         bidAmount:
           type: number
-        latestBlockhashAndContext: {}
+        latestBlockhashAndContext:
+          $ref: "#/components/schemas/LatestBlockhashAndContext"
         targetPriorityFeeLamports:
-          type: number
+          type:
+            - number
+            - "null"
       required:
         - mintAccount
         - bidAmount
@@ -2374,6 +2712,34 @@ components:
       type: object
       additionalProperties: {}
       description: "Swap quote response (passed through to the swap). Jupiter-shaped; `source: \"orca\"` quotes additionally carry `poolAddress` and `platformFee`."
+    LatestBlockhashAndContext:
+      type:
+        - object
+        - "null"
+      properties:
+        context:
+          type: object
+          properties:
+            slot:
+              type: integer
+              minimum: 0
+          required:
+            - slot
+        value:
+          type: object
+          properties:
+            blockhash:
+              type: string
+              pattern: ^[1-9A-HJ-NP-Za-km-z]{32,44}$
+            lastValidBlockHeight:
+              type: integer
+              minimum: 0
+          required:
+            - blockhash
+            - lastValidBlockHeight
+      required:
+        - context
+        - value
     LikeBody:
       type: object
       properties:
@@ -2701,6 +3067,135 @@ components:
           type: boolean
       required:
         - username
+    MagicEdenBuyQuote:
+      type: object
+      properties:
+        orderId:
+          type: string
+        revision:
+          type: integer
+          format: int64
+        mintAccount:
+          type: string
+        seller:
+          type: string
+        currencyMint:
+          type: string
+        sellerPrice:
+          type: string
+          pattern: ^\d+$
+        creatorRoyalty:
+          type: string
+          pattern: ^\d+$
+        magicEdenFee:
+          type: string
+          pattern: ^\d+$
+        mallowFeeLamports:
+          type: string
+          pattern: ^\d+$
+        networkFeeLamports:
+          type: string
+          pattern: ^\d+$
+        rentLamports:
+          type: string
+          pattern: ^\d+$
+        totalPaymentAmount:
+          type: string
+          pattern: ^\d+$
+        totalSolDebitLamports:
+          type: string
+          pattern: ^\d+$
+        expiresAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+        currencySymbol:
+          type: string
+          description: Registry symbol of `currencyMint` (SOL for native SOL).
+        currencyDecimals:
+          type: integer
+          description: Decimals of `currencyMint`; every payment amount is in its base units.
+          format: uint8
+        buyerPaymentBalance:
+          type: string
+          pattern: ^\d+$
+          description: The buyer's balance in `currencyMint` when quoted (lamports for SOL, 0 without a token account).
+        buyerSolBalanceLamports:
+          type: string
+          pattern: ^\d+$
+          description: The buyer's SOL balance when quoted.
+      required:
+        - orderId
+        - revision
+        - mintAccount
+        - seller
+        - currencyMint
+        - sellerPrice
+        - creatorRoyalty
+        - magicEdenFee
+        - mallowFeeLamports
+        - networkFeeLamports
+        - rentLamports
+        - totalPaymentAmount
+        - totalSolDebitLamports
+        - expiresAt
+        - currencySymbol
+        - currencyDecimals
+        - buyerPaymentBalance
+        - buyerSolBalanceLamports
+      description: The buyer can pay when `buyerSolBalanceLamports` covers `totalSolDebitLamports` and, for an SPL currency, `buyerPaymentBalance` covers `totalPaymentAmount`. Balances are a snapshot; the transaction build simulates against the live balances again.
+    MagicEdenBuyQuoteResponse:
+      type: object
+      properties:
+        available:
+          type: boolean
+        reason:
+          type: string
+        quote:
+          $ref: "#/components/schemas/MagicEdenBuyQuote"
+      required:
+        - available
+    MagicEdenBuyTxRequest:
+      type: object
+      properties:
+        buyer:
+          type: string
+        orderId:
+          type: string
+        revision:
+          type: integer
+          format: int64
+        paymentMint:
+          type: string
+        maxPaymentAmount:
+          type: string
+          pattern: ^\d+$
+        maxSolDebitLamports:
+          type: string
+          pattern: ^\d+$
+      required:
+        - buyer
+        - orderId
+        - revision
+        - paymentMint
+        - maxPaymentAmount
+        - maxSolDebitLamports
+      additionalProperties: false
+    MagicEdenBuyTxResponse:
+      type: object
+      properties:
+        tx:
+          type: string
+        quote:
+          $ref: "#/components/schemas/MagicEdenBuyQuote"
+        lastValidBlockHeight:
+          type: integer
+          format: uint64
+      required:
+        - tx
+        - quote
+        - lastValidBlockHeight
     MarketActivityEvent:
       type: object
       properties:
@@ -2763,6 +3258,9 @@ components:
           items:
             $ref: "#/components/schemas/MarketActivityEvent"
           description: This page of events, newest first.
+        nextCursor:
+          type: string
+          description: Cursor for the next page; cursor pagination omits the exact total.
         nextPage:
           type: integer
           description: Present only when a further page exists.
@@ -2797,11 +3295,14 @@ components:
               description: Ids of mallow unlockable-content records to attach, revealed to the owner after purchase.
             targetPriorityFeeLamports:
               type: integer
-              description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+              description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
               format: uint64
+            exactPriorityFee:
+              type: boolean
+              description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
             blockhash:
               type: string
-              description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+              description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
             dryRun:
               type: boolean
               description: Validate and price the mint without building a transaction. No transaction is returned.
@@ -2865,6 +3366,9 @@ components:
     MobileConfigResponse:
       type: object
       properties:
+        browserEnabled:
+          type: boolean
+          description: Whether the in-app browser is available. Omission preserves availability for older servers.
         minimumVersion:
           type:
             - string
@@ -2905,6 +3409,7 @@ components:
         - auction-create
         - auction-cancel
         - auction-settle
+        - auction-refund-withdraw
         - fixed-price-buy
         - edition-buy
         - auction-bid
@@ -2919,6 +3424,8 @@ components:
         - unstake-native
         - withdraw-stake
         - stake-liquid
+        - browser-transaction
+        - browser-message
     MobileResultResponse:
       type: object
       properties:
@@ -2930,6 +3437,9 @@ components:
     NftPreviewAuctionMetadata:
       type: object
       properties:
+        refunded:
+          type: boolean
+          description: True when a v2 auction was refunded and is terminal, even with no bids; its recovery PDA may remain on-chain.
         mintAccount:
           type: string
         reservePrice:
@@ -2965,6 +3475,7 @@ components:
         endsAt:
           type: string
       required:
+        - refunded
         - mintAccount
         - reservePrice
         - bidders
@@ -3107,6 +3618,12 @@ components:
           $ref: "#/components/schemas/NftPreviewBuyNowMetadata"
         raffleMetadata:
           $ref: "#/components/schemas/NftPreviewRaffleMetadata"
+        lastSource:
+          type: string
+        isSecondary:
+          type: boolean
+        royaltyBps:
+          type: integer
         updateAuth:
           type: string
         nsfw:
@@ -3597,6 +4114,243 @@ components:
         - 0
         - 1
         - 2
+    OpenSeaPurchaseConfirmRequest:
+      type: object
+      properties:
+        artworkId:
+          type: string
+          minLength: 1
+          maxLength: 256
+        buyerAddress:
+          type: string
+          pattern: ^0x[0-9a-fA-F]{40}$
+        transactionHash:
+          type: string
+          pattern: ^0x[0-9a-fA-F]{64}$
+      required:
+        - artworkId
+        - buyerAddress
+        - transactionHash
+      additionalProperties: false
+    OpenSeaPurchaseConfirmResponse:
+      type: object
+      properties:
+        result:
+          type: object
+          properties:
+            orderHashes:
+              type: array
+              items:
+                type: string
+                pattern: ^0x[0-9a-fA-F]{64}$
+              description: The Seaport orders the transaction filled for this artwork and buyer.
+          required:
+            - orderHashes
+      required:
+        - result
+    OpenSeaPurchasePrepareRequest:
+      type: object
+      properties:
+        quoteId:
+          type: string
+          format: uuid
+        buyerAddress:
+          type: string
+          pattern: ^0x[0-9a-fA-F]{40}$
+      required:
+        - quoteId
+        - buyerAddress
+      additionalProperties: false
+    OpenSeaPurchasePrepareResponse:
+      type: object
+      properties:
+        result:
+          type: object
+          properties:
+            quoteId:
+              type: string
+              format: uuid
+            orderHash:
+              type: string
+              pattern: ^0x[0-9a-fA-F]{64}$
+            chainId:
+              type: number
+              enum:
+                - 1
+            from:
+              type: string
+              pattern: ^0x[0-9a-fA-F]{40}$
+            to:
+              type: string
+              pattern: ^0x[0-9a-fA-F]{40}$
+            data:
+              type: string
+              pattern: ^0x[0-9a-fA-F]+$
+            value:
+              type: string
+              pattern: ^(0|[1-9][0-9]*)$
+            submitBy:
+              type: string
+              format: date-time
+              description: When OpenSea's signed-zone authorization in `data` expires. Present only for restricted orders; a transaction mined after it reverts.
+          required:
+            - quoteId
+            - orderHash
+            - chainId
+            - from
+            - to
+            - data
+            - value
+      required:
+        - result
+    OpenSeaPurchaseQuote:
+      type: object
+      properties:
+        quoteId:
+          type: string
+          format: uuid
+        chainId:
+          type: number
+          enum:
+            - 1
+        buyerAddress:
+          type: string
+          pattern: ^0x[0-9a-fA-F]{40}$
+        contractAddress:
+          type: string
+          pattern: ^0x[0-9a-fA-F]{40}$
+        tokenId:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        orderHash:
+          type: string
+          pattern: ^0x[0-9a-fA-F]{64}$
+        protocolAddress:
+          type: string
+          pattern: ^0x[0-9a-fA-F]{40}$
+        tokenStandard:
+          type: string
+          enum:
+            - erc721
+            - erc1155
+          description: The token standard the server validated the order for. The client checks the receipt for this standard's transfer event.
+        quantity:
+          type: string
+          enum:
+            - "1"
+        listedCopies:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+          description: Copies the listing offers. The purchase buys one of them, and every amount in the quote is for that one copy.
+        marketplace:
+          type: string
+          enum:
+            - opensea
+        sellerProceedsWei:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        marketplaceFees:
+          type: array
+          items:
+            type: object
+            properties:
+              recipient:
+                type: string
+                pattern: ^0x[0-9a-fA-F]{40}$
+              amountWei:
+                type: string
+                pattern: ^(0|[1-9][0-9]*)$
+            required:
+              - recipient
+              - amountWei
+        creatorFees:
+          type: array
+          items:
+            type: object
+            properties:
+              recipient:
+                type: string
+                pattern: ^0x[0-9a-fA-F]{40}$
+              amountWei:
+                type: string
+                pattern: ^(0|[1-9][0-9]*)$
+              required:
+                type: boolean
+            required:
+              - recipient
+              - amountWei
+              - required
+        buyerPaidExtraWei:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        totalWei:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        estimatedGas:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        estimatedGasWei:
+          type: string
+          pattern: ^(0|[1-9][0-9]*)$
+        expiresAt:
+          type: string
+          format: date-time
+        referral:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+              enum:
+                - false
+            buyerCostWei:
+              type: string
+              enum:
+                - "0"
+          required:
+            - enabled
+            - buyerCostWei
+      required:
+        - quoteId
+        - chainId
+        - buyerAddress
+        - contractAddress
+        - tokenId
+        - orderHash
+        - protocolAddress
+        - tokenStandard
+        - quantity
+        - listedCopies
+        - marketplace
+        - sellerProceedsWei
+        - marketplaceFees
+        - creatorFees
+        - buyerPaidExtraWei
+        - totalWei
+        - estimatedGas
+        - estimatedGasWei
+        - expiresAt
+        - referral
+    OpenSeaPurchaseQuoteRequest:
+      type: object
+      properties:
+        artworkId:
+          type: string
+          minLength: 1
+          maxLength: 256
+        buyerAddress:
+          type: string
+          pattern: ^0x[0-9a-fA-F]{40}$
+      required:
+        - artworkId
+        - buyerAddress
+      additionalProperties: false
+    OpenSeaPurchaseQuoteResponse:
+      type: object
+      properties:
+        result:
+          $ref: "#/components/schemas/OpenSeaPurchaseQuote"
+      required:
+        - result
     OtpAction:
       type: string
       enum:
@@ -3841,31 +4595,393 @@ components:
         - id
         - name
         - artworkCount
-    ProfileRequest:
+    PortfolioReceivedChain:
+      type: string
+      enum:
+        - tezos
+        - ethereum
+    PortfolioReceivedRequest:
       type: object
       properties:
-        page:
-          type: integer
-          minimum: 0
-        tab:
-          $ref: "#/components/schemas/ProfileTab"
-        sort:
+        chain:
+          $ref: "#/components/schemas/PortfolioReceivedChain"
+        txHash:
           type: string
-        filter: {}
-        profileUserAddresses:
+          minLength: 1
+          description: The transaction's hash. On Tezos, the operation hash (`o…`). On Ethereum, `0x` and 64 hex digits.
+        address:
+          type: string
+          minLength: 1
+          description: The wallet that received the tokens. On Ethereum, any letter case.
+      required:
+        - chain
+        - txHash
+        - address
+    PortfolioReceivedResult:
+      type: object
+      properties:
+        status:
+          $ref: "#/components/schemas/PortfolioReceivedStatus"
+        mintAccounts:
           type: array
           items:
             type: string
-            minLength: 1
-            maxLength: 100
-          maxItems: 100
-        pageSize:
-          type: integer
-          minimum: 1
+          description: The tokens the transaction delivered to `address`, as `{contract}-{tokenId}`.
       required:
-        - page
-        - tab
-        - profileUserAddresses
+        - status
+        - mintAccounts
+    PortfolioReceivedStatus:
+      type: string
+      enum:
+        - pending
+        - queued
+        - none
+      description: "`pending`: the transaction is not visible on chain yet, so retry shortly. `queued`: a refresh is queued for the tokens in `mintAccounts`. `none`: nothing to refresh, because the transaction moved no token to `address`, or only tokens mallow does not list."
+    ProfileArtworkFilter:
+      type: object
+      properties:
+        mode:
+          $ref: "#/components/schemas/ExploreMode"
+        quickFilters:
+          type: array
+          items:
+            type: string
+            maxLength: 64
+          maxItems: 20
+        search:
+          type:
+            - string
+            - "null"
+          maxLength: 200
+        gumballKey:
+          type:
+            - string
+            - "null"
+          maxLength: 128
+        jellybeanKey:
+          type:
+            - string
+            - "null"
+          maxLength: 128
+        parentEdition:
+          type:
+            - string
+            - "null"
+          maxLength: 128
+        supplyType:
+          type:
+            - string
+            - "null"
+          maxLength: 64
+        artists:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        collectors:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        tags:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        collections:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        mintAccounts:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        currencyMints:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        marketplaces:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        listingTypes:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        marketTypes:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        mediaTypes:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        otherTypes:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        aspects:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        priceRange:
+          type:
+            - object
+            - "null"
+          properties:
+            min:
+              type:
+                - number
+                - "null"
+            max:
+              type:
+                - number
+                - "null"
+    ProfileCollectionsFilter:
+      type: object
+      properties:
+        mode:
+          $ref: "#/components/schemas/ExploreMode"
+        quickFilters:
+          type: array
+          items:
+            type: string
+            maxLength: 64
+          maxItems: 20
+        search:
+          type:
+            - string
+            - "null"
+          maxLength: 200
+        gumballKey:
+          type:
+            - string
+            - "null"
+          maxLength: 128
+        jellybeanKey:
+          type:
+            - string
+            - "null"
+          maxLength: 128
+        parentEdition:
+          type:
+            - string
+            - "null"
+          maxLength: 128
+        supplyType:
+          type:
+            - string
+            - "null"
+          maxLength: 64
+        artists:
+          anyOf:
+            - type: array
+              items:
+                type: string
+            - type: boolean
+            - type: "null"
+        collectors:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        tags:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        collections:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        mintAccounts:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        currencyMints:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        marketplaces:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        listingTypes:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        marketTypes:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        mediaTypes:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        otherTypes:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        aspects:
+          type:
+            - array
+            - "null"
+          items:
+            type: string
+        priceRange:
+          type:
+            - object
+            - "null"
+          properties:
+            min:
+              type:
+                - number
+                - "null"
+            max:
+              type:
+                - number
+                - "null"
+    ProfileRequest:
+      oneOf:
+        - type: object
+          properties:
+            page:
+              type: integer
+              minimum: 0
+            sort:
+              type: string
+            profileUserAddresses:
+              type: array
+              items:
+                type: string
+                minLength: 1
+                maxLength: 100
+              maxItems: 100
+            pageSize:
+              type: integer
+              minimum: 1
+              description: Capped at 20 (10 on the Collections tab).
+            tab:
+              type: string
+              enum:
+                - pinned
+                - bidding-on
+                - listed
+                - created
+                - collected
+                - liked
+            filter:
+              anyOf:
+                - $ref: "#/components/schemas/ProfileArtworkFilter"
+                - type: "null"
+                - type: "null"
+          required:
+            - page
+            - profileUserAddresses
+            - tab
+        - type: object
+          properties:
+            page:
+              type: integer
+              minimum: 0
+            sort:
+              type: string
+            profileUserAddresses:
+              type: array
+              items:
+                type: string
+                minLength: 1
+                maxLength: 100
+              maxItems: 100
+            pageSize:
+              type: integer
+              minimum: 1
+              description: Capped at 20 (10 on the Collections tab).
+            tab:
+              type: string
+              enum:
+                - collections
+                - series
+            filter:
+              anyOf:
+                - $ref: "#/components/schemas/ProfileCollectionsFilter"
+                - type: "null"
+                - type: "null"
+          required:
+            - page
+            - profileUserAddresses
+            - tab
+        - type: object
+          properties:
+            page:
+              type: integer
+              minimum: 0
+            sort:
+              type: string
+            profileUserAddresses:
+              type: array
+              items:
+                type: string
+                minLength: 1
+                maxLength: 100
+              maxItems: 100
+            pageSize:
+              type: integer
+              minimum: 1
+              description: Capped at 20 (10 on the Collections tab).
+            tab:
+              type: string
+              enum:
+                - talk-board-posts
+            filter:
+              anyOf:
+                - type: object
+                  properties: {}
+                - type: "null"
+                - type: "null"
+          required:
+            - page
+            - profileUserAddresses
+            - tab
     ProfileResponse:
       type: object
       properties:
@@ -3880,18 +4996,63 @@ components:
       required:
         - result
         - total
-    ProfileTab:
-      type: string
-      enum:
-        - pinned
-        - biddingOn
-        - listed
-        - created
-        - collected
-        - liked
-        - collections
-        - talkBoardPosts
-        - series
+    PushBidRefundTxRequest:
+      type: object
+      properties:
+        payer:
+          type: string
+          minLength: 1
+          description: Wallet paying and signing the transaction, including missing ATA or fallback token-account rent. Fallback account rent belongs to the bidder.
+        bidder:
+          type: string
+          minLength: 1
+          description: Recorded bidder; receives tokens in a bidder-owned account without signing.
+        mint:
+          type: string
+          minLength: 1
+          description: Refund token currency mint, not the artwork asset ID.
+        destination:
+          type: string
+          minLength: 1
+          description: Existing bidder-owned token account for this mint and token program that accepts ordinary transfers. Defaults to the canonical ATA, with a sponsor-funded new bidder-owned token account as fallback if that ATA is unusable.
+        targetPriorityFeeLamports:
+          type: integer
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
+          format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
+        blockhash:
+          type: string
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
+      required:
+        - payer
+        - bidder
+        - mint
+    PushSolBidRefundTxRequest:
+      type: object
+      properties:
+        payer:
+          type: string
+          minLength: 1
+          description: Wallet paying and signing the transaction.
+        bidder:
+          type: string
+          minLength: 1
+          description: Recorded bidder receiving the SOL refund; no bidder signature required.
+        targetPriorityFeeLamports:
+          type: integer
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
+          format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
+        blockhash:
+          type: string
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
+      required:
+        - payer
+        - bidder
     ReportReason:
       type: string
       enum:
@@ -4021,11 +5182,14 @@ components:
           description: "Your own reference id, written to the transaction as an `order:<id>` memo for reconciliation."
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - authority
         - asset
@@ -4044,15 +5208,43 @@ components:
           type: boolean
       required:
         - result
+    SolanaSlotTime:
+      type: object
+      properties:
+        slotTimeMs:
+          type: integer
+          description: Average time between slots on mainnet, in whole milliseconds. A slot the leader skipped produces no block, so the time between blocks is slightly longer; a countdown that multiplies blocks by this value therefore runs out early, never late.
+          format: uint32
+        sampleSlots:
+          type: integer
+          description: Slots the average was taken over.
+          format: uint64
+        samplePeriodSecs:
+          type: integer
+          description: Seconds the average was taken over.
+          format: uint32
+        measuredAt:
+          type: string
+          description: When the samples were read, as an RFC 3339 timestamp (UTC).
+      required:
+        - slotTimeMs
+        - sampleSlots
+        - samplePeriodSecs
+        - measuredAt
+      description: How fast Solana is producing slots, from the RPC's recent performance samples.
     StakingGetClaimTxRequest:
       type: object
       properties:
         amount:
           type: integer
           minimum: 1
-        latestBlockhashAndContext: {}
+          maximum: 9007199254740991
+        latestBlockhashAndContext:
+          $ref: "#/components/schemas/LatestBlockhashAndContext"
         targetPriorityFeeLamports:
-          type: number
+          type:
+            - number
+            - "null"
       required:
         - amount
     SupplyInfo:
@@ -4096,7 +5288,7 @@ components:
         - erc20
         - erc721
         - erc1155
-      description: "Asset standard, which selects the program the transaction is built against. Solana: `nft` (Token Metadata), `pnft` (programmable NFT), `cnft` (Bubblegum compressed), `cnft-v2` (Bubblegum v2 compressed), `core` / `core-collection` (Metaplex Core). `objkt` is a Tezos asset. EVM: `native`, `erc20`, `erc721`, `erc1155`. Individual endpoints accept only a subset — an unsupported standard is rejected with a `400`. `cnft-v2` is reported by the read endpoints but is not yet accepted by any transaction builder."
+      description: "Asset standard, which selects the program the transaction is built against. Solana: `nft` (Token Metadata), `pnft` (programmable NFT), `cnft` (Bubblegum compressed), `cnft-v2` (Bubblegum v2 compressed), `core` / `core-collection` (Metaplex Core). `objkt` is a Tezos asset. EVM: `native`, `erc20`, `erc721`, `erc1155`. Individual endpoints accept only a subset — an unsupported standard is rejected with a `400`. `cnft-v2` is supported by transfer and burn, and by the fixed-price, offer, auction and gumball builders. Edit and raffle builders reject it."
     TransferTxRequest:
       type: object
       properties:
@@ -4117,13 +5309,25 @@ components:
         memo:
           type: string
           description: Free-form note written on-chain alongside the transfer, signed by `authority`. Solana standards only; ignored on EVM.
+        tagFeeAccount:
+          type: boolean
+          description: Emit the 0-lamport marker transfer to the mallow fee account even when no `memo` is set. mallow only picks a plain transfer up when it carries that marker, so without it the transfer never reaches mallow's activity or feeds — ownership is unaffected either way and is resolved from the chain. Implied by `memo`, which always carries the marker. Solana standards only; ignored on EVM.
+        transactionVersion:
+          type: integer
+          minimum: 0
+          maximum: 1
+          description: "Solana transaction format to build: `0` (the default) for v0, or `1` for v1, which may be up to 4,096 bytes rather than 1,232. Request `1` only when the signing wallet lists version 1 in `solana:signTransaction`. A v1 `tx` starts with the byte `0x81` and states its compute limit and priority fee in its message config, with no ComputeBudget instructions. Ignored on EVM."
+          format: uint8
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - authority
         - asset
@@ -4233,11 +5437,14 @@ components:
           format: uint64
         targetPriorityFeeLamports:
           type: integer
-          description: Total priority fee to target for this transaction, in lamports. The builder derives the compute-unit price from it and the transaction's compute budget. Omit to let mallow pick a fee from current network conditions.
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
           format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
         blockhash:
           type: string
-          description: Recent blockhash to stamp onto the transaction, base58. Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time.
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
       required:
         - seller
         - asset
@@ -4439,6 +5646,33 @@ components:
         - durationSec
         - isActive
       description: The early-access phase of an edition sale, during which only allowlisted wallets may buy.
+    WithdrawBidRefundTxRequest:
+      type: object
+      properties:
+        bidder:
+          type: string
+          minLength: 1
+        mint:
+          type: string
+          minLength: 1
+          description: Refund currency mint, not the artwork asset ID.
+        destination:
+          type: string
+          minLength: 1
+          description: "For tokens, an optional existing receivable account owned by the bidder for this mint/program. Omission uses the bidder ATA, creates it if missing, and uses a fresh bidder-owned token account if it is blocked. The bidder funds account rent. When a fresh account is created, the returned transaction is partially signed: preserve its ephemeral account signature when adding the bidder signature. Explicit missing or blocked destinations are refused. For SOL, any writable recipient address (defaults to the bidder wallet)."
+        targetPriorityFeeLamports:
+          type: integer
+          description: "Priority fee per transaction, in lamports: an endpoint that returns several transactions (an edition buy of several copies, a chunked collection edit) applies it to each one. By default this is a cap: mallow prices the transaction from current network conditions and pays at most this much, or at most 50,000 lamports when omitted. With `exactPriorityFee: true` it is the fee to pay instead. Either way the fee never goes below a floor: 15,000 lamports, or 15,000 micro-lamports per compute unit when the transaction's compute limit is above 1,000,000 units (up to 21,000 lamports at the 1,400,000-unit maximum). A value under the floor pays the floor. The fee is rounded up to a whole micro-lamport per compute unit, so it can land a lamport or two above this value. Ignored, along with `exactPriorityFee`, when mallow pays the fee (Cream and Reward payments, subsidized mints and edits) and on an edition buy that swaps currency in the same transaction: those use the network estimate capped at 50,000 lamports."
+          format: uint64
+        exactPriorityFee:
+          type: boolean
+          description: Pay `targetPriorityFeeLamports` exactly rather than using it as a cap. Defaults to `false`. When `true`, mallow skips its network fee estimate and sets the compute-unit price so the transaction pays the target (subject to the same floor). Has no effect without `targetPriorityFeeLamports`, and is ignored wherever that field is.
+        blockhash:
+          type: string
+          description: "Recent blockhash to stamp onto the transaction, base58 (ignored when mallow pays: Cream, Reward). Omit to let mallow supply one — mallow's is cached for up to 10 seconds, so two identical requests inside that window compile the same transaction, with the same signature once signed. Supply your own to control the expiry window, or when otherwise-identical requests must produce distinct transactions. Rejected with a `400` if it is not valid base58; a blockhash the cluster has already aged out builds fine and fails at send time."
+      required:
+        - bidder
+        - mint
   parameters: {}
 paths:
   /v1/artwork/updateOwner:
@@ -4594,6 +5828,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Marketplace actions are disabled for the acting account, or for the account on the other side of the trade.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
       security:
         - ApiKeyAuth: []
   /v1/artwork/getBuyEditionTxs:
@@ -4624,6 +5864,12 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "401":
           description: Not signed in.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Marketplace actions are disabled for the acting account, or for the account on the other side of the trade.
           content:
             application/json:
               schema:
@@ -5383,6 +6629,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Too many NFTs match the filter to list their holders.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
       security:
         - ApiKeyAuth: []
   /home:
@@ -5607,7 +6859,9 @@ paths:
         - schema:
             type: string
             minLength: 1
+            description: Comma-joined wallet addresses (Solana, EVM or Tezos). Repeats count once. At most 10 Solana addresses and 30 in total.
           required: true
+          description: Comma-joined wallet addresses (Solana, EVM or Tezos). Repeats count once. At most 10 Solana addresses and 30 in total.
           name: addresses
           in: query
         - schema:
@@ -5638,7 +6892,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/MobileResultResponse"
         "400":
-          description: addresses must not be empty.
+          description: addresses is empty, or names more than 10 Solana addresses or more than 30 in total.
           content:
             application/json:
               schema:
@@ -5730,21 +6984,22 @@ paths:
       description: Login required.
       security:
         - ApiKeyAuth: []
-  /v1/deviceToken/register:
+  /v1/deviceToken/sync:
     post:
       tags:
         - Notifications
-      summary: Register a mobile push token
-      operationId: postV1DeviceTokenRegister
+      summary: Replace the wallet addresses attached to a push token
+      description: "Device-scoped: replaces every address stored for this token with the set supplied. Send the device's full wallet list; an empty array removes the token entirely."
+      operationId: postV1DeviceTokenSync
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/DeviceTokenRegisterRequest"
+              $ref: "#/components/schemas/DeviceTokenSyncRequest"
       responses:
         "200":
-          description: Token registered.
+          description: Addresses replaced.
           content:
             application/json:
               schema:
@@ -5755,57 +7010,11 @@ paths:
                 required:
                   - result
         "400":
-          description: Missing or invalid token/platform.
+          description: Missing or invalid token/platform/addresses.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-        "401":
-          description: Not signed in.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-      description: Login required.
-      security:
-        - ApiKeyAuth: []
-  /v1/deviceToken/unregister:
-    post:
-      tags:
-        - Notifications
-      summary: Unregister a mobile push token
-      operationId: postV1DeviceTokenUnregister
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/DeviceTokenUnregisterRequest"
-      responses:
-        "200":
-          description: Token removed.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  result:
-                    $ref: "#/components/schemas/NotificationsSuccessOk"
-                required:
-                  - result
-        "400":
-          description: Missing token.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-        "401":
-          description: Not signed in.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ErrorResponse"
-      description: Login required.
       security:
         - ApiKeyAuth: []
   /v1/offers:
@@ -5829,6 +7038,154 @@ paths:
                 $ref: "#/components/schemas/OfferListResponse"
         "400":
           description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      security:
+        - ApiKeyAuth: []
+  /v1/opensea/purchase/quote:
+    post:
+      tags:
+        - OpenSea
+      summary: Quote an exact OpenSea listing purchase
+      operationId: postV1OpenseaPurchaseQuote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OpenSeaPurchaseQuoteRequest"
+      responses:
+        "200":
+          description: Buyer-bound short-lived quote.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenSeaPurchaseQuoteResponse"
+        "400":
+          description: Invalid, unavailable, changed or unaffordable purchase.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Marketplace actions are disabled for the buyer's account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: The listing can no longer be fulfilled (sold, cancelled, seller approval revoked, expired zone data, token moved); refresh the listing. `code` is `ORDER_UNAVAILABLE`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Purchase rate limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: OpenSea purchases are disabled or temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      security:
+        - ApiKeyAuth: []
+  /v1/opensea/purchase/prepare:
+    post:
+      tags:
+        - OpenSea
+      summary: Prepare a reviewed OpenSea listing purchase
+      operationId: postV1OpenseaPurchasePrepare
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OpenSeaPurchasePrepareRequest"
+      responses:
+        "200":
+          description: Freshly validated Seaport transaction.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenSeaPurchasePrepareResponse"
+        "400":
+          description: Invalid, unavailable, changed or unaffordable purchase.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Quote belongs to a different wallet, or marketplace actions are disabled for the buyer's account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Price or fees changed, or the listing can no longer be fulfilled as quoted (sold, cancelled, seller approval revoked, expired zone data, token moved); refresh the listing and review a new quote. `code` is `QUOTE_CHANGED` or `ORDER_UNAVAILABLE`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Purchase rate limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: OpenSea purchases are disabled or temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      security:
+        - ApiKeyAuth: []
+  /v1/opensea/purchase/confirm:
+    post:
+      tags:
+        - OpenSea
+      summary: Confirm OpenSea purchase
+      description: Reports a mined purchase so mallow refreshes the artwork's OpenSea listing without waiting for OpenSea's sale event. The server reads the receipt and accepts it only when a supported Seaport contract filled a listing of this artwork to the buyer.
+      operationId: postV1OpenseaPurchaseConfirm
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OpenSeaPurchaseConfirmRequest"
+      responses:
+        "200":
+          description: The listing refresh is queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenSeaPurchaseConfirmResponse"
+        "400":
+          description: Invalid, unavailable, changed or unaffordable purchase.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: The transaction is not mined yet (`TRANSACTION_NOT_FOUND`) or reverted (`TRANSACTION_REVERTED`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Purchase rate limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: OpenSea purchases are disabled or temporarily unavailable.
           content:
             application/json:
               schema:
@@ -6131,7 +7488,7 @@ paths:
       tags:
         - Staking
       summary: Build a transaction to claim earned smores
-      description: Login required. Claims the caller's earned smores — mallow's loyalty points, issued as a compressed SPL token. `amount` is in whole points and may not exceed the unclaimed balance.
+      description: "Login required. Claims the caller's earned smores — mallow's loyalty points, issued as a compressed SPL token. `amount` is in whole points and may not exceed the unclaimed balance. One transaction spends at most four compressed accounts, so a wider balance is claimed in parts: the response's `amount` is what this transaction claims."
       operationId: postV1StakingGetClaimTx
       requestBody:
         required: true
@@ -6153,8 +7510,12 @@ paths:
                       tx:
                         type: string
                       latestBlockhashAndContext: {}
+                      amount:
+                        type: integer
+                        description: Raw units this transaction claims. Less than `amount` asked for when the balance is spread over more compressed accounts than one transaction can spend; the rest stays claimable.
                     required:
                       - tx
+                      - amount
                 required:
                   - result
         "400":
@@ -6211,7 +7572,12 @@ paths:
       tags:
         - Unlockable Content
       summary: Upload unlockable content (single or multi-file)
-      description: Login required. Multipart upload. Fields include `newAssetFilesCount` and `existingAssetUrlsCount`; when both are zero the legacy single-file handler runs.
+      description: |-
+        Login required. Multipart upload. Fields include `newAssetFilesCount` and `existingAssetUrlsCount`; when both are zero the legacy single-file handler runs.
+
+        A multi-file upload sends `assetFile_<i>` and `fileName_<i>` for each new file and `assetUrl_<i>` for each of the account's existing files, at most 50 in all. Each count is at most three digits and at most the number of those parts sent.
+
+        A thumbnail is required (`thumbnailFile`, or the `thumbnailUrl` of an earlier one). It must be a PNG, JPEG, GIF, WebP, AVIF, BMP or SVG image; an SVG thumbnail is served as an attachment.
       operationId: postV1UnlockableContentUpload
       requestBody:
         required: true
@@ -6229,13 +7595,31 @@ paths:
                 properties:
                   result: {}
         "400":
-          description: Invalid request.
+          description: "Invalid request: a malformed form, a bad count, a missing or oversized file, an unsupported file or thumbnail type, or a malformed asset or thumbnail URL."
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "401":
           description: Not signed in.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: "Existing content not found: an `assetUrl` names content this account did not upload."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: "Upload too large: the form is over its field or file size limits."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Failed to upload unlockable content.
           content:
             application/json:
               schema:
@@ -6495,7 +7879,7 @@ paths:
     post:
       tags:
         - Auth
-      summary: Request a nonce to sign
+      summary: Request a sign-in challenge
       operationId: postV0AuthToken
       requestBody:
         content:
@@ -6504,7 +7888,7 @@ paths:
               $ref: "#/components/schemas/AuthTokenRequest"
       responses:
         "200":
-          description: The nonce to include in the signed payload.
+          description: The complete SIWS message or legacy nonce to sign.
           content:
             application/json:
               schema:
@@ -6519,7 +7903,7 @@ paths:
     post:
       tags:
         - Auth
-      summary: Verify a signed nonce and open a signed-wallet session
+      summary: Verify a sign-in challenge
       description: On success the session cookie is set on the response. The body is informational — a client that only needs the session can ignore everything but `expiresAt`.
       operationId: postV0AuthTokenVerify
       requestBody:
@@ -6634,6 +8018,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CollectionMintAccountsResponse"
+        "422":
+          description: The collection holds too many NFTs to list their mint accounts.
       security:
         - ApiKeyAuth: []
   /v0/collections/updateMetadata:
@@ -7114,6 +8500,8 @@ paths:
           description: Missing address, an address the account neither holds nor has a pending request for, or the account's only one.
         "401":
           description: No signed-login session.
+        "403":
+          description: Marketplace actions are disabled for the account, so its wallets cannot be unlinked.
       description: Login required.
       security:
         - ApiKeyAuth: []
@@ -7754,6 +9142,102 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /v2/auctions/bid-refunds/{bidder}:
+    get:
+      operationId: getBidRefunds
+      tags:
+        - Marketplace
+      summary: Available bid refunds
+      description: Lists the auction refunds parked for a bidder, one entry per currency, totalled across auctions. A refund is parked when the bidder is outbid or the auction is cancelled and their wallet or token account cannot receive it. Only SOL and currently registered currencies are checked; use `GET /v2/auctions/bid-refund-claims/{rentPayer}` to find a claim in a currency that is no longer registered. Withdraw a refund with `POST /v2/tx/auctions/withdraw-bid-refund`, or release it to the bidder without their signature with `POST /v2/tx/auctions/push-sol-bid-refund` or `POST /v2/tx/auctions/push-bid-refund`.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - schema:
+            type: string
+            minLength: 1
+            description: Wallet address to report stats for (base58).
+          required: true
+          description: Wallet address to report stats for (base58).
+          name: bidder
+          in: path
+      responses:
+        "200":
+          description: Recorded parked SOL and token refunds owned by the bidder, excluding unsolicited donations. Available after auction closure.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    $ref: "#/components/schemas/BidRefundsResponse"
+                required:
+                  - result
+        "400":
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "Authentication failed: no valid credential was supplied."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: API-key rate limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/auctions/bid-refund-claims/{rentPayer}:
+    get:
+      operationId: getBidRefundClaims
+      tags:
+        - Marketplace
+      summary: Bid refund deposits
+      description: Lists the bid refund claims whose rent this wallet paid. The wallet that pays for the outbid or cancel transaction also pays a claim's rent and gets it back when the claim is closed. The list includes claims for other bidders, claims with nothing left to pay out, and claims in currencies that are no longer registered. Close a claim whose `closable` is true with `POST /v2/tx/auctions/close-bid-refund-claim`. When `releasable` is true, release the refund to its bidder first, with `POST /v2/tx/auctions/push-sol-bid-refund` or `POST /v2/tx/auctions/push-bid-refund`.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - schema:
+            type: string
+            minLength: 1
+            description: Wallet address to report stats for (base58).
+          required: true
+          description: Wallet address to report stats for (base58).
+          name: rentPayer
+          in: path
+      responses:
+        "200":
+          description: Refund claims sponsored by this rent payer, including zero-debt claims for other bidders and formerly registered currencies.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    $ref: "#/components/schemas/BidRefundClaimsResponse"
+                required:
+                  - result
+        "400":
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "Authentication failed: no valid credential was supplied."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: API-key rate limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /v2/blocks:
     get:
       tags:
@@ -8066,12 +9550,93 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
       security:
         - ApiKeyAuth: []
+  /v2/portfolio/received:
+    post:
+      tags:
+        - Portfolio
+      summary: Refresh the tokens a transaction delivered to a wallet
+      description: "Reads the transaction's token transfers from the chain and queues an owner refresh for each token it moved to `address`. A refresh that runs before the token's marketplace data shows the new holder retries for a few minutes. On Ethereum, a token counts only while `address` still holds it, and `mintAccounts` lists the tokens queued (at most 25; the rest of the transaction goes to a full import of `address`). Idempotent: repeating a call for the same transaction and address queues nothing new while the first refresh is in flight."
+      operationId: postV2PortfolioReceived
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PortfolioReceivedRequest"
+      responses:
+        "200":
+          description: What the transaction delivered and whether a refresh was queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    $ref: "#/components/schemas/PortfolioReceivedResult"
+                required:
+                  - result
+        "400":
+          description: Invalid chain, transaction hash or address.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many refresh requests for this address or from this client.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Upstream chain data error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      security:
+        - ApiKeyAuth: []
+  /v2/solana/slot-time:
+    get:
+      operationId: getSolanaSlotTime
+      tags:
+        - Solana
+      summary: Solana slot time
+      description: |-
+        The average time between Solana slots over the last hour of the RPC's performance samples (`getRecentPerformanceSamples`).
+
+        The samples are read at most once every 24 hours. If they cannot be read, the last value that was read is returned instead, for up to 7 days.
+      responses:
+        "200":
+          description: The current average slot time.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    $ref: "#/components/schemas/SolanaSlotTime"
+                required:
+                  - result
+              example:
+                result:
+                  slotTimeMs: 218
+                  sampleSlots: 16512
+                  samplePeriodSecs: 3600
+                  measuredAt: "2026-10-20T05:30:00Z"
+        "503":
+          description: No value has been read yet and the RPC cannot be reached.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+      security:
+        - ApiKeyAuth: []
   /v2/tezos/balances:
     get:
       tags:
         - Tezos
       summary: Tezos wallet token balances
-      description: "Native XTZ plus FA1.2/FA2 **fungible** holdings for a `tz…` address, with spot USD prices. NFTs are excluded — this is the fungible-portfolio read, matching `/v2/evm/balances`, which returns only native + ERC-20. Rows use the same `EvmHolding` shape as the EVM route; the chain coin uses the `\"native\"` sentinel, and an FA2 multitoken with a non-zero token id encodes as `{contract}-{tokenId}` in `contractAddress`. Zero balances are omitted. Pricing is fail-soft: an outage yields unpriced rows (`usdPrice: null`) rather than an error, and `priceChange24h` is always null here (TzKT carries no 24h delta)."
+      description: "Native XTZ plus FA1.2/FA2 **fungible** holdings for a `tz…` address, with spot USD prices. NFTs are excluded — this is the fungible-portfolio read, matching `/v2/evm/balances`, which returns only native + ERC-20. Rows use the same `EvmHolding` shape as the EVM route; FA holdings additionally carry `tokenStandard` and decimal-string `tokenId` transfer metadata. The chain coin uses the `\"native\"` sentinel, and an FA2 multitoken with a non-zero token id also retains the legacy `{contract}-{tokenId}` encoding in `contractAddress`. Zero balances are omitted. Pricing is fail-soft: an outage yields unpriced rows (`usdPrice: null`) rather than an error, and `priceChange24h` is always null here (TzKT carries no 24h delta)."
       operationId: getV2TezosBalances
       parameters:
         - schema:
@@ -8193,9 +9758,9 @@ paths:
       description: |-
         Builds a transaction that permanently destroys an asset and reclaims its rent to `authority`, which must be the current owner and is the only signer.
 
-        Supported `tokenStandard` values are `nft`, `pnft`, `cnft`, `core` and `core-collection`. Collection membership and printed-edition parentage are resolved on-chain, so neither needs to be supplied — but printed-edition burns work for `nft` only, not `pnft`. The `cnft-v2`, `objkt`, `native`, `erc20`, `erc721` and `erc1155` standards are rejected with a `400`.
+        Supported `tokenStandard` values are `nft`, `pnft`, `cnft`, `cnft-v2`, `core` and `core-collection`. Collection membership and printed-edition parentage are resolved on-chain, so neither needs to be supplied — but printed-edition burns work for `nft` only, not `pnft`. The `objkt`, `native`, `erc20`, `erc721` and `erc1155` standards are rejected with a `400`.
 
-        Send `tokenStandard: cnft` for a compressed leaf on **either** Bubblegum tree version — the server reads the tree account's owning program and emits `Burn` (v1) or `BurnV2` (v2) itself, so `cnft-v2` is never the value to send here. The leaf, its Merkle proof and its collection are resolved server-side: `authority` must be the leaf's current DAS owner (a leaf sitting in a listing or auction escrow is rejected with a `400`), and so is one whose canopy-trimmed proof is too deep to fit the transaction.
+        Use `tokenStandard: cnft` or `cnft-v2` as indexed for the asset. The server verifies the tree account's owning program and emits `Burn` (v1) or `BurnV2` (v2) from the actual tree version. The leaf, its Merkle proof, V2 asset-data hash and flags, and its collection are resolved server-side: `authority` must be the leaf's current DAS owner (a leaf sitting in a listing or auction escrow is rejected with a `400`), and so is one whose canopy-trimmed proof is too deep to fit the transaction.
 
         Burning is irreversible and there is no on-chain confirmation step beyond your signature.
       security:
@@ -8255,7 +9820,11 @@ paths:
 
         EVM NFTs are addressed as `<contract>-<tokenId>`. `amount` is the amount in the token's smallest unit as a decimal **string** — because these are uint256 values that overflow a 64-bit integer — wei for `native`, token base units for `erc20`, and the token count for `erc1155` (defaults to `1`). It is ignored for standards that are always 1-of-1 (every Solana standard, plus `erc721`). `objkt` is not supported on this route.
 
-        Set `memo` (Solana only) to write a note on-chain alongside the transfer. A plain transfer is not a mallow market event, so mallow only picks one up when it carries a 0-lamport marker transfer to the mallow fee account — a transfer built with a `memo` therefore carries that marker too, otherwise nothing would ever read the memo back. Without `memo` the transaction is unchanged: no memo instruction and no marker.
+        For `cnft` and `cnft-v2`, the server verifies the tree account's owning program and selects Bubblegum `Transfer` (v1) or `TransferV2` (v2) from the actual tree version. It resolves the Merkle proof, V2 asset-data hash and flags, and collection server-side.
+
+        Set `memo` (Solana only) to write a note on-chain alongside the transfer. A plain transfer is not a mallow market event, so mallow only picks one up when it carries a 0-lamport marker transfer to the mallow fee account — a transfer built with a `memo` therefore carries that marker too, otherwise nothing would ever read the memo back. Set `tagFeeAccount` to get that marker on its own, for a transfer that should show up in mallow's activity and feeds but has no note to write. With neither field the transaction is unchanged — no memo instruction and no marker — and mallow never picks the transfer up; the recipient still becomes the owner, which mallow resolves from the chain rather than from the marker.
+
+        A Solana transfer must fit one transaction: 1,232 bytes for v0, or 4,096 with `transactionVersion: 1`. A compressed NFT in a deep tree with a small canopy needs a long Merkle proof, and a long `memo` adds bytes too. The server measures the finished transaction and answers `400` when it does not fit. Requesting v1 fits every proof a Bubblegum tree can produce.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8316,6 +9885,8 @@ paths:
         - `core_collection` — a parent collection that other assets can join.
 
         The returned transaction may already carry a second signature, from an account the server pays the group-account rent with instead of charging `authority`. Whether that happens is a deployment policy rather than part of this contract, so treat it as an output — sign and broadcast the transaction exactly as returned, and do not rebuild it from its instructions.
+
+        A mint paid with a mallow reward (`paymentMethod: Reward`) needs a signed login for `authority` itself: without one it is refused with a `401`, and for another wallet with a `403` (`Sign in with this wallet to use a reward`). The reward is then reserved for the returned transaction until it lands or its blockhash expires, so a second reward mint in the meantime gets a `409`.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8343,7 +9914,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "401":
-          description: "Authentication failed: no valid credential was supplied."
+          description: "No valid credential was supplied, or a reward mint has no signed login: `Please log in`, `Signature required` or `Signature expired`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: A reward mint whose reward is held by a transaction that can still land (`reward already has a pending transaction`), or already redeemed (`Reward item already redeemed`).
           content:
             application/json:
               schema:
@@ -8487,9 +10064,11 @@ paths:
 
         `price` must be a positive integer in the currency's base units, and `currencyMint` must be a currency mallow has registered. Offers are only supported on 1/1s and edition prints; other supply types are rejected with a `400`, as is an offer on an asset `buyer` already owns.
 
-        The asset's standard is resolved server-side rather than supplied. `nft`, `pnft`, `cnft` (Bubblegum v1 trees), `core` and `core-collection` are all supported; a `cnft-v2` leaf or an `objkt` is rejected with a `400`.
+        The asset's standard is resolved server-side rather than supplied. `nft`, `pnft`, `cnft` (Bubblegum v1 trees), `cnft-v2`, `core` and `core-collection` are supported; `objkt` is rejected with a `400`.
 
         If `buyer` already has an open offer on `asset`, this **updates** the existing offer instead of creating a second one — the on-chain program rejects duplicates. An update keeps the original currency, so a request naming a different `currencyMint` is rejected with a `400` asking for the existing offer to be cancelled first. `endTime` is a Unix timestamp after which the offer lapses, and `oneOfOneOnly` restricts the offer to 1/1s.
+
+        Bubblegum v2 compressed NFTs (`cnft-v2`) are supported. Escrow entry rejects nonzero leaf flags and Core collections with permanent freeze, transfer or burn delegates.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8522,6 +10101,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Marketplace actions are disabled for the acting account, or for the account on the other side of the trade.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "429":
           description: API-key rate limit exceeded.
           content:
@@ -8546,6 +10131,8 @@ paths:
         `buyer` must be the wallet that created the offer, and `asset` must match the asset recorded on the offer — a mismatch is rejected rather than silently closing a different offer.
 
         This route returns `404` when no offer exists. Note the asymmetry: `/v2/tx/offers/accept` returns `400` in the same situation.
+
+        Bubblegum v2 compressed NFTs (`cnft-v2`) are supported.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8606,6 +10193,10 @@ paths:
         Set `enablePrimarySplit` to split the primary-sale proceeds among the creators recorded on-chain. When it is omitted the proceeds go to the seller, with royalties still paid to those creators.
 
         A compressed NFT may need an address lookup table before its transaction fits the 1232-byte packet. When no usable one exists, the response carries a `setupTx` alongside `tx`: sign and confirm it first, then broadcast `tx`.
+
+        Bubblegum v2 compressed NFTs (`cnft-v2`) are supported. Escrow entry rejects nonzero leaf flags and Core collections with permanent freeze, transfer or burn delegates. Royalties use leaf creators unless the leaf inherits (65535) or has no creators, then the Core collection Royalties plugin, otherwise zero.
+
+        Native creator rent shortfalls are funded only from the seller's proceeds of this sale, using cluster rent. If those proceeds cannot cover a creator's shortfall, that creator's share stays with the seller; the sale succeeds. The buyer pays exactly the sale price (subject to maxPrice on buys), with network, protocol and setup costs separate. This applies to v1 and v2 assets.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8634,6 +10225,75 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "401":
           description: "Authentication failed: no valid credential was supplied."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Marketplace actions are disabled for the acting account, or for the account on the other side of the trade.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: API-key rate limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Transaction build or RPC error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/tx/magic-eden/buy:
+    post:
+      operationId: buyMagicEden
+      tags:
+        - Transactions (v2)
+      summary: Buy on Magic Eden
+      description: Revalidates the selected on-chain order and escrow, enforces separate payment-currency and SOL debit limits, simulates the buyer-only transaction, and returns its exact quote and blockhash expiry. Purchase is gated by the Magic Eden purchase switch.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MagicEdenBuyTxRequest"
+      responses:
+        "200":
+          description: Unsigned transaction(s).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    $ref: "#/components/schemas/MagicEdenBuyTxResponse"
+                required:
+                  - result
+        "400":
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "Authentication failed: no valid credential was supplied."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Marketplace actions are disabled for the acting account, or for the account on the other side of the trade.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Selected order or revision changed.
           content:
             application/json:
               schema:
@@ -8668,6 +10328,10 @@ paths:
         A swap-funded buy of a **pNFT or cNFT** comes back as a two-step response: `swapTx` instead of `tx`. Those buy instructions already spend the packet budget on token records and Merkle proofs, so the swap cannot ride along. Send `swapTx`, wait for `confirmed`, then request this endpoint again with `swapQuote` omitted — the second call is the ordinary purchase, now against a wallet that holds the currency. Every other standard bundles the swap and returns a single `tx` as before.
 
         Listings gated by a whitelist reject buyers who are not on it.
+
+        Bubblegum v2 compressed NFTs (`cnft-v2`) are supported. Royalties use leaf creators unless the leaf inherits (65535) or has no creators, then the Core collection Royalties plugin, otherwise zero.
+
+        Native creator rent shortfalls are funded only from the seller's proceeds of this sale, using cluster rent. If those proceeds cannot cover a creator's shortfall, that creator's share stays with the seller; the sale succeeds. The buyer pays exactly the sale price (subject to maxPrice on buys), with network, protocol and setup costs separate. This applies to v1 and v2 assets.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8700,6 +10364,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Marketplace actions are disabled for the acting account, or for the account on the other side of the trade.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "429":
           description: API-key rate limit exceeded.
           content:
@@ -8728,6 +10398,8 @@ paths:
         A wallet-allowlisted sale may also need a per-buyer proof account. When it does, the response carries a **`setupTx` alongside `result`** — sign, send and confirm it first, then broadcast the `result` transactions.
 
         As with a single buy, the buyer pays in the listing's currency; `swapQuote` is only needed to pay with a different token, and here it must cover the listing price **plus** estimated SOL fees.
+
+        Native creator rent shortfalls are funded only from the seller's proceeds of this sale, using cluster rent. If those proceeds cannot cover a creator's shortfall, that creator's share stays with the seller; the sale succeeds. The buyer pays exactly the sale price (subject to maxPrice on buys), with network, protocol and setup costs separate. This applies to v1 and v2 assets.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8751,6 +10423,12 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "401":
           description: "Authentication failed: no valid credential was supplied."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Marketplace actions are disabled for the acting account, or for the account on the other side of the trade.
           content:
             application/json:
               schema:
@@ -8781,6 +10459,8 @@ paths:
         `editionsLimit`, `buyerSetsPrice` and `startTime` are **master-edition-only** and are rejected on a 1/1. `editionsLimit` caps how many prints the listing offers: 0–65535, and for limited editions no more than the remaining mintable supply (`maxSupply − supply`). `buyerSetsPrice` lets buyers pay any amount at or above `price`. `startTime` is a Unix timestamp deferring when the listing goes live. A 1/1 is always active from the moment its transaction confirms and always sells at exactly `price` — sending `buyerSetsPrice: false` or `startTime: 0` on one is fine.
 
         The response may include a **`setupTx` alongside `tx`** that `tx` depends on — sign and confirm `setupTx` first, then broadcast `tx`.
+
+        Bubblegum v2 compressed NFTs (`cnft-v2`) are supported. Escrow entry rejects nonzero leaf flags and Core collections with permanent freeze, transfer or burn delegates.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8813,6 +10493,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Marketplace actions are disabled for the acting account, or for the account on the other side of the trade.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "429":
           description: API-key rate limit exceeded.
           content:
@@ -8837,6 +10523,8 @@ paths:
         `seller` must be the wallet that created the listing. Any escrowed listing state is closed and its rent returned in the same transaction.
 
         A compressed NFT may need an address lookup table before its transaction fits the 1232-byte packet. When no usable one exists, the response carries a `setupTx` alongside `tx`: sign and confirm it first, then broadcast `tx`.
+
+        Bubblegum v2 compressed NFTs (`cnft-v2`) are supported.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8891,6 +10579,8 @@ paths:
         Builds a transaction repricing an existing listing to `newPrice`, signed by `seller`.
 
         The listing must exist and belong to `seller`. Nothing else about it changes — currency, timing, edition limit and whitelist configuration are all preserved. To change those, cancel the listing and create a new one.
+
+        Bubblegum v2 compressed NFTs (`cnft-v2`) are supported.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8899,6 +10589,195 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/UpdateFixedPriceTxRequest"
+      responses:
+        "200":
+          description: Unsigned transaction(s).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    $ref: "#/components/schemas/UnsignedTxResponse"
+                required:
+                  - result
+        "400":
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "Authentication failed: no valid credential was supplied."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Marketplace actions are disabled for the acting account, or for the account on the other side of the trade.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: API-key rate limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Transaction build or RPC error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/tx/auctions/create:
+    post:
+      operationId: createAuction
+      tags:
+        - Transactions (v2)
+      summary: Create auction
+      description: |-
+        Builds an auction listing for `asset` by `seller`.
+
+        `reservePrice` is the minimum accepted bid and `duration` is the auction length in **seconds**. When `startTime` is given the clock starts then; otherwise it starts at the first bid.
+
+        `minBidIncrement` is read as **basis points** of the current bid (minimum 10 bps) unless `absoluteIncrement` is set, in which case it is a flat amount in the bid currency's base units.
+
+        `timeExtPeriod` and `timeExtDelta` configure anti-sniping: a bid landing within the final `timeExtPeriod` seconds pushes the deadline out by `timeExtDelta` seconds. `bidMint` denominates bids in an SPL token instead of SOL, and `enablePrimarySplit` splits the primary-sale proceeds among the on-chain creators (omitted, the proceeds go to the seller).
+
+        A compressed NFT whose Merkle tree has too shallow a canopy needs an address lookup table before their transaction fits the 1232-byte packet. When one does not exist yet, the response carries a `setupTx` alongside `tx`: sign and confirm it first, then broadcast `tx`.
+
+        Bubblegum v2 compressed NFTs (`cnft-v2`) are supported. Escrow entry rejects nonzero leaf flags and Core collections with permanent freeze, transfer or burn delegates. The leaf is transferred into the auction PDA using `create_cnft_auction_v2`; v1 instruction layouts remain unchanged.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAuctionTxRequest"
+      responses:
+        "200":
+          description: Unsigned transaction(s).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    $ref: "#/components/schemas/UnsignedTxWithSetupResponse"
+                required:
+                  - result
+        "400":
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "Authentication failed: no valid credential was supplied."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Marketplace actions are disabled for the acting account, or for the account on the other side of the trade.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: API-key rate limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Transaction build or RPC error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/tx/auctions/bid:
+    post:
+      operationId: placeBid
+      tags:
+        - Transactions (v2)
+      summary: Place bid
+      description: |-
+        Builds a bid of `bidAmount` on `asset`'s auction, signed and funded by `bidder`. The previous high bidder is refunded on-chain when this confirms. If their SOL recipient is reserved, executable, not system-owned or would remain below rent-exempt balance after the refund, or their token ATA cannot accept the refund, the balance is parked in a bidder-owned claim; list it at `/v2/auctions/bid-refunds/{bidder}` and withdraw at `/v2/tx/auctions/withdraw-bid-refund`. A healthy read-only SOL recipient fails with `InvalidBidder`; read-only status alone never triggers the fallback. New bidders must be non-reserved, non-executable, system-owned wallets.
+
+        `bidAmount` must be a positive integer in the auction's bid currency and must clear the reserve price and the current bid plus its minimum increment. Native SOL bids must also be at least the cluster's `Rent::minimum_balance(0)`; the effective reserve is `max(reservePrice, native minimum)`. The builder validates current cluster rent; the program rejects a below-minimum bid with `BidTooLow` (6007). SPL/Token-2022 bids have a minimum of one base unit.
+
+        Assets behind an off-chain allowlist reject bidders who are not on it. A mint mallow has never indexed, or one with no auction, returns `400` (not `404`). A v2 auction that has refunded its winning bid is terminal and cannot accept new bids, even while its recovery PDA remains on-chain.
+
+        Bubblegum v2 compressed NFTs (`cnft-v2`) are supported.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BidTxRequest"
+      responses:
+        "200":
+          description: Unsigned transaction(s).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    $ref: "#/components/schemas/UnsignedTxResponse"
+                required:
+                  - result
+        "400":
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "Authentication failed: no valid credential was supplied."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Marketplace actions are disabled for the acting account, or for the account on the other side of the trade.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: API-key rate limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Transaction build or RPC error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/tx/auctions/withdraw-bid-refund:
+    post:
+      operationId: withdrawBidRefund
+      tags:
+        - Transactions (v2)
+      summary: Withdraw bid refund
+      description: "Withdraws the full parked SOL or token refund balance for the bidder and mint, including refunds aggregated across auctions. The bidder signs. Claim and token-account rent remain reserved for reuse; only the refund balance is withdrawn. For tokens, the destination must accept ordinary token transfers and be bidder-owned for this mint/program. Omission uses the bidder ATA, creates it if missing, and uses a fresh bidder-owned token account if it is blocked (including frozen, reassigned, memo-required, confidential-only or wrong-program accounts). The bidder funds account rent. When a fresh account is created, the returned transaction is partially signed: preserve its ephemeral account signature when adding the bidder signature. Explicit missing or blocked destinations are refused."
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WithdrawBidRefundTxRequest"
       responses:
         "200":
           description: Unsigned transaction(s).
@@ -8935,22 +10814,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-  /v2/tx/auctions/create:
+  /v2/tx/auctions/push-bid-refund:
     post:
-      operationId: createAuction
+      operationId: pushBidRefund
       tags:
         - Transactions (v2)
-      summary: Create auction
-      description: |-
-        Builds an auction listing for `asset` by `seller`.
-
-        `reservePrice` is the minimum accepted bid and `duration` is the auction length in **seconds**. When `startTime` is given the clock starts then; otherwise it starts at the first bid.
-
-        `minBidIncrement` is read as **basis points** of the current bid (minimum 10 bps) unless `absoluteIncrement` is set, in which case it is a flat amount in the bid currency's base units.
-
-        `timeExtPeriod` and `timeExtDelta` configure anti-sniping: a bid landing within the final `timeExtPeriod` seconds pushes the deadline out by `timeExtDelta` seconds. `bidMint` denominates bids in an SPL token instead of SOL, and `enablePrimarySplit` splits the primary-sale proceeds among the on-chain creators (omitted, the proceeds go to the seller).
-
-        A compressed NFT whose Merkle tree has too shallow a canopy needs an address lookup table before their transaction fits the 1232-byte packet. When one does not exist yet, the response carries a `setupTx` alongside `tx`: sign and confirm it first, then broadcast `tx`.
+      summary: Release token refund
+      description: Releases exactly the recorded SPL or Token-2022 refund debt to a bidder-owned token account without the bidder signing. An optional destination must be an existing account owned by the original bidder, with the correct mint and token program, accepting ordinary transfers; frozen, memo-required or confidential-only accounts are refused. Without a destination, uses the canonical ATA and creates it at the payer's expense when missing. If that ATA is unusable, creates a new sponsor-funded bidder-owned token account instead; its rent belongs to the bidder. Claim rent and donations remain for the recorded rent payer to recover after release.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -8958,7 +10828,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/CreateAuctionTxRequest"
+              $ref: "#/components/schemas/PushBidRefundTxRequest"
       responses:
         "200":
           description: Unsigned transaction(s).
@@ -8968,7 +10838,7 @@ paths:
                 type: object
                 properties:
                   result:
-                    $ref: "#/components/schemas/UnsignedTxWithSetupResponse"
+                    $ref: "#/components/schemas/UnsignedTxResponse"
                 required:
                   - result
         "400":
@@ -8995,18 +10865,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
-  /v2/tx/auctions/bid:
+  /v2/tx/auctions/push-sol-bid-refund:
     post:
-      operationId: placeBid
+      operationId: pushSolBidRefund
       tags:
         - Transactions (v2)
-      summary: Place bid
-      description: |-
-        Builds a bid of `bidAmount` on `asset`'s auction, signed and funded by `bidder`. The previous high bidder is refunded on-chain when this confirms.
-
-        `bidAmount` must be a positive integer in the auction's bid currency and must clear the reserve price and the current bid plus its minimum increment.
-
-        Assets behind an off-chain allowlist reject bidders who are not on it. A mint mallow has never indexed, or one with no auction, returns `400` (not `404`).
+      summary: Release SOL refund
+      description: Builds an unsigned transaction releasing exactly the recorded SOL refund debt to its original bidder once that wallet can receive it. Any payer may sponsor the transaction; the bidder does not sign and the destination cannot change. Claim rent and donations remain for the recorded rent payer to recover after release. Use the bidder-signed withdrawal for another destination; token refunds use the token release route.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -9014,7 +10879,58 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/BidTxRequest"
+              $ref: "#/components/schemas/PushSolBidRefundTxRequest"
+      responses:
+        "200":
+          description: Unsigned transaction(s).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    $ref: "#/components/schemas/UnsignedTxResponse"
+                required:
+                  - result
+        "400":
+          description: Validation error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "Authentication failed: no valid credential was supplied."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: API-key rate limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Transaction build or RPC error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v2/tx/auctions/close-bid-refund-claim:
+    post:
+      operationId: closeBidRefundClaim
+      tags:
+        - Transactions (v2)
+      summary: Close refund claim
+      description: Builds an unsigned transaction closing a zero-debt refund claim and its token account, returning their rent to the recorded rent payer. The bidder must withdraw recorded refunds first. Unsolicited SOL returns to the rent payer; donated tokens are swept to the payer’s canonical currency account, created at their expense when necessary. The recorded rent payer signs; read rentPayer from GET /v2/accounts/auction/bid-refund-claim/{address}. For direct RPC discovery, use getProgramAccounts on MallowAuction with dataSize 113 and a memcmp of the rent payer's base58 key at offset 73. Existing claims retain their original rent payer when later refunds reuse them.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CloseBidRefundClaimTxRequest"
       responses:
         "200":
           description: Unsigned transaction(s).
@@ -9063,6 +10979,8 @@ paths:
         **Only a no-bid auction can be cancelled.** Once a bid has been placed the auction is binding and this returns `400` — use `/v2/tx/auctions/settle` after it ends instead.
 
         A compressed NFT whose Merkle tree has too shallow a canopy needs an address lookup table before their transaction fits the 1232-byte packet. When one does not exist yet, the response carries a `setupTx` alongside `tx`: sign and confirm it first, then broadcast `tx`.
+
+        Bubblegum v2 compressed NFTs (`cnft-v2`) are supported. V2 cancellation uses `cancel_cnft_auction_v2`; a refunded terminal auction requires operator recovery signed by its recorded marketplace authority.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -9123,6 +11041,12 @@ paths:
         If the auction ended with **no bids**, this instead builds the reclaim path returning the asset to the seller — and then only the seller may call it.
 
         A compressed NFT whose Merkle tree has too shallow a canopy needs an address lookup table before their transaction fits the 1232-byte packet. When one does not exist yet, the response carries a `setupTx` alongside `tx`: sign and confirm it first, then broadcast `tx`.
+
+        Bubblegum v2 compressed NFTs (`cnft-v2`) are supported. Royalties use leaf creators unless the leaf inherits (65535) or has no creators, then the Core collection Royalties plugin, otherwise zero. V2 settlement uses `settle_cnft_auction_v2` and remains a secondary sale.
+
+        If delivery becomes impossible, the auction program exposes `refund_undeliverable_cnft_auction_v2` with authenticated current-root evidence (burned, moved or flagged leaf, or a proof-bound collection with a Permanent delegate plugin), or closed-tree evidence when the recorded tree no longer exists as an initialized MPL compression tree. Closed-tree evidence covers missing or foreign-owned accounts, invalid or uninitialized tree data, and a recorded leaf index at or beyond the tree's next append index or capacity; a re-created valid tree otherwise uses a current-root empty-leaf proof where required. Remaining replacement-tree cases can be recovered by the marketplace authority after off-chain verification; operator tooling is dry-run by default. The closed-tree path uses no leaf, a zero root and the canonical tree-config PDA as the sole evidence account, with no Merkle proof or setupTx. DAS absence or failure alone is never closed-tree evidence. Alternatively, `admin_refund_cnft_auction_v2` is signed by the recorded marketplace authority after the auction ends. These are separate on-chain recovery instructions, not a successful settlement or a seller cancellation bypass. They refund the recorded highest bid to the highest bidder; previous bidders were already refunded when outbid. No sale is recorded, and the auction becomes terminal despite retaining its PDA. If the leaf can later be transferred, authority-signed `reclaim_cnft_v2` returns it to the recorded seller and closes the PDA. Missing-leaf cleanup is available at `/v2/tx/auctions/close-missing`.
+
+        Native creator rent shortfalls are funded only from the seller's proceeds of this sale, using cluster rent. If those proceeds cannot cover a creator's shortfall, that creator's share stays with the seller; the sale succeeds. The buyer pays exactly the sale price (subject to maxPrice on buys), with network, protocol and setup costs separate. This applies to v1 and v2 assets.
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -9209,6 +11133,12 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "401":
           description: "Authentication failed: no valid credential was supplied."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Marketplace actions are disabled for the acting account, or for the account on the other side of the trade.
           content:
             application/json:
               schema:
@@ -9387,6 +11317,64 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /v2/magic-eden/quote:
+    get:
+      operationId: quoteMagicEdenBuy
+      tags:
+        - Transactions (v2)
+      summary: Magic Eden buy quote
+      description: Selects the tracked M2 order for a mint, validates its chain state and escrow, and quotes separate payment-currency and SOL debits. Unavailable or unsupported orders return an explicit reason.
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - schema:
+            type: string
+            pattern: ^[1-9A-HJ-NP-Za-km-z]{32,44}$
+          required: true
+          name: mintAccount
+          in: query
+        - schema:
+            type: string
+            pattern: ^[1-9A-HJ-NP-Za-km-z]{32,44}$
+          required: true
+          name: buyer
+          in: query
+      responses:
+        "200":
+          description: Current purchase availability and quote
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    $ref: "#/components/schemas/MagicEdenBuyQuoteResponse"
+                required:
+                  - result
+        "400":
+          description: Invalid query
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: "Authentication failed: no valid credential was supplied."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: API-key rate limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: RPC or quote error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /v2/user/delete:
     post:
       tags:
@@ -9468,10 +11456,14 @@ tags:
     description: The older transaction builders, and transaction status checks.
   - name: Transactions (v2)
     description: The current unsigned-transaction builders.
+  - name: OpenSea
+    description: Quoting, preparing and confirming the purchase of an OpenSea listing on Ethereum.
   - name: EVM
     description: Ethereum balances and token metadata.
   - name: Tezos
     description: Tezos balances.
+  - name: Solana
+    description: Solana network timing.
   - name: Staking
     description: Staking state and reward claims.
   - name: Holders

@@ -103,7 +103,7 @@ class RaffleGate {
 /// lifecycle copy, the numbers, the cancel / claim / reclaim CTAs — is
 /// resolved here from `raffleMetadata` + [gate].
 ///
-/// Triggered by `raffle` (any role) — see `docs/artwork_state.md`.
+/// Triggered by `raffle` (any role) in `resolveArtworkActionState`.
 class ArtworkRaffleSheet extends StatelessWidget {
   const ArtworkRaffleSheet({
     required this.artwork,

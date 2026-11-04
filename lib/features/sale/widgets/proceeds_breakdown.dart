@@ -48,17 +48,30 @@ class ProceedsBreakdown extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.mallowColors;
+    final creatorRentMayApply =
+        token.mint == solMint &&
+        splits.any(
+          (split) =>
+              split.label == ProceedsLabel.creator && split.proceedsPct > 0,
+        );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Text(
-          'Proceeds',
+          creatorRentMayApply ? 'Estimated proceeds' : 'Proceeds',
           style: MallowTheme.uiMeta.copyWith(color: colors.textPrimary),
         ),
         const SizedBox(height: MallowTheme.spacingSm),
         for (var i = 0; i < splits.length; i++) ...[
           if (i > 0) Divider(height: 1, color: colors.divider),
           _ProceedsRow(split: splits[i], token: token, priceRaw: priceRaw),
+        ],
+        if (creatorRentMayApply) ...[
+          const SizedBox(height: MallowTheme.spacingSm),
+          Text(
+            kCreatorWalletRentNotice,
+            style: MallowTheme.uiCaption.copyWith(color: colors.textSecondary),
+          ),
         ],
       ],
     );

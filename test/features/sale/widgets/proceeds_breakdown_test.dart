@@ -104,6 +104,73 @@ void main() {
     });
   });
 
+  for (final price in <int?>[10_000_000, null]) {
+    testWidgets(
+      'native proceeds disclose seller-funded creator rent at $price',
+      (tester) async {
+        await pump(
+          tester,
+          ProceedsBreakdown(
+            splits: [
+              split(ProceedsLabel.you, 'SELLER', 90, 9_000_000),
+              split(ProceedsLabel.creator, 'CREATOR', 10, 1_000_000),
+            ],
+            token: _token,
+            priceRaw: price,
+          ),
+        );
+        expect(find.text('Estimated proceeds'), findsOneWidget);
+        expect(
+          find.text(
+            'New creator wallets may need rent, paid from your proceeds.',
+          ),
+          findsOneWidget,
+        );
+      },
+    );
+  }
+
+  testWidgets('sole-seller native proceeds do not disclose creator rent', (
+    tester,
+  ) async {
+    await pump(
+      tester,
+      ProceedsBreakdown(
+        splits: [split(ProceedsLabel.you, 'SELLER', 100, 10_000_000)],
+        token: _token,
+        priceRaw: 10_000_000,
+      ),
+    );
+    expect(find.text('Proceeds'), findsOneWidget);
+    expect(find.textContaining('New creator wallets'), findsNothing);
+  });
+
+  testWidgets(
+    'token proceeds keep nominal royalties without native rent copy',
+    (tester) async {
+      await pump(
+        tester,
+        ProceedsBreakdown(
+          splits: [
+            split(ProceedsLabel.you, 'SELLER', 90, 9_000_000),
+            split(ProceedsLabel.creator, 'CREATOR', 10, 1_000_000),
+          ],
+          token: const MallowToken(
+            symbol: 'USDC',
+            mint: 'USDC',
+            decimals: 6,
+            inputDecimals: 2,
+            minListingPrice: 1,
+          ),
+          priceRaw: 10_000_000,
+        ),
+      );
+      expect(find.text('Proceeds'), findsOneWidget);
+      expect(find.text('Estimated proceeds'), findsNothing);
+      expect(find.textContaining('New creator wallets'), findsNothing);
+    },
+  );
+
   group('AuctionReviewStep', () {
     testWidgets('shows proceeds as percentages, not reserve-derived amounts '
         '(webapp parity: hammer price unknown at listing time)', (

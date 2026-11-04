@@ -29,55 +29,70 @@ class MintTypeChooserScreen extends StatelessWidget {
           padding: const EdgeInsets.symmetric(
             horizontal: MallowTheme.spacing20,
           ),
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              return SingleChildScrollView(
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(minHeight: constraints.maxHeight),
-                  child: IntrinsicHeight(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const MallowHeader(title: 'Mint artwork'),
-                        const SizedBox(height: MallowTheme.spacing20),
-                        const MintProgressBar(fraction: _progressFraction),
-                        const SizedBox(height: MallowTheme.spacing20),
-                        Text(
-                          'Choose artwork type',
-                          style: MallowTheme.uiLabel.copyWith(
-                            color: colors.textSecondary,
+          // Header sits above the scroll view so a pull past the top moves
+          // only the content, never the nav bar.
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const MallowHeader(title: 'Mint artwork'),
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    return SingleChildScrollView(
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          minHeight: constraints.maxHeight,
+                        ),
+                        child: IntrinsicHeight(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const SizedBox(height: MallowTheme.spacing20),
+                              const MintProgressBar(
+                                fraction: _progressFraction,
+                              ),
+                              const SizedBox(height: MallowTheme.spacing20),
+                              Text(
+                                'Choose artwork type',
+                                style: MallowTheme.uiLabel.copyWith(
+                                  color: colors.textSecondary,
+                                ),
+                              ),
+                              const SizedBox(height: MallowTheme.spacing20),
+                              ChooserTypeRow(
+                                svgAsset: 'assets/icons/my_art.svg',
+                                title: '1/1 artwork',
+                                subtitle: 'One artwork, one owner',
+                                onTap: () => context.push(AppRoutes.mint1Of1),
+                              ),
+                              const SizedBox(height: MallowTheme.spacing20),
+                              ChooserTypeRow(
+                                svgAsset: 'assets/icons/edition.svg',
+                                title: 'Editions',
+                                subtitle: 'One artwork, many collectors',
+                                onTap: () =>
+                                    context.push(AppRoutes.mintEditions),
+                              ),
+                              const SizedBox(height: MallowTheme.spacing20),
+                              ChooserTypeRow(
+                                svgAsset: 'assets/icons/art_track.svg',
+                                title: 'Collection',
+                                subtitle: 'Group related artworks together',
+                                onTap: () =>
+                                    context.push(AppRoutes.mintCollection),
+                              ),
+                              const Spacer(),
+                              const _CoreStandardFooter(),
+                              const SizedBox(height: MallowTheme.spacingXl),
+                            ],
                           ),
                         ),
-                        const SizedBox(height: MallowTheme.spacing20),
-                        ChooserTypeRow(
-                          svgAsset: 'assets/icons/my_art.svg',
-                          title: '1/1 artwork',
-                          subtitle: 'One artwork, one owner',
-                          onTap: () => context.push(AppRoutes.mint1Of1),
-                        ),
-                        const SizedBox(height: MallowTheme.spacing20),
-                        ChooserTypeRow(
-                          svgAsset: 'assets/icons/edition.svg',
-                          title: 'Editions',
-                          subtitle: 'One artwork, many collectors',
-                          onTap: () => context.push(AppRoutes.mintEditions),
-                        ),
-                        const SizedBox(height: MallowTheme.spacing20),
-                        ChooserTypeRow(
-                          svgAsset: 'assets/icons/art_track.svg',
-                          title: 'Collection',
-                          subtitle: 'Group related artworks together',
-                          onTap: () => context.push(AppRoutes.mintCollection),
-                        ),
-                        const Spacer(),
-                        const _CoreStandardFooter(),
-                        const SizedBox(height: MallowTheme.spacingXl),
-                      ],
-                    ),
-                  ),
+                      ),
+                    );
+                  },
                 ),
-              );
-            },
+              ),
+            ],
           ),
         ),
       ),

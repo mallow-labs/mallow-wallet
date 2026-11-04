@@ -15,6 +15,7 @@ import '../mallow_kv_row.dart';
 import '../mallow_pill_chip.dart';
 import '../mallow_underline_tab_bar.dart';
 import '../tap_target_expander.dart';
+import '../tappable.dart';
 import 'artwork_info_view_data.dart';
 
 /// Shared tabbed block (Description / Details / Categories / Tags / Traits)
@@ -25,9 +26,23 @@ import 'artwork_info_view_data.dart';
 /// bar and the body, so callers can pass partial data without rendering
 /// dead sections.
 class ArtworkInfoTabs extends StatefulWidget {
-  const ArtworkInfoTabs({required this.data, super.key});
+  const ArtworkInfoTabs({
+    required this.data,
+    this.onCategoryTap,
+    this.onTagTap,
+    super.key,
+  });
 
   final ArtworkInfoViewData data;
+
+  /// Called with the category's display name when its chip is tapped. Null
+  /// leaves the chips inert — the mint review step previews an artwork that
+  /// doesn't exist yet, so there is nothing to browse.
+  final ValueChanged<String>? onCategoryTap;
+
+  /// Called with the raw tag (no `#`) when its chip is tapped. Null leaves the
+  /// chips inert, as with [onCategoryTap].
+  final ValueChanged<String>? onTagTap;
 
   @override
   State<ArtworkInfoTabs> createState() => _ArtworkInfoTabsState();
@@ -47,11 +62,22 @@ class _ArtworkInfoTabsState extends State<ArtworkInfoTabs> {
       if (detailsRows.isNotEmpty)
         _TabEntry('Details', () => MallowKvList(rows: detailsRows)),
       if (data.categories.isNotEmpty)
-        _TabEntry('Categories', () => _Chips(values: data.categories)),
+        _TabEntry(
+          'Categories',
+          () => _Chips(
+            values: data.categories,
+            label: (c) => c,
+            onTap: widget.onCategoryTap,
+          ),
+        ),
       if (data.tags.isNotEmpty)
         _TabEntry(
           'Tags',
-          () => _Chips(values: data.tags.map((t) => '#$t').toList()),
+          () => _Chips(
+            values: data.tags,
+            label: (t) => '#$t',
+            onTap: widget.onTagTap,
+          ),
         ),
       if (data.traits.isNotEmpty)
         _TabEntry('Traits', () => _TraitsBlock(traits: data.traits)),
@@ -98,16 +124,25 @@ class _Description extends StatelessWidget {
 }
 
 class _Chips extends StatelessWidget {
-  const _Chips({required this.values});
+  const _Chips({required this.values, required this.label, this.onTap});
 
   final List<String> values;
+  final String Function(String value) label;
+  final ValueChanged<String>? onTap;
 
   @override
   Widget build(BuildContext context) {
+    final onTap = this.onTap;
     return Wrap(
       spacing: MallowTheme.spacingSm,
       runSpacing: MallowTheme.spacingSm,
-      children: [for (final v in values) MallowPillChip(v)],
+      children: [
+        for (final v in values)
+          if (onTap == null)
+            MallowPillChip(label(v))
+          else
+            Tappable(onTap: () => onTap(v), child: MallowPillChip(label(v))),
+      ],
     );
   }
 }

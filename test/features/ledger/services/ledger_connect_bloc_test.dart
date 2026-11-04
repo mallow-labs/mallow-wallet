@@ -190,6 +190,61 @@ void main() {
     );
 
     blocTest<LedgerConnectBloc, LedgerConnectState>(
+      'names the account the user named in the picker, and only that one',
+      build: () {
+        for (final (address, index) in [(address1, 0), (address2, 1)]) {
+          when(
+            mockRepo.addLedgerWallet(
+              address,
+              any,
+              derivationIndex: anyNamed('derivationIndex'),
+              derivationScheme: anyNamed('derivationScheme'),
+              ledgerDeviceId: anyNamed('ledgerDeviceId'),
+              accountName: anyNamed('accountName'),
+            ),
+          ).thenAnswer((_) async => ledgerWallet(address, index));
+        }
+        return LedgerConnectBloc(
+          mockLedger,
+          mockRepo,
+          mockTokens,
+          mockPortfolio,
+          mockPrefs,
+        );
+      },
+      act: (bloc) async {
+        bloc.add(const LedgerConnectEvent.loadAccounts());
+        await Future<void>.delayed(Duration.zero);
+        bloc.add(const LedgerConnectEvent.renameAccount(1, '  Cold  '));
+        bloc.add(const LedgerConnectEvent.toggleAccount(0));
+        bloc.add(const LedgerConnectEvent.toggleAccount(1));
+        await Future<void>.delayed(Duration.zero);
+        expect((bloc.state as LedgerAccountsLoaded).customNames, {1: 'Cold'});
+        bloc.add(const LedgerConnectEvent.importAccounts());
+      },
+      verify: (_) {
+        verify(
+          mockRepo.addLedgerWallet(
+            address1,
+            any,
+            derivationScheme: anyNamed('derivationScheme'),
+            ledgerDeviceId: anyNamed('ledgerDeviceId'),
+          ),
+        ).called(1);
+        verify(
+          mockRepo.addLedgerWallet(
+            address2,
+            any,
+            derivationIndex: 1,
+            derivationScheme: anyNamed('derivationScheme'),
+            ledgerDeviceId: anyNamed('ledgerDeviceId'),
+            accountName: 'Cold',
+          ),
+        ).called(1);
+      },
+    );
+
+    blocTest<LedgerConnectBloc, LedgerConnectState>(
       'does not activate when no accounts are selected',
       build: () => LedgerConnectBloc(
         mockLedger,
@@ -256,7 +311,8 @@ void main() {
         expect(
           bloc.state,
           const LedgerConnectState.error(
-            'Could not update recovery data. Please try again.',
+            'Could not update recovery data. Check your wallet list '
+            'before trying again.',
           ),
         );
       },

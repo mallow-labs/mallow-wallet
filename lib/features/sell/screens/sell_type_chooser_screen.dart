@@ -63,6 +63,10 @@ class _SellTypeChooserScreenState extends State<SellTypeChooserScreen> {
     }
     final action = await showVerifyToListSheet(context, reason);
     if (!mounted) return;
+    if (action == VerifyToListAction.retry) {
+      await _runEligibilityGate();
+      return;
+    }
     // Grabbed before the pop: this element is deactivated by it, so its
     // context can't route afterwards.
     final router = GoRouter.of(context);

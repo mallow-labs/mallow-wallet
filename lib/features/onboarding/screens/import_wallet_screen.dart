@@ -240,8 +240,14 @@ class _ImportWalletScreenState extends State<ImportWalletScreen> {
       if (widget.accountId != null || widget.isAddingAccount) {
         // Navigate to HD picker — seed phrase is created only on import.
         // Pass a placeholder accountId in the path; mnemonic goes via extra.
+        // Push (not go) so the picker's back button returns here.
         if (mounted) {
-          context.go(AppRoutes.importFromPhrasePath('new'), extra: mnemonic);
+          unawaited(
+            context.push(
+              AppRoutes.importFromPhrasePath('new'),
+              extra: mnemonic,
+            ),
+          );
         }
       } else {
         // Onboarding path: create seed phrase, continue to PIN/biometric setup

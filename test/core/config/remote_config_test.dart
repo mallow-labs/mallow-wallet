@@ -30,9 +30,9 @@ void main() {
       expect(AppFlow.values, hasLength(contract.length));
     });
 
-    test('only native-send, token-send and nft-transfer are multi-chain', () {
+    test('multi-chain flow matrix includes Ethereum OpenSea purchases', () {
       // The (chain, flow) support matrix, as an assertion. Every other cell is
-      // Solana-only *by construction* — if one of them ever gains a chain,
+      // Solana-only — if one of them ever gains a chain,
       // the UI permission gate and this set have to move together.
       final multiChain = {
         for (final f in AppFlow.values)
@@ -43,6 +43,10 @@ void main() {
         'native-send': {Chain.solana, Chain.ethereum, Chain.tezos},
         'token-send': {Chain.solana, Chain.ethereum, Chain.tezos},
         'nft-transfer': {Chain.solana, Chain.ethereum},
+        'fixed-price-buy': {Chain.solana, Chain.ethereum},
+        // The browser serves independent Solana, Ethereum and Tezos providers.
+        'browser-transaction': {Chain.solana, Chain.ethereum, Chain.tezos},
+        'browser-message': {Chain.solana, Chain.ethereum, Chain.tezos},
       });
       expect(
         AppFlow.values.where((f) => f.chains.length == 1),
@@ -69,6 +73,7 @@ void main() {
       const config = RemoteConfig.permissive;
 
       expect(config.disabledMessages, isEmpty);
+      expect(config.browserEnabled, isTrue);
       expect(config.updateRequired, isFalse);
       expect(config.disabledMessage(Chain.solana, AppFlow.nativeSend), isNull);
       expect(config.isFlowAvailable(Chain.solana, AppFlow.nativeSend), isTrue);
@@ -76,6 +81,30 @@ void main() {
   });
 
   group('RemoteConfig.fromWire', () {
+    test('browser availability is independent from signing flow switches', () {
+      final config = RemoteConfig.fromWire(
+        api.MobileConfigResponse.fromJson({
+          'minimumVersion': null,
+          'updateRequired': false,
+          'updateMessage': null,
+          'disabledFlows': [
+            {'chain': 'solana', 'flow': 'browser-message', 'message': 'Paused'},
+          ],
+          'browserEnabled': false,
+        }),
+      );
+      expect(config.browserEnabled, isFalse);
+      expect(
+        config.disabledMessage(Chain.solana, AppFlow.browserMessage),
+        'Paused',
+      );
+      expect(
+        config.isFlowAvailable(Chain.solana, AppFlow.browserTransaction),
+        isTrue,
+      );
+      expect(RemoteConfig.fromWire(_wire([])).browserEnabled, isTrue);
+    });
+
     test('folds disabledFlows into a chain-scoped map', () {
       final config = RemoteConfig.fromWire(
         _wire([

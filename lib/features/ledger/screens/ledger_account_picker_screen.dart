@@ -41,6 +41,9 @@ class _LedgerAccountPickerViewState extends State<LedgerAccountPickerView> {
   /// Cache the global-counter base alongside the cards, for the live preview.
   int _baseCounter = 1;
 
+  /// Cache the names typed in the picker, for the same preview.
+  Map<int, String> _customNames = const {};
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -65,16 +68,18 @@ class _LedgerAccountPickerViewState extends State<LedgerAccountPickerView> {
 
               // Update cached data when cards arrive.
               state.maybeWhen(
-                accountsLoaded: (device, accounts, includeLegacy, _, _, base) {
-                  _lastAccounts = accounts;
-                  _baseCounter = base;
-                },
+                accountsLoaded:
+                    (device, accounts, includeLegacy, _, _, base, names) {
+                      _lastAccounts = accounts;
+                      _baseCounter = base;
+                      _customNames = names;
+                    },
                 orElse: () {},
               );
 
               final accounts = _lastAccounts;
               final selectedKeys = state.maybeWhen(
-                accountsLoaded: (_, _, _, sel, _, _) => sel,
+                accountsLoaded: (_, _, _, sel, _, _, _) => sel,
                 orElse: () => const <String>{},
               );
 
@@ -143,6 +148,7 @@ class _LedgerAccountPickerViewState extends State<LedgerAccountPickerView> {
       accounts: accounts,
       selectedKeys: selectedKeys,
       baseCounter: _baseCounter,
+      customNames: _customNames,
     );
     // While re-deriving with cards already on screen, append one skeleton card
     // to signal the next batch is loading; "Show more" sits at the very bottom.
@@ -172,6 +178,9 @@ class _LedgerAccountPickerViewState extends State<LedgerAccountPickerView> {
           ),
           onToggleAccount: (i) => context.read<LedgerConnectBloc>().add(
             LedgerConnectEvent.toggleAccount(i),
+          ),
+          onRename: (name) => context.read<LedgerConnectBloc>().add(
+            LedgerConnectEvent.renameAccount(accounts[index].index, name),
           ),
         );
       },

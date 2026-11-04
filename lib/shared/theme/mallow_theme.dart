@@ -1,5 +1,6 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import 'mallow_colors.dart';
@@ -32,7 +33,7 @@ class MallowTheme {
   static const background = Color(0xFFFAF9F7);
   static const surface = Colors.white;
   static const textPrimary = Color(0xFF121212);
-  static const textSecondary = Color(0xFF9A9A9A);
+  static const textSecondary = Color(0xFF6F6B66);
   static const divider = Color(0xFFDAD6D0);
   static const inactive = Color(0xFF9E9E9E);
   static const surfaceMuted = Color(0xFFF1EFEB);
@@ -105,6 +106,27 @@ class MallowTheme {
       offset: const Offset(0, 4),
     ),
   ];
+
+  // ==========================================================================
+  // SYSTEM BARS
+  // ==========================================================================
+
+  /// The status and navigation bars over a background of [background]
+  /// brightness: transparent, as the app draws edge to edge, with icons that
+  /// contrast with it.
+  static SystemUiOverlayStyle systemBarsOver(Brightness background) {
+    final icons = background == Brightness.dark
+        ? Brightness.light
+        : Brightness.dark;
+    return SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      systemNavigationBarColor: Colors.transparent,
+      // iOS takes the background's brightness, Android the icons'.
+      statusBarBrightness: background,
+      statusBarIconBrightness: icons,
+      systemNavigationBarIconBrightness: icons,
+    );
+  }
 
   // ==========================================================================
   // ANIMATION

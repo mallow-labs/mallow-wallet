@@ -206,4 +206,5 @@ dependencies {
     // between them. The AAR contributes its own <queries> block and the
     // ACCESS_SEED_VAULT uses-permission through manifest merging.
     implementation("com.solanamobile:seedvault-wallet-sdk:0.4.0")
+    testImplementation("junit:junit:4.13.2")
 }

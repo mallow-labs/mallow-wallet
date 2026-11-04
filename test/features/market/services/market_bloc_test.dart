@@ -4,6 +4,7 @@ import 'package:bloc_test/bloc_test.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_api/mallow_api.dart';
+import 'package:mallow_wallet/core/utils/price_formatter.dart';
 import 'package:mallow_wallet/core/config/remote_config.dart';
 import 'package:mallow_wallet/core/crypto/wallet_manager.dart';
 import 'package:mallow_wallet/core/data/mallow_tokens.dart';
@@ -34,6 +35,7 @@ import 'package:solana/encoder.dart';
 import 'package:solana/solana.dart';
 
 import 'market_bloc_test.mocks.dart';
+import '../refund_transaction_fixture.dart';
 
 /// The chain authoritatively has no such account (`Listing` / `AuctionConfig`)
 /// — the default for the accept-offer eligibility gate.
@@ -306,6 +308,61 @@ void main() {
             verify(mockApiV2.buyFixedPriceTx(any)).called(1);
           },
         );
+
+        for (final quote in [null, '0', '781760', '4454400']) {
+          blocTest<MarketBloc, MarketState>(
+            'native buy keeps the listing price when legacy creator rent quote is $quote',
+            setUp: () => when(mockApiV2.buyFixedPriceTx(any)).thenAnswer(
+              (_) async => ApiResponse<BuyFixedPriceTxResponse>(
+                result: BuyFixedPriceTxResponse.fromJson({
+                  'tx': testTransactionBase64,
+                  if (quote != null) 'creatorRentTopUpLamports': quote,
+                }),
+              ),
+            ),
+            build: () => MarketBloc(
+              mockApi,
+              mockApiV2,
+              mockWalletManager,
+              mockRpcService,
+              mockAuthService,
+              mockDasApi,
+              makeFlow(),
+              mockPriceService,
+              const FeeConfig(),
+              mockMarketplaceConfig,
+              mockMarketAccounts,
+              mockCurationAttribution,
+            ),
+            act: (bloc) => bloc.add(
+              const MarketEvent.buy(
+                mintAccount: testMintAccount,
+                supplyType: SupplyType.oneOfOne,
+                pricePerUnit: MarketPrice(rawAmount: 10000000),
+              ),
+            ),
+            expect: () => [
+              isA<TxFlowPreparing<MarketPrepData, MarketSuccessData>>(),
+              isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+                  .having(
+                    (s) => s.data.totalCost.rawAmount,
+                    'buyer price',
+                    10000000,
+                  )
+                  .having(
+                    (s) => s.data.mallowFeeLamports,
+                    'extra print fee',
+                    isNull,
+                  ),
+            ],
+            verify: (_) {
+              final request =
+                  verify(mockApiV2.buyFixedPriceTx(captureAny)).captured.single
+                      as BuyFixedPriceTxRequest;
+              expect(request.maxPrice, 10000000);
+            },
+          );
+        }
 
         // A compressed NFT's buy is compiled against an address lookup table
         // the chain may not have yet; `setupTx` creates it. The executor
@@ -1911,6 +1968,7 @@ void main() {
       }) => DigitalAsset(
         id: testMintAccount,
         tokenStandard: standard,
+        compressionFlags: 0,
         isMutable: true,
         frozen: false,
         supply: supply,
@@ -2074,54 +2132,58 @@ void main() {
       // nothing extra on the wire: the leaf, its Merkle proof and (V2) its
       // collection are resolved server-side from the same
       // `{authority, asset, tokenStandard}` body every other standard sends.
-      blocTest<MarketBloc, MarketState>(
-        'builds a cNFT burn instead of refusing it — the allowlist must not '
-        'veto a standard canBurnAsset and the v2 route both accept',
-        setUp: () {
-          when(
-            mockDasApi.getAsset(testMintAccount),
-          ).thenAnswer((_) async => dasFor(standard: TokenStandard.cnft));
-        },
-        build: () => MarketBloc(
-          mockApi,
-          mockApiV2,
-          mockWalletManager,
-          mockRpcService,
-          mockAuthService,
-          mockDasApi,
-          makeFlow(),
-          mockPriceService,
-          const FeeConfig(),
-          mockMarketplaceConfig,
-          mockMarketAccounts,
-          mockCurationAttribution,
-        ),
-        act: (bloc) =>
-            bloc.add(const MarketEvent.burn(mintAccount: testMintAccount)),
-        expect: () => [
-          const TxFlowPreparing<MarketPrepData, MarketSuccessData>(),
-          isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
-              .having((s) => s.data.actionType, 'actionType', 'burn')
-              .having((s) => s.data.mintAccount, 'mintAccount', testMintAccount)
-              .having((s) => s.data.transactionsBase64, 'transactions', [
-                testTransactionBase64,
-              ]),
-        ],
-        verify: (_) {
-          final req =
-              verify(mockApiV2.getBurnTx(captureAny)).captured.single
-                  as BurnTxRequest;
-          expect(req.authority, testWalletAddress);
-          expect(req.asset, testMintAccount);
-          // One wire value for both tree versions — the handler reads V1 vs V2
-          // off the merkle tree's owning program, so the wallet must never
-          // send `cnft-v2` (which the burn route rejects).
-          expect(req.tokenStandard.value, 'cnft');
-          // Leaf / proof / collection are the server's job; a cNFT burn pays
-          // for no extra client-side lookup.
-          verifyNever(mockApi.getArtworkByMint(any));
-        },
-      );
+      for (final standard in [TokenStandard.cnft, TokenStandard.cnftV2]) {
+        blocTest<MarketBloc, MarketState>(
+          'builds a ${standard.name} burn instead of refusing it — the allowlist must not '
+          'veto a standard canBurnAsset and the v2 route both accept',
+          setUp: () {
+            when(
+              mockDasApi.getAsset(testMintAccount),
+            ).thenAnswer((_) async => dasFor(standard: standard));
+          },
+          build: () => MarketBloc(
+            mockApi,
+            mockApiV2,
+            mockWalletManager,
+            mockRpcService,
+            mockAuthService,
+            mockDasApi,
+            makeFlow(),
+            mockPriceService,
+            const FeeConfig(),
+            mockMarketplaceConfig,
+            mockMarketAccounts,
+            mockCurationAttribution,
+          ),
+          act: (bloc) =>
+              bloc.add(const MarketEvent.burn(mintAccount: testMintAccount)),
+          expect: () => [
+            const TxFlowPreparing<MarketPrepData, MarketSuccessData>(),
+            isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+                .having((s) => s.data.actionType, 'actionType', 'burn')
+                .having(
+                  (s) => s.data.mintAccount,
+                  'mintAccount',
+                  testMintAccount,
+                )
+                .having((s) => s.data.transactionsBase64, 'transactions', [
+                  testTransactionBase64,
+                ]),
+          ],
+          verify: (_) {
+            final req =
+                verify(mockApiV2.getBurnTx(captureAny)).captured.single
+                    as BurnTxRequest;
+            expect(req.authority, testWalletAddress);
+            expect(req.asset, testMintAccount);
+            // V1 leaves keep their original wire value; v2 uses cnft-v2.
+            expect(req.tokenStandard.value, standard.wireValue);
+            // Leaf / proof / collection are the server's job; a cNFT burn pays
+            // for no extra client-side lookup.
+            verifyNever(mockApi.getArtworkByMint(any));
+          },
+        );
+      }
 
       blocTest<MarketBloc, MarketState>(
         'still refuses a standard the burn route cannot build (objkt) '
@@ -2367,6 +2429,195 @@ void main() {
         mockMarketAccounts,
         mockCurationAttribution,
       );
+
+      group('Bubblegum v2 listed offer acceptance', () {
+        const escrow = 'PdA11111111111111111111111111111111111111111';
+        for (final scenario in [
+          (sellerMatches: true, ownerMatches: true),
+          (sellerMatches: false, ownerMatches: true),
+          (sellerMatches: true, ownerMatches: false),
+        ]) {
+          blocTest<MarketBloc, MarketState>(
+            'v2 escrow verification $scenario',
+            setUp: () {
+              when(mockDasApi.getAsset(testMintAccount)).thenAnswer(
+                (_) async => DigitalAsset.fromJson({
+                  'id': testMintAccount,
+                  'interface': 'MplBubblegumV2',
+                  'compression': {'compressed': true, 'flags': 0},
+                  'ownership': {
+                    'owner': scenario.ownerMatches ? escrow : buyer,
+                  },
+                }),
+              );
+              when(mockMarketAccounts.readListing(testMintAccount)).thenAnswer(
+                (_) async => presentRead({
+                  'pubkey': escrow,
+                  'accountType': 'listing',
+                  'seller': scenario.sellerMatches ? testWalletAddress : buyer,
+                }),
+              );
+              when(mockApiV2.acceptOfferTx(any)).thenAnswer(
+                (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+                  result: UnsignedTxWithSetupResponse(
+                    tx: testTransactionBase64,
+                  ),
+                ),
+              );
+            },
+            build: buildBloc,
+            act: (bloc) => bloc.add(
+              const MarketEvent.acceptOffer(
+                mintAccount: testMintAccount,
+                buyer: buyer,
+                amount: acceptAmount,
+              ),
+            ),
+            expect: () => [
+              const TxFlowPreparing<MarketPrepData, MarketSuccessData>(),
+              isA<TxFlowFailure<MarketPrepData, MarketSuccessData>>().having(
+                (s) => s.failure.message,
+                'reason',
+                contains('Cancel the listing'),
+              ),
+            ],
+            verify: (_) {
+              verifyNever(mockApiV2.acceptOfferTx(any));
+            },
+          );
+        }
+      });
+
+      for (final iface in ['MplBubblegumV1', 'MplBubblegumV2']) {
+        blocTest<MarketBloc, MarketState>(
+          'compressed listing read failure $iface prompts retry before acceptance',
+          setUp: () {
+            when(mockDasApi.getAsset(testMintAccount)).thenAnswer(
+              (_) async => DigitalAsset.fromJson({
+                'id': testMintAccount,
+                'interface': iface,
+                'compression': {'compressed': true, 'flags': 0},
+                'ownership': {'owner': 'listingPda'},
+              }),
+            );
+            when(mockMarketAccounts.readListing(testMintAccount)).thenAnswer(
+              (_) async => (
+                status: OnChainReadStatus.unknown,
+                account: null,
+                pda: 'listingPda',
+                viewSlot: null,
+              ),
+            );
+          },
+          build: buildBloc,
+          act: (bloc) => bloc.add(
+            const MarketEvent.acceptOffer(
+              mintAccount: testMintAccount,
+              buyer: buyer,
+              amount: acceptAmount,
+            ),
+          ),
+          expect: () => [
+            const TxFlowPreparing<MarketPrepData, MarketSuccessData>(),
+            isA<TxFlowFailure<MarketPrepData, MarketSuccessData>>().having(
+              (s) => s.failure.message,
+              'reason',
+              contains('Try again'),
+            ),
+          ],
+          verify: (_) => verifyNever(mockApiV2.acceptOfferTx(any)),
+        );
+      }
+
+      group('Bubblegum v2 accept eligibility', () {
+        const parentMint = 'coreCollection';
+        DigitalAsset v2({int flags = 0}) => DigitalAsset.fromJson({
+          'id': testMintAccount,
+          'interface': 'MplBubblegumV2',
+          'compression': {'compressed': true, 'flags': flags},
+          'ownership': {'owner': testWalletAddress},
+          'grouping': [
+            {'group_key': 'collection', 'group_value': parentMint},
+          ],
+        });
+        for (final restriction in [
+          'eligible',
+          'flags',
+          'permanent_freeze_delegate',
+          'permanent_transfer_delegate',
+          'permanent_burn_delegate',
+          'collectionUnavailable',
+          'collectionUnavailableAsync',
+        ]) {
+          final eligible = restriction == 'eligible';
+          blocTest<MarketBloc, MarketState>(
+            'v2 accept $restriction is gated before the builder',
+            setUp: () {
+              when(mockDasApi.getAsset(testMintAccount)).thenAnswer(
+                (_) async => v2(flags: restriction == 'flags' ? 4 : 0),
+              );
+              if (restriction == 'collectionUnavailableAsync') {
+                when(
+                  mockDasApi.getAsset(parentMint),
+                ).thenAnswer((_) async => throw Exception('unavailable'));
+              } else if (restriction == 'collectionUnavailable') {
+                when(
+                  mockDasApi.getAsset(parentMint),
+                ).thenThrow(Exception('unavailable'));
+              } else {
+                when(mockDasApi.getAsset(parentMint)).thenAnswer(
+                  (_) async => DigitalAsset.fromJson({
+                    'id': parentMint,
+                    'interface': 'MplCoreCollection',
+                    'plugins': {
+                      if (restriction.startsWith('permanent'))
+                        restriction: {
+                          'data': {'frozen': false},
+                        },
+                    },
+                  }),
+                );
+              }
+              when(mockApiV2.acceptOfferTx(any)).thenAnswer(
+                (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+                  result: UnsignedTxWithSetupResponse(
+                    tx: testTransactionBase64,
+                  ),
+                ),
+              );
+            },
+            build: buildBloc,
+            act: (bloc) => bloc.add(
+              const MarketEvent.acceptOffer(
+                mintAccount: testMintAccount,
+                buyer: buyer,
+                amount: acceptAmount,
+              ),
+            ),
+            expect: () => [
+              const TxFlowPreparing<MarketPrepData, MarketSuccessData>(),
+              if (eligible)
+                isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+              else
+                isA<TxFlowFailure<MarketPrepData, MarketSuccessData>>().having(
+                  (s) => s.failure.message,
+                  'reason',
+                  restriction.startsWith('collectionUnavailable')
+                      ? contains('try again')
+                      : contains('transfer restrictions'),
+                ),
+            ],
+            verify: (_) {
+              verify(mockDasApi.getAsset(parentMint)).called(1);
+              if (eligible) {
+                verify(mockApiV2.acceptOfferTx(any)).called(1);
+              } else {
+                verifyNever(mockApiV2.acceptOfferTx(any));
+              }
+            },
+          );
+        }
+      });
 
       // Accepting an offer is irreversible and costs a signature, and both
       // hosts (artwork sheet + offers inbox) dispatch behind nothing but the
@@ -2814,7 +3065,7 @@ void main() {
         },
       );
 
-      // R1 (critical race): from the instant a toggle is dispatched the flow is
+      // Critical race: from the instant a toggle is dispatched the flow is
       // locked (TxFlowPreparing emitted synchronously, before any await), so a
       // Confirm tap racing the toggle fails the `_onConfirmAndSign` ready guard
       // and can NOT sign/broadcast the pre-toggle tx — the money can't route
@@ -2901,7 +3152,7 @@ void main() {
         },
       );
 
-      // R3: a toggle re-prepare produces a fresh, unsimulated tx and no UI
+      // A toggle re-prepare produces a fresh, unsimulated tx and no UI
       // dispatcher re-fires simulate on a re-prepare — so the bloc drives the
       // simulation itself, resolving the "You'll receive" breakdown after a
       // toggle instead of shimmering forever.
@@ -2979,7 +3230,7 @@ void main() {
         },
       );
 
-      // R5: a display toggle must never lose an already-signable accept. When
+      // A display toggle must never lose an already-signable accept. When
       // the re-prepare build fails transiently the bloc reverts to the previous
       // ready (previous split + checkbox value) instead of emitting
       // TxFlowFailure — which the sheet's pre-confirm listener would treat as a
@@ -3063,8 +3314,8 @@ void main() {
       // the amounts stayed null and the sheet shimmered indefinitely while
       // still offering Confirm. The webapp never simulates at all: it computes
       // the split arithmetically (`getProceedsSplits`). These pin that mobile
-      // falls back to that same arithmetic, so the seller always sees what the
-      // sale pays them.
+      // falls back to that same arithmetic when simulation cannot resolve the
+      // payout; native creator rent is disclosed separately below.
       //
       // Fixture: a primary sale (`primarySaleHappened: false`) with no creator
       // shares, so `getProceedsSplits` reduces to the 5% primary marketplace
@@ -3134,6 +3385,8 @@ void main() {
             expect(proceeds.marketFeeRaw, 50000000);
             expect(proceeds.sellerEarningsRaw, 950000000);
             expect(proceeds.royaltiesToOthersRaw, 0);
+            expect(proceeds.isEstimate, isFalse);
+            expect(proceeds.creatorRentMayApply, isFalse);
             expect(state.data.isSimulating, isFalse);
           },
         );
@@ -3310,9 +3563,254 @@ void main() {
         );
       });
 
-      // The one exception to R5's revert: a remote kill. Reverting would drop it
-      // silently — no state change for the host to present from — and hand back
-      // a Confirm the signing backstop will refuse anyway. The kill must reach
+      group('seller-funded creator rent disclosure', () {
+        for (final action in ['accept-offer', 'settle-auction']) {
+          for (final royaltyCase in [
+            'sole seller',
+            'zero royalty',
+            'zero share',
+          ]) {
+            blocTest<MarketBloc, MarketState>(
+              '$action protocol fee does not imply other creator rent ($royaltyCase)',
+              setUp: () {
+                final asset = DigitalAsset(
+                  id: testMintAccount,
+                  tokenStandard: TokenStandard.cnftV2,
+                  isMutable: true,
+                  frozen: false,
+                  supply: 0,
+                  freezeDelegateFrozen: false,
+                  permanentFreezeDelegateFrozen: false,
+                  hasMasterEditionPlugin: false,
+                  owner: testWalletAddress,
+                  compressionFlags: 0,
+                  primarySaleHappened: true,
+                  sellerFeeBasisPoints: royaltyCase == 'zero royalty'
+                      ? 0
+                      : 1000,
+                  tokenMetadataCreators: [
+                    OnChainCreator(
+                      address: royaltyCase == 'zero royalty'
+                          ? 'OTHER_CREATOR'
+                          : testWalletAddress,
+                      share: 100,
+                      verified: true,
+                    ),
+                    if (royaltyCase == 'zero share')
+                      const OnChainCreator(
+                        address: 'OTHER_CREATOR',
+                        share: 0,
+                        verified: true,
+                      ),
+                  ],
+                );
+                when(
+                  mockDasApi.getAsset(testMintAccount),
+                ).thenAnswer((_) async => asset);
+                when(mockApiV2.acceptOfferTx(any)).thenAnswer(
+                  (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+                    result: UnsignedTxWithSetupResponse(
+                      tx: testTransactionBase64,
+                    ),
+                  ),
+                );
+                when(mockApiV2.settleAuctionTx(any)).thenAnswer(
+                  (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+                    result: UnsignedTxWithSetupResponse(
+                      tx: testTransactionBase64,
+                    ),
+                  ),
+                );
+                when(
+                  mockRpcService.getBalanceForAddress(any),
+                ).thenAnswer((_) async => 0);
+                when(
+                  mockRpcService.simulateEncodedTransaction(
+                    any,
+                    inspectAccounts: anyNamed('inspectAccounts'),
+                  ),
+                ).thenAnswer(
+                  (_) async => const SimulationResult(
+                    success: true,
+                    inspectedAccountLamports: {
+                      testWalletAddress: 9_739_000,
+                      kMallowFeeAddress: 250_000,
+                    },
+                  ),
+                );
+              },
+              build: buildBloc,
+              act: (bloc) async {
+                final ready = bloc.stream.firstWhere(
+                  (s) => s is TxFlowReady<MarketPrepData, MarketSuccessData>,
+                );
+                const amount = MarketPrice(rawAmount: 10_000_000);
+                bloc.add(
+                  action == 'accept-offer'
+                      ? const MarketEvent.acceptOffer(
+                          mintAccount: testMintAccount,
+                          buyer: buyer,
+                          amount: amount,
+                        )
+                      : const MarketEvent.settleAuction(
+                          mintAccount: testMintAccount,
+                          winningBid: amount,
+                        ),
+                );
+                await ready;
+                final resolved = bloc.stream.firstWhere(
+                  (s) =>
+                      s is TxFlowReady<MarketPrepData, MarketSuccessData> &&
+                      !s.data.isSimulating &&
+                      s.data.settleProceeds?.isResolved == true,
+                );
+                bloc.add(const MarketEvent.simulate());
+                await resolved;
+              },
+              verify: (bloc) {
+                final state =
+                    bloc.state
+                        as TxFlowReady<MarketPrepData, MarketSuccessData>;
+                expect(
+                  state.data.settleProceedsFallback!.royaltiesToOthersRaw,
+                  0,
+                );
+                final proceeds = state.data.settleProceeds!;
+                expect(proceeds.sellerEarningsRaw, 9_744_000);
+                expect(proceeds.marketFeeRaw, 250_000);
+                // Synthetic 6,000-lamport protocol cost, separate from the 5,000 tx fee.
+                expect(proceeds.royaltiesToOthersRaw, 6_000);
+                expect(proceeds.isEstimate, isFalse);
+                expect(proceeds.creatorRentMayApply, isFalse);
+                verify(mockDasApi.getAsset(testMintAccount)).called(1);
+              },
+            );
+          }
+        }
+
+        const royaltyAsset = DigitalAsset(
+          id: testMintAccount,
+          tokenStandard: TokenStandard.nft,
+          isMutable: true,
+          frozen: false,
+          supply: 0,
+          freezeDelegateFrozen: false,
+          permanentFreezeDelegateFrozen: false,
+          hasMasterEditionPlugin: false,
+          owner: testWalletAddress,
+          primarySaleHappened: true,
+          sellerFeeBasisPoints: 1000,
+          tokenMetadataCreators: [
+            OnChainCreator(address: 'CREATOR_A', share: 50, verified: true),
+            OnChainCreator(address: 'CREATOR_B', share: 50, verified: true),
+          ],
+        );
+
+        for (final mint in <String?>[null, solMint, usdcMint]) {
+          for (final simulateSuccess in [false, true]) {
+            blocTest<MarketBloc, MarketState>(
+              'qualifies only native fallback and clears the estimate after '
+              'a measured payout ($mint, success=$simulateSuccess)',
+              setUp: () {
+                when(
+                  mockDasApi.getAsset(testMintAccount),
+                ).thenAnswer((_) async => royaltyAsset);
+                when(mockApiV2.acceptOfferTx(any)).thenAnswer(
+                  (_) async => ApiResponse<UnsignedTxWithSetupResponse>(
+                    result: UnsignedTxWithSetupResponse(
+                      tx: testTransactionBase64,
+                    ),
+                  ),
+                );
+                when(
+                  mockRpcService.resolveAssociatedTokenAccount(
+                    owner: anyNamed('owner'),
+                    mint: anyNamed('mint'),
+                  ),
+                ).thenAnswer(
+                  (call) async => call.namedArguments[#owner] as String,
+                );
+                when(
+                  mockRpcService.getBalanceForAddress(any),
+                ).thenAnswer((_) async => 0);
+                when(
+                  mockRpcService.getTokenAccountAmount(any),
+                ).thenAnswer((_) async => 0);
+                when(
+                  mockRpcService.simulateEncodedTransaction(
+                    any,
+                    inspectAccounts: anyNamed('inspectAccounts'),
+                  ),
+                ).thenAnswer(
+                  (_) async => SimulationResult(
+                    success: simulateSuccess,
+                    inspectedAccountLamports: const {
+                      testWalletAddress: 7_963_240,
+                      kMallowFeeAddress: 250_000,
+                    },
+                    inspectedAccountTokenAmounts: const {
+                      testWalletAddress: 8_750_000,
+                      kMallowFeeAddress: 250_000,
+                    },
+                  ),
+                );
+              },
+              build: buildBloc,
+              act: (bloc) async {
+                final ready = bloc.stream.firstWhere(
+                  (s) => s is TxFlowReady<MarketPrepData, MarketSuccessData>,
+                );
+                bloc.add(
+                  MarketEvent.acceptOffer(
+                    mintAccount: testMintAccount,
+                    buyer: buyer,
+                    amount: MarketPrice(
+                      rawAmount: 10_000_000,
+                      currencyMint: mint,
+                    ),
+                  ),
+                );
+                await ready;
+                final resolved = bloc.stream.firstWhere(
+                  (s) =>
+                      s is TxFlowReady<MarketPrepData, MarketSuccessData> &&
+                      !s.data.isSimulating &&
+                      s.data.settleProceeds?.isResolved == true,
+                );
+                bloc.add(const MarketEvent.simulate());
+                await resolved;
+              },
+              verify: (bloc) {
+                final state =
+                    bloc.state
+                        as TxFlowReady<MarketPrepData, MarketSuccessData>;
+                final native = mint == null || mint == solMint;
+                final fallback = state.data.settleProceedsFallback!;
+                final proceeds = state.data.settleProceeds!;
+                expect(fallback.sellerEarningsRaw, 8_750_000);
+                expect(fallback.royaltiesToOthersRaw, 1_000_000);
+                expect(fallback.isEstimate, native);
+                expect(proceeds.isEstimate, native && !simulateSuccess);
+                expect(proceeds.creatorRentMayApply, native);
+                expect(proceeds.marketFeeRaw, 250_000);
+                expect(
+                  proceeds.sellerEarningsRaw,
+                  native && simulateSuccess ? 7_968_240 : 8_750_000,
+                );
+                expect(
+                  proceeds.royaltiesToOthersRaw,
+                  native && simulateSuccess ? 1_781_760 : 1_000_000,
+                );
+                verify(mockDasApi.getAsset(testMintAccount)).called(1);
+              },
+            );
+          }
+        }
+      });
+
+      // The one exception to that revert: a remote kill. Reverting would drop
+      // it silently — no state change for the host to present from — and hand
+      // back a Confirm the signing backstop will refuse anyway. The kill must reach
       // the host as a failure so the operator's copy gets shown.
       blocTest<MarketBloc, MarketState>(
         'a toggle re-prepare killed by the switch emits TxFlowFailure instead '
@@ -4817,6 +5315,969 @@ void main() {
     // `edition_buy_routing_test.dart`, with the bloc-level branch assertions
     // in the "Edition artwork" group above.
   });
+  void observeRefundArtworkSignals() {
+    final signal = ArtworkEditedSignal();
+    sl.registerSingleton<ArtworkEditedSignal>(signal);
+    editedMints = [];
+    final subscription = signal.stream.listen(editedMints.add);
+    addTearDown(() async {
+      await subscription.cancel();
+      await sl.unregister<ArtworkEditedSignal>();
+      signal.dispose();
+    });
+  }
+
+  blocTest<MarketBloc, MarketState>(
+    'release SOL refund builds for the active payer and the original bidder',
+    setUp: () => when(mockApiV2.pushSolBidRefundTx(any)).thenAnswer(
+      (_) async => ApiResponse<UnsignedTxResponse>(
+        result: UnsignedTxResponse(tx: testTransactionBase64),
+      ),
+    ),
+    build: () => MarketBloc(
+      mockApi,
+      mockApiV2,
+      mockWalletManager,
+      mockRpcService,
+      mockAuthService,
+      mockDasApi,
+      makeFlow(),
+      mockPriceService,
+      const FeeConfig(),
+      mockMarketplaceConfig,
+      mockMarketAccounts,
+      mockCurationAttribution,
+    ),
+    act: (bloc) => bloc.add(
+      const MarketEvent.releaseSolBidRefund(
+        bidder: 'ORIGINAL_BIDDER',
+        amount: MarketPrice(rawAmount: 2000000000),
+      ),
+    ),
+    expect: () => [
+      isA<TxFlowPreparing<MarketPrepData, MarketSuccessData>>(),
+      isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+          .having((s) => s.data.actionType, 'action', 'release-sol-bid-refund')
+          .having((s) => s.data.flow, 'flow', AppFlow.auctionRefundWithdraw)
+          .having((s) => s.data.mintAccount, 'recipient', 'ORIGINAL_BIDDER')
+          .having(
+            (s) => s.data.totalCost.rawAmount,
+            'recorded refund',
+            2000000000,
+          ),
+    ],
+    verify: (_) {
+      final request =
+          verify(mockApiV2.pushSolBidRefundTx(captureAny)).captured.single
+              as PushSolBidRefundTxRequest;
+      expect(request.payer, testWalletAddress);
+      expect(request.bidder, 'ORIGINAL_BIDDER');
+      expect(
+        request.targetPriorityFeeLamports,
+        const FeeConfig().priorityFeeLamports,
+      );
+      verifyNever(mockApiV2.withdrawBidRefundTx(any));
+      verifyNever(mockApiV2.closeBidRefundClaimTx(any));
+    },
+  );
+
+  for (final destination in [null, 'ALTERNATIVE']) {
+    blocTest<MarketBloc, MarketState>(
+      'release token refund builds for the active payer, original bidder and destination $destination',
+      setUp: () => when(mockApiV2.pushBidRefundTx(any)).thenAnswer(
+        (_) async => ApiResponse<UnsignedTxResponse>(
+          result: UnsignedTxResponse(tx: testTransactionBase64),
+        ),
+      ),
+      build: () => MarketBloc(
+        mockApi,
+        mockApiV2,
+        mockWalletManager,
+        mockRpcService,
+        mockAuthService,
+        mockDasApi,
+        makeFlow(),
+        mockPriceService,
+        const FeeConfig(),
+        mockMarketplaceConfig,
+        mockMarketAccounts,
+        mockCurationAttribution,
+      ),
+      act: (bloc) => bloc.add(
+        MarketEvent.releaseBidRefund(
+          bidder: 'ORIGINAL_BIDDER',
+          destination: destination,
+          amount: const MarketPrice(
+            rawAmount: 2000000000,
+            currencyMint: usdcMint,
+          ),
+        ),
+      ),
+      expect: () => [
+        isA<TxFlowPreparing<MarketPrepData, MarketSuccessData>>(),
+        isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+            .having((s) => s.data.actionType, 'action', 'release-bid-refund')
+            .having((s) => s.data.flow, 'flow', AppFlow.auctionRefundWithdraw)
+            .having((s) => s.data.mintAccount, 'recipient', 'ORIGINAL_BIDDER')
+            .having(
+              (s) => s.data.totalCost.rawAmount,
+              'recorded refund',
+              2000000000,
+            ),
+      ],
+      verify: (_) {
+        final request =
+            verify(mockApiV2.pushBidRefundTx(captureAny)).captured.single
+                as PushBidRefundTxRequest;
+        expect(request.payer, testWalletAddress);
+        expect(request.bidder, 'ORIGINAL_BIDDER');
+        expect(request.mint, usdcMint);
+        expect(request.destination, destination);
+        verifyNever(mockApiV2.pushSolBidRefundTx(any));
+        expect(
+          request.targetPriorityFeeLamports,
+          const FeeConfig().priorityFeeLamports,
+        );
+        verifyNever(mockApiV2.withdrawBidRefundTx(any));
+        verifyNever(mockApiV2.closeBidRefundClaimTx(any));
+      },
+    );
+  }
+
+  blocTest<MarketBloc, MarketState>(
+    'release SOL refund surfaces an already-released claim and never signs or closes',
+    setUp: () => when(mockApiV2.pushSolBidRefundTx(any)).thenThrow(
+      DioException(
+        requestOptions: RequestOptions(
+          path: '/tx/auctions/push-sol-bid-refund',
+        ),
+        type: DioExceptionType.badResponse,
+        response: Response(
+          requestOptions: RequestOptions(
+            path: '/tx/auctions/push-sol-bid-refund',
+          ),
+          statusCode: 400,
+          data: {
+            'error': {'message': 'No bid refund available'},
+          },
+        ),
+      ),
+    ),
+    build: () => MarketBloc(
+      mockApi,
+      mockApiV2,
+      mockWalletManager,
+      mockRpcService,
+      mockAuthService,
+      mockDasApi,
+      makeFlow(),
+      mockPriceService,
+      const FeeConfig(),
+      mockMarketplaceConfig,
+      mockMarketAccounts,
+      mockCurationAttribution,
+    ),
+    act: (bloc) => bloc.add(
+      const MarketEvent.releaseSolBidRefund(
+        bidder: 'ORIGINAL_BIDDER',
+        amount: MarketPrice(rawAmount: 42),
+      ),
+    ),
+    expect: () => [
+      isA<TxFlowPreparing<MarketPrepData, MarketSuccessData>>(),
+      isA<TxFlowFailure<MarketPrepData, MarketSuccessData>>().having(
+        (s) => s.failure.message,
+        'explanatory error',
+        contains('No bid refund available'),
+      ),
+    ],
+    verify: (_) {
+      verifyNever(
+        mockWalletManager.signCompiledTx(
+          unsignedTx: anyNamed('unsignedTx'),
+          additionalSigners: anyNamed('additionalSigners'),
+        ),
+      );
+      verifyNever(mockApiV2.closeBidRefundClaimTx(any));
+    },
+  );
+
+  blocTest<MarketBloc, MarketState>(
+    'recover deposit builds the close route as the active rent payer',
+    setUp: () => when(mockApiV2.closeBidRefundClaimTx(any)).thenAnswer(
+      (_) async => ApiResponse<UnsignedTxResponse>(
+        result: UnsignedTxResponse(tx: testTransactionBase64),
+      ),
+    ),
+    build: () => MarketBloc(
+      mockApi,
+      mockApiV2,
+      mockWalletManager,
+      mockRpcService,
+      mockAuthService,
+      mockDasApi,
+      makeFlow(),
+      mockPriceService,
+      const FeeConfig(),
+      mockMarketplaceConfig,
+      mockMarketAccounts,
+      mockCurationAttribution,
+    ),
+    act: (bloc) =>
+        bloc.add(const MarketEvent.recoverBidRefundDeposit(claim: 'CLAIM')),
+    expect: () => [
+      isA<TxFlowPreparing<MarketPrepData, MarketSuccessData>>(),
+      isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+          .having(
+            (s) => s.data.actionType,
+            'action',
+            'recover-bid-refund-deposit',
+          )
+          .having((s) => s.data.flow, 'flow', AppFlow.auctionRefundWithdraw)
+          .having((s) => s.data.totalCost.rawAmount, 'outgoing value', 0),
+    ],
+    verify: (_) {
+      final request =
+          verify(mockApiV2.closeBidRefundClaimTx(captureAny)).captured.single
+              as CloseBidRefundClaimTxRequest;
+      expect(request.rentPayer, testWalletAddress);
+      expect(request.claim, 'CLAIM');
+      expect(
+        request.targetPriorityFeeLamports,
+        const FeeConfig().priorityFeeLamports,
+      );
+      verifyNever(mockApiV2.withdrawBidRefundTx(any));
+      verifyNever(mockApiV2.bidTx(any));
+    },
+  );
+
+  blocTest<MarketBloc, MarketState>(
+    'recover deposit surfaces stale or nonempty claim refusal without signing',
+    setUp: () => when(mockApiV2.closeBidRefundClaimTx(any)).thenThrow(
+      DioException(
+        requestOptions: RequestOptions(
+          path: '/tx/auctions/close-bid-refund-claim',
+        ),
+        type: DioExceptionType.badResponse,
+        response: Response(
+          requestOptions: RequestOptions(
+            path: '/tx/auctions/close-bid-refund-claim',
+          ),
+          statusCode: 400,
+          data: {
+            'message': 'Withdraw the refund balance before closing the claim',
+          },
+        ),
+      ),
+    ),
+    build: () => MarketBloc(
+      mockApi,
+      mockApiV2,
+      mockWalletManager,
+      mockRpcService,
+      mockAuthService,
+      mockDasApi,
+      makeFlow(),
+      mockPriceService,
+      const FeeConfig(),
+      mockMarketplaceConfig,
+      mockMarketAccounts,
+      mockCurationAttribution,
+    ),
+    act: (bloc) =>
+        bloc.add(const MarketEvent.recoverBidRefundDeposit(claim: 'CLAIM')),
+    expect: () => [
+      isA<TxFlowPreparing<MarketPrepData, MarketSuccessData>>(),
+      isA<TxFlowFailure<MarketPrepData, MarketSuccessData>>().having(
+        (s) => s.failure.message,
+        'reason',
+        contains('Withdraw the refund balance'),
+      ),
+    ],
+    verify: (_) => verifyNever(
+      mockWalletManager.signCompiledTx(
+        unsignedTx: anyNamed('unsignedTx'),
+        additionalSigners: anyNamed('additionalSigners'),
+      ),
+    ),
+  );
+
+  blocTest<MarketBloc, MarketState>(
+    'recover deposit simulation inspects the rent payer to quote SOL returned',
+    setUp: () =>
+        when(
+          mockRpcService.simulateWithDelta(
+            address: anyNamed('address'),
+            simulate: anyNamed('simulate'),
+          ),
+        ).thenAnswer(
+          (_) async => const SimulationDelta(
+            result: SimulationResult(success: true),
+            lamportsDelta: 1234567,
+          ),
+        ),
+    build: () => MarketBloc(
+      mockApi,
+      mockApiV2,
+      mockWalletManager,
+      mockRpcService,
+      mockAuthService,
+      mockDasApi,
+      makeFlow(),
+      mockPriceService,
+      const FeeConfig(),
+      mockMarketplaceConfig,
+      mockMarketAccounts,
+      mockCurationAttribution,
+    ),
+    seed: () => TxFlowReady<MarketPrepData, MarketSuccessData>(
+      MarketPrepData(
+        transactionsBase64: [testTransactionBase64],
+        mintAccount: 'CLAIM',
+        actionType: 'recover-bid-refund-deposit',
+        flow: AppFlow.auctionRefundWithdraw,
+        totalCost: MarketPrice.zero(),
+        estimatedFeeLamports: 5000,
+      ),
+    ),
+    act: (bloc) => bloc.add(const MarketEvent.simulate()),
+    expect: () => [
+      isA<TxFlowReady<MarketPrepData, MarketSuccessData>>().having(
+        (s) => s.data.isSimulating,
+        'loading',
+        true,
+      ),
+      isA<TxFlowReady<MarketPrepData, MarketSuccessData>>().having(
+        (s) => s.data.simulatedPayerLamportsDelta,
+        'SOL returned',
+        1234567,
+      ),
+    ],
+    verify: (_) => verify(
+      mockRpcService.simulateWithDelta(
+        address: testWalletAddress,
+        simulate: anyNamed('simulate'),
+      ),
+    ).called(1),
+  );
+
+  blocTest<MarketBloc, MarketState>(
+    'SOL refund withdrawal simulates without inspecting the payer balance',
+    setUp: () {
+      when(
+        mockRpcService.simulateEncodedTransaction(
+          any,
+          inspectAccounts: anyNamed('inspectAccounts'),
+        ),
+      ).thenAnswer((_) async => const SimulationResult(success: true));
+      when(
+        mockRpcService.simulateWithDelta(
+          address: anyNamed('address'),
+          simulate: anyNamed('simulate'),
+        ),
+      ).thenAnswer((invocation) async {
+        final address = invocation.namedArguments[#address] as String?;
+        final simulate =
+            invocation.namedArguments[#simulate]
+                as Future<SimulationResult> Function(List<String>);
+        return SimulationDelta(
+          result: await simulate(address == null ? const [] : [address]),
+        );
+      });
+    },
+    build: () => MarketBloc(
+      mockApi,
+      mockApiV2,
+      mockWalletManager,
+      mockRpcService,
+      mockAuthService,
+      mockDasApi,
+      makeFlow(),
+      mockPriceService,
+      const FeeConfig(),
+      mockMarketplaceConfig,
+      mockMarketAccounts,
+      mockCurationAttribution,
+    ),
+    seed: () => TxFlowReady<MarketPrepData, MarketSuccessData>(
+      MarketPrepData(
+        transactionsBase64: [testTransactionBase64],
+        mintAccount: solMint,
+        actionType: 'withdraw-bid-refund',
+        flow: AppFlow.auctionRefundWithdraw,
+        totalCost: const MarketPrice(rawAmount: 1000000000),
+        estimatedFeeLamports: 5000,
+      ),
+    ),
+    act: (bloc) => bloc.add(const MarketEvent.simulate()),
+    expect: () => [
+      isA<TxFlowReady<MarketPrepData, MarketSuccessData>>().having(
+        (s) => s.data.isSimulating,
+        'loading',
+        true,
+      ),
+      isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+          .having((s) => s.data.isSimulating, 'loading', false)
+          .having((s) => s.data.simulationResult?.success, 'success', true)
+          .having(
+            (s) => s.data.simulatedPayerLamportsDelta,
+            'payer delta',
+            null,
+          ),
+    ],
+    verify: (_) {
+      verify(
+        mockRpcService.simulateWithDelta(
+          address: null,
+          simulate: anyNamed('simulate'),
+        ),
+      ).called(1);
+      verify(
+        mockRpcService.simulateEncodedTransaction(
+          testTransactionBase64,
+          inspectAccounts: argThat(isEmpty, named: 'inspectAccounts'),
+        ),
+      ).called(1);
+    },
+  );
+
+  for (final action in ['withdraw-bid-refund', 'release-bid-refund']) {
+    for (final rent in [0, 1488440, 3000000]) {
+      late String fallbackTx;
+      blocTest<MarketBloc, MarketState>(
+        '$action simulation discloses new token account rent $rent',
+        setUp: () {
+          fallbackTx = refundTransactionFixture(
+            payerAddress: testWalletAddress,
+            accountAddress: testMintAccount,
+            rent: rent,
+            token2022: rent == 3000000,
+            versioned: true,
+          );
+          final response = ApiResponse<UnsignedTxResponse>(
+            result: UnsignedTxResponse(tx: fallbackTx),
+          );
+          when(
+            mockApiV2.withdrawBidRefundTx(any),
+          ).thenAnswer((_) async => response);
+          when(
+            mockApiV2.pushBidRefundTx(any),
+          ).thenAnswer((_) async => response);
+          when(
+            mockRpcService.simulateEncodedTransaction(
+              any,
+              inspectAccounts: anyNamed('inspectAccounts'),
+            ),
+          ).thenAnswer((_) async => const SimulationResult(success: true));
+        },
+        build: () => MarketBloc(
+          mockApi,
+          mockApiV2,
+          mockWalletManager,
+          mockRpcService,
+          mockAuthService,
+          mockDasApi,
+          makeFlow(),
+          mockPriceService,
+          const FeeConfig(),
+          mockMarketplaceConfig,
+          mockMarketAccounts,
+          mockCurationAttribution,
+        ),
+        act: (bloc) async {
+          final ready = bloc.stream.firstWhere(
+            (state) => state is TxFlowReady<MarketPrepData, MarketSuccessData>,
+          );
+          const amount = MarketPrice(
+            rawAmount: 2000000,
+            currencyMint: usdcMint,
+          );
+          bloc.add(
+            action == 'withdraw-bid-refund'
+                ? const MarketEvent.withdrawBidRefund(amount: amount)
+                : const MarketEvent.releaseBidRefund(
+                    bidder: 'ORIGINAL_BIDDER',
+                    amount: amount,
+                  ),
+          );
+          await ready.timeout(const Duration(seconds: 5));
+          bloc.add(const MarketEvent.simulate());
+        },
+        expect: () => [
+          isA<TxFlowPreparing<MarketPrepData, MarketSuccessData>>(),
+          isA<TxFlowReady<MarketPrepData, MarketSuccessData>>(),
+          isA<TxFlowReady<MarketPrepData, MarketSuccessData>>().having(
+            (s) => s.data.isSimulating,
+            'simulating',
+            true,
+          ),
+          isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+              .having((s) => s.data.isSimulating, 'simulating', false)
+              .having(
+                (s) => s.data.tokenAccountRentLamports,
+                'account funding excludes priority and both signature fees',
+                rent,
+              )
+              .having(
+                (s) => s.data.totalCost.rawAmount,
+                'token refund',
+                2000000,
+              ),
+        ],
+        verify: (_) {
+          verifyNever(mockRpcService.getAccountLamportsForAddresses(any));
+          verifyNever(
+            mockRpcService.simulateWithDelta(
+              address: testWalletAddress,
+              simulate: anyNamed('simulate'),
+            ),
+          );
+          verify(
+            mockRpcService.simulateEncodedTransaction(
+              fallbackTx,
+              inspectAccounts: [],
+            ),
+          ).called(1);
+        },
+      );
+    }
+  }
+
+  for (final action in ['withdraw-bid-refund', 'release-bid-refund']) {
+    for (final scenario in [
+      'new',
+      'existing',
+      'prefunded',
+      'unavailable',
+      'failed',
+    ]) {
+      final before = scenario == 'existing'
+          ? 1488440
+          : (scenario == 'prefunded' ? 500000 : 0);
+      final expectedRent = scenario == 'unavailable' || scenario == 'failed'
+          ? null
+          : 1488440 - before;
+      late String tx;
+      blocTest<MarketBloc, MarketState>(
+        '$action idempotent associated account rent is accurate when $scenario',
+        setUp: () {
+          tx = refundTransactionFixture(
+            payerAddress: testWalletAddress,
+            accountAddress: testMintAccount,
+            associated: true,
+            versioned: true,
+          );
+          when(mockRpcService.getAccountLamportsForAddresses(any)).thenAnswer((
+            _,
+          ) async {
+            if (scenario == 'unavailable') throw Exception('RPC unavailable');
+            return {testMintAccount: before};
+          });
+          when(
+            mockRpcService.simulateEncodedTransaction(
+              any,
+              inspectAccounts: anyNamed('inspectAccounts'),
+            ),
+          ).thenAnswer(
+            (_) async => SimulationResult(
+              success: scenario != 'failed',
+              inspectedAccountLamports: {testMintAccount: 1488440},
+            ),
+          );
+        },
+        build: () => MarketBloc(
+          mockApi,
+          mockApiV2,
+          mockWalletManager,
+          mockRpcService,
+          mockAuthService,
+          mockDasApi,
+          makeFlow(),
+          mockPriceService,
+          const FeeConfig(),
+          mockMarketplaceConfig,
+          mockMarketAccounts,
+          mockCurationAttribution,
+        ),
+        seed: () => TxFlowReady<MarketPrepData, MarketSuccessData>(
+          MarketPrepData(
+            transactionsBase64: [tx],
+            mintAccount: testMintAccount,
+            actionType: action,
+            flow: AppFlow.auctionRefundWithdraw,
+            totalCost: const MarketPrice(
+              rawAmount: 2000000,
+              currencyMint: usdcMint,
+            ),
+            estimatedFeeLamports: 5000,
+            tokenAccountRentLamports: 9999999,
+          ),
+        ),
+        act: (bloc) => bloc.add(const MarketEvent.simulate()),
+        expect: () => [
+          isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+              .having((s) => s.data.isSimulating, 'loading', true)
+              .having(
+                (s) => s.data.tokenAccountRentLamports,
+                'clears stale rent',
+                null,
+              ),
+          isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+              .having((s) => s.data.isSimulating, 'loading', false)
+              .having(
+                (s) => s.data.tokenAccountRentLamports,
+                'rent excluding fees',
+                expectedRent,
+              ),
+        ],
+        verify: (_) {
+          verify(
+            mockRpcService.getAccountLamportsForAddresses([testMintAccount]),
+          ).called(1);
+          verify(
+            mockRpcService.simulateEncodedTransaction(
+              tx,
+              inspectAccounts: [testMintAccount],
+            ),
+          ).called(1);
+          verifyNever(
+            mockRpcService.simulateWithDelta(
+              address: anyNamed('address'),
+              simulate: anyNamed('simulate'),
+            ),
+          );
+        },
+      );
+    }
+  }
+
+  for (final destination in [null, 'ALTERNATIVE']) {
+    blocTest<MarketBloc, MarketState>(
+      'withdraw token refund uses the active bidder, currency and destination $destination',
+      setUp: () => when(mockApiV2.withdrawBidRefundTx(any)).thenAnswer(
+        (_) async => ApiResponse<UnsignedTxResponse>(
+          result: UnsignedTxResponse(tx: testTransactionBase64),
+        ),
+      ),
+      build: () => MarketBloc(
+        mockApi,
+        mockApiV2,
+        mockWalletManager,
+        mockRpcService,
+        mockAuthService,
+        mockDasApi,
+        makeFlow(),
+        mockPriceService,
+        const FeeConfig(),
+        mockMarketplaceConfig,
+        mockMarketAccounts,
+        mockCurationAttribution,
+      ),
+      act: (bloc) => bloc.add(
+        MarketEvent.withdrawBidRefund(
+          amount: const MarketPrice(
+            rawAmount: 2000000,
+            currencyMint: 'CURRENCY',
+          ),
+          destination: destination,
+        ),
+      ),
+      expect: () => [
+        isA<TxFlowPreparing<MarketPrepData, MarketSuccessData>>(),
+        isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+            .having((s) => s.data.actionType, 'action', 'withdraw-bid-refund')
+            .having((s) => s.data.flow, 'flow', AppFlow.auctionRefundWithdraw),
+      ],
+      verify: (_) {
+        final request =
+            verify(mockApiV2.withdrawBidRefundTx(captureAny)).captured.single
+                as WithdrawBidRefundTxRequest;
+        expect(request.bidder, testWalletAddress);
+        expect(request.mint, 'CURRENCY');
+        expect(request.destination, destination);
+        verifyNever(mockApiV2.pushBidRefundTx(any));
+      },
+    );
+  }
+  blocTest<MarketBloc, MarketState>(
+    'withdraw token refund preserves the fallback account signature through confirmation',
+    setUp: () {
+      final bidder = Ed25519HDPublicKey.fromBase58(testWalletAddress);
+      final newAccount = Ed25519HDPublicKey.fromBase58(testMintAccount);
+      final compiled =
+          Message.only(
+            SystemInstruction.createAccount(
+              fundingAccount: bidder,
+              newAccount: newAccount,
+              lamports: 2039280,
+              space: 165,
+              owner: Ed25519HDPublicKey.fromBase58(TokenProgram.programId),
+            ),
+          ).compile(
+            recentBlockhash: '11111111111111111111111111111111',
+            feePayer: bidder,
+          );
+      final fallbackTx = SignedTx(
+        compiledMessage: compiled,
+        signatures: [
+          Signature(List<int>.filled(64, 0), publicKey: bidder),
+          Signature(List<int>.filled(64, 7), publicKey: newAccount),
+        ],
+      );
+      when(mockApiV2.withdrawBidRefundTx(any)).thenAnswer(
+        (_) async => ApiResponse<UnsignedTxResponse>(
+          result: UnsignedTxResponse(tx: fallbackTx.encode()),
+        ),
+      );
+      when(
+        mockWalletManager.signCompiledTx(
+          unsignedTx: anyNamed('unsignedTx'),
+          additionalSigners: anyNamed('additionalSigners'),
+        ),
+      ).thenAnswer((call) async {
+        final tx = call.namedArguments[#unsignedTx] as SignedTx;
+        expect(tx.encode(), fallbackTx.encode());
+        return tx;
+      });
+      when(
+        mockRpcService.sendTransaction(any),
+      ).thenAnswer((_) async => testSignature);
+      when(
+        mockRpcService.awaitConfirmationOrThrow(
+          any,
+          rebroadcast: anyNamed('rebroadcast'),
+        ),
+      ).thenAnswer((_) async {});
+      when(mockApi.checkTx(any)).thenAnswer((_) async => <String, dynamic>{});
+    },
+    build: () => MarketBloc(
+      mockApi,
+      mockApiV2,
+      mockWalletManager,
+      mockRpcService,
+      mockAuthService,
+      mockDasApi,
+      makeFlow(),
+      mockPriceService,
+      const FeeConfig(),
+      mockMarketplaceConfig,
+      mockMarketAccounts,
+      mockCurationAttribution,
+    ),
+    act: (bloc) async {
+      final ready = bloc.stream.firstWhere(
+        (state) => state is TxFlowReady<MarketPrepData, MarketSuccessData>,
+      );
+      bloc.add(
+        const MarketEvent.withdrawBidRefund(
+          amount: MarketPrice(rawAmount: 2000000, currencyMint: usdcMint),
+        ),
+      );
+      await ready.timeout(const Duration(seconds: 5));
+      final indexed = bloc.stream.firstWhere(
+        (state) =>
+            state is TxFlowSuccess<MarketPrepData, MarketSuccessData> &&
+            state.result.indexed == true,
+      );
+      bloc.add(const MarketEvent.confirmAndSign());
+      await indexed.timeout(const Duration(seconds: 5));
+    },
+    verify: (_) {
+      final request =
+          verify(mockApiV2.withdrawBidRefundTx(captureAny)).captured.single
+              as WithdrawBidRefundTxRequest;
+      expect(request.bidder, testWalletAddress);
+      expect(request.mint, usdcMint);
+      expect(request.destination, isNull);
+      final sent =
+          verify(mockRpcService.sendTransaction(captureAny)).captured.single
+              as SignedTx;
+      expect(sent.compiledMessage.accountKeys[1].toBase58(), testMintAccount);
+      expect(sent.signatures[1].bytes, List<int>.filled(64, 7));
+      verifyNever(mockRpcService.getLatestBlockhash());
+      verifyNever(mockApiV2.pushBidRefundTx(any));
+      verify(mockApi.checkTx(any)).called(1);
+    },
+  );
+  blocTest<MarketBloc, MarketState>(
+    'SOL refund always returns to the active bidder wallet',
+    setUp: () => when(mockApiV2.withdrawBidRefundTx(any)).thenAnswer(
+      (_) async => ApiResponse<UnsignedTxResponse>(
+        result: UnsignedTxResponse(tx: testTransactionBase64),
+      ),
+    ),
+    build: () => MarketBloc(
+      mockApi,
+      mockApiV2,
+      mockWalletManager,
+      mockRpcService,
+      mockAuthService,
+      mockDasApi,
+      makeFlow(),
+      mockPriceService,
+      const FeeConfig(),
+      mockMarketplaceConfig,
+      mockMarketAccounts,
+      mockCurationAttribution,
+    ),
+    act: (bloc) => bloc.add(
+      const MarketEvent.withdrawBidRefund(
+        amount: MarketPrice(
+          rawAmount: 2000000000,
+          currencyMint: PriceFormatter.solMint,
+        ),
+        destination: 'ALTERNATIVE',
+      ),
+    ),
+    expect: () => [
+      isA<TxFlowPreparing<MarketPrepData, MarketSuccessData>>(),
+      isA<TxFlowReady<MarketPrepData, MarketSuccessData>>()
+          .having((s) => s.data.actionType, 'action', 'withdraw-bid-refund')
+          .having((s) => s.data.flow, 'flow', AppFlow.auctionRefundWithdraw),
+    ],
+    verify: (_) {
+      final request =
+          verify(mockApiV2.withdrawBidRefundTx(captureAny)).captured.single
+              as WithdrawBidRefundTxRequest;
+      expect(request.bidder, testWalletAddress);
+      expect(request.mint, PriceFormatter.solMint);
+      expect(request.destination, isNull);
+    },
+  );
+  for (final message in [
+    'Destination token account is frozen',
+    'No bid refund available',
+  ]) {
+    blocTest<MarketBloc, MarketState>(
+      'withdraw refund builder 400 surfaces as prepare failure: $message',
+      setUp: () {
+        observeRefundArtworkSignals();
+        when(mockApiV2.withdrawBidRefundTx(any)).thenThrow(
+          DioException(
+            requestOptions: RequestOptions(
+              path: '/tx/auctions/withdraw-bid-refund',
+            ),
+            type: DioExceptionType.badResponse,
+            response: Response(
+              requestOptions: RequestOptions(
+                path: '/tx/auctions/withdraw-bid-refund',
+              ),
+              statusCode: 400,
+              data: {'message': message},
+            ),
+          ),
+        );
+      },
+      build: () => MarketBloc(
+        mockApi,
+        mockApiV2,
+        mockWalletManager,
+        mockRpcService,
+        mockAuthService,
+        mockDasApi,
+        makeFlow(),
+        mockPriceService,
+        const FeeConfig(),
+        mockMarketplaceConfig,
+        mockMarketAccounts,
+        mockCurationAttribution,
+      ),
+      act: (bloc) => bloc.add(
+        const MarketEvent.withdrawBidRefund(
+          amount: MarketPrice(rawAmount: 42, currencyMint: 'CURRENCY'),
+        ),
+      ),
+      expect: () => [
+        isA<TxFlowPreparing<MarketPrepData, MarketSuccessData>>(),
+        isA<TxFlowFailure<MarketPrepData, MarketSuccessData>>().having(
+          (s) => s.failure.message,
+          'message',
+          contains(message),
+        ),
+      ],
+      verify: (_) {
+        verifyNever(
+          mockWalletManager.signCompiledTx(
+            unsignedTx: anyNamed('unsignedTx'),
+            additionalSigners: anyNamed('additionalSigners'),
+          ),
+        );
+        expect(editedMints, isEmpty);
+      },
+    );
+  }
+  for (final actionType in [
+    'withdraw-bid-refund',
+    'recover-bid-refund-deposit',
+    'release-sol-bid-refund',
+  ]) {
+    blocTest<MarketBloc, MarketState>(
+      '$actionType acknowledges the transaction without an artwork entry or spending value',
+      setUp: () {
+        observeRefundArtworkSignals();
+        when(
+          mockWalletManager.signCompiledTx(
+            unsignedTx: anyNamed('unsignedTx'),
+            additionalSigners: anyNamed('additionalSigners'),
+          ),
+        ).thenAnswer(
+          (call) async => call.namedArguments[#unsignedTx] as SignedTx,
+        );
+        when(
+          mockRpcService.sendTransaction(any),
+        ).thenAnswer((_) async => testSignature);
+        when(
+          mockRpcService.awaitConfirmationOrThrow(
+            any,
+            rebroadcast: anyNamed('rebroadcast'),
+          ),
+        ).thenAnswer((_) async {});
+        when(mockApi.checkTx(any)).thenAnswer((_) async => <String, dynamic>{});
+      },
+      build: () => MarketBloc(
+        mockApi,
+        mockApiV2,
+        mockWalletManager,
+        mockRpcService,
+        mockAuthService,
+        mockDasApi,
+        makeFlow(),
+        mockPriceService,
+        const FeeConfig(),
+        mockMarketplaceConfig,
+        mockMarketAccounts,
+        mockCurationAttribution,
+      ),
+      seed: () => TxFlowReady<MarketPrepData, MarketSuccessData>(
+        MarketPrepData(
+          transactionsBase64: [testTransactionBase64],
+          mintAccount: 'CURRENCY',
+          actionType: actionType,
+          flow: AppFlow.auctionRefundWithdraw,
+          totalCost: const MarketPrice(
+            rawAmount: 2000000,
+            currencyMint: 'CURRENCY',
+          ),
+          estimatedFeeLamports: 5000,
+        ),
+      ),
+      act: (bloc) async {
+        final indexed = bloc.stream.firstWhere(
+          (state) =>
+              state is TxFlowSuccess<MarketPrepData, MarketSuccessData> &&
+              state.result.indexed == true,
+        );
+        bloc.add(const MarketEvent.confirmAndSign());
+        await indexed.timeout(const Duration(seconds: 5));
+      },
+      verify: (_) {
+        verify(mockApi.checkTx(any)).called(1);
+        verifyNever(mockApi.checkEntry(any));
+        verifyNever(mockPriceService.usdValueOfRaw(any, any));
+        expect(editedMints, isEmpty);
+      },
+    );
+  }
 }
 
 /// Builds a base64-encoded SignedTx with a single self-transfer instruction

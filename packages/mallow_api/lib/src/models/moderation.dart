@@ -45,6 +45,9 @@ sealed class ReportContext with _$ReportContext {
 
     /// `ios` | `android`.
     @JsonKey(includeIfNull: false) String? platform,
+
+    /// Set on a preview build only, e.g. `preview dev@1a2b3c4d`.
+    @JsonKey(includeIfNull: false) String? buildLabel,
   }) = _ReportContext;
 
   factory ReportContext.fromJson(Map<String, dynamic> json) => _$ReportContextFromJson(json);

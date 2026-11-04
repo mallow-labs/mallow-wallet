@@ -151,6 +151,36 @@ void main() {
     },
   );
 
+  test('isNewInstall is true only on the launch that minted the id', () async {
+    final first = await build();
+    expect(first.isNewInstall, isTrue);
+
+    // A restart over the same storage finds the id: not a new install.
+    final restarted = AnalyticsService(
+      dio,
+      await PreferencesService.create(),
+      secureStorage,
+    );
+    await restarted.init();
+    expect(restarted.isNewInstall, isFalse);
+  });
+
+  test('resetDeviceIdentity does not count as a new install', () async {
+    when(() => secureStorage.delete(key: any(named: 'key'))).thenAnswer((
+      inv,
+    ) async {
+      secureStore.remove(inv.namedArguments[#key] as String);
+    });
+    secureStore['mallow_analytics_device_id'] = 'existing-id';
+    final service = await build();
+    expect(service.isNewInstall, isFalse);
+
+    await service.resetDeviceIdentity();
+
+    expect(secureStore['mallow_analytics_device_id'], isNot('existing-id'));
+    expect(service.isNewInstall, isFalse);
+  });
+
   test('offline queue stays capped when the backend is unreachable', () async {
     when(
       () => dio.post<void>(
@@ -263,6 +293,56 @@ void main() {
       await restarted.trackLogin();
 
       expect(posted, hasLength(1));
+    });
+  });
+
+  group('deviceId', () {
+    test(
+      'returns the id init resolved, and the same one on every call',
+      () async {
+        final service = await build();
+        final first = await service.deviceId();
+        expect(first, isNotNull);
+        expect(first, isNotEmpty);
+        expect(first, secureStore['mallow_analytics_device_id']);
+        expect(await service.deviceId(), first);
+      },
+    );
+
+    test('reads the stored value when init has not run', () async {
+      secureStore['mallow_analytics_device_id'] = 'stored-id';
+      SharedPreferences.setMockInitialValues({});
+      final service = AnalyticsService(
+        dio,
+        await PreferencesService.create(),
+        secureStorage,
+      );
+      expect(await service.deviceId(), 'stored-id');
+    });
+
+    test('mints and stores one when none exists yet', () async {
+      SharedPreferences.setMockInitialValues({});
+      final service = AnalyticsService(
+        dio,
+        await PreferencesService.create(),
+        secureStorage,
+      );
+      final id = await service.deviceId();
+      expect(id, isNotEmpty);
+      expect(secureStore['mallow_analytics_device_id'], id);
+    });
+
+    test('is null, never empty, when storage fails', () async {
+      when(
+        () => secureStorage.read(key: any(named: 'key')),
+      ).thenThrow(StateError('keystore locked'));
+      SharedPreferences.setMockInitialValues({});
+      final service = AnalyticsService(
+        dio,
+        await PreferencesService.create(),
+        secureStorage,
+      );
+      expect(await service.deviceId(), isNull);
     });
   });
 }

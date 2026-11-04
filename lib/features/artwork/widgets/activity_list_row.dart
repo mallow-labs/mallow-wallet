@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/router/app_router.dart';
 import '../../../core/services/avatar_service.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/widgets/account_avatar.dart';
+import '../../../shared/widgets/app_snack_bar.dart';
 import '../../../shared/widgets/mallow_network_image.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
+import '../../../shared/widgets/tappable.dart';
 
 /// One row in the artwork History / Offers tabs: actor avatar +
 /// "{name} {action}" with the amount and age on the right.
@@ -23,6 +26,7 @@ class ActivityListRow extends StatelessWidget {
     this.amount,
     this.amountWidget,
     this.age,
+    this.transactionHash,
     this.username,
     this.address,
     this.avatarSeed,
@@ -50,6 +54,10 @@ class ActivityListRow extends StatelessWidget {
   final Widget? amountWidget;
 
   final String? age;
+
+  /// When present, long-pressing the age copies the full transaction hash.
+  final String? transactionHash;
+
   final String? username;
   final String? address;
 
@@ -112,6 +120,17 @@ class ActivityListRow extends StatelessWidget {
     }
   }
 
+  Future<void> _copyTransactionHash(BuildContext context, String hash) async {
+    await Clipboard.setData(ClipboardData(text: hash));
+    HapticFeedback.lightImpact();
+    if (!context.mounted) return;
+    AppSnackBar.show(
+      context,
+      'Transaction hash copied',
+      duration: const Duration(seconds: 2),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = context.mallowColors;
@@ -130,6 +149,27 @@ class ActivityListRow extends StatelessWidget {
     final ageStyle = MallowTheme.uiCaption.copyWith(
       color: colors.textSecondary,
     );
+    final hash = transactionHash;
+    final canCopyHash = hash != null && hash.trim().isNotEmpty;
+    Widget? ageWidget = age == null
+        ? null
+        : Text(
+            age,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.right,
+            style: ageStyle,
+          );
+    if (ageWidget != null && canCopyHash) {
+      ageWidget = Semantics(
+        label: 'Copy transaction hash',
+        button: true,
+        child: Tappable(
+          onLongPress: () => _copyTransactionHash(context, hash),
+          child: ageWidget,
+        ),
+      );
+    }
 
     final avatarRadius = BorderRadius.circular(
       circularAvatar ? avatarSize / 2 : MallowTheme.radiusPrimary,
@@ -218,12 +258,21 @@ class ActivityListRow extends StatelessWidget {
                   else if (amount != null)
                     TextSpan(text: amount, style: amountStyle),
                   if (age != null)
-                    TextSpan(
-                      text: (amount != null || amountWidget != null)
-                          ? '  $age'
-                          : age,
-                      style: ageStyle,
-                    ),
+                    if (canCopyHash) ...[
+                      if (amount != null || amountWidget != null)
+                        TextSpan(text: '  ', style: ageStyle),
+                      WidgetSpan(
+                        alignment: PlaceholderAlignment.baseline,
+                        baseline: TextBaseline.alphabetic,
+                        child: ageWidget!,
+                      ),
+                    ] else
+                      TextSpan(
+                        text: (amount != null || amountWidget != null)
+                            ? '  $age'
+                            : age,
+                        style: ageStyle,
+                      ),
                 ],
               ),
             )
@@ -234,16 +283,7 @@ class ActivityListRow extends StatelessWidget {
               Text(amount, style: amountStyle),
             if (age != null) ...[
               const SizedBox(width: MallowTheme.spacingSm),
-              SizedBox(
-                width: ageWidth,
-                child: Text(
-                  age,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.right,
-                  style: ageStyle,
-                ),
-              ),
+              SizedBox(width: ageWidth, child: ageWidget),
             ],
           ],
           if (trailing != null) ...[

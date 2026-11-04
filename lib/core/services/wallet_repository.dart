@@ -1,9 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:drift/drift.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart' show PlatformException;
 import 'package:injectable/injectable.dart';
+import 'package:sentry_flutter/sentry_flutter.dart' show SentryLevel;
 import 'package:uuid/uuid.dart';
 
 import 'package:ledger_solana/ledger_solana.dart';
@@ -18,6 +19,7 @@ import '../models/account.dart';
 import '../observability/app_logger.dart';
 import '../security/secure_storage.dart';
 import 'preferences_service.dart';
+import 'sentry_service.dart';
 
 /// Thrown when attempting to import a wallet whose address already exists.
 class DuplicateWalletException implements Exception {
@@ -28,9 +30,10 @@ class DuplicateWalletException implements Exception {
   String toString() => 'A wallet with this address already exists';
 }
 
-/// Thrown when a removal cannot prune the recovery graph. The graph write is
-/// the commit point of a removal: nothing is deleted until it succeeds, so a
-/// caller that sees this can tell the user nothing changed.
+/// Thrown when a mutation cannot write the recovery graph. For a removal the
+/// graph write is the commit point, so nothing was deleted and a caller can
+/// tell the user nothing changed. For an add the rows may already exist, and
+/// the add must not be reported as a success.
 class GraphSyncException implements Exception {
   GraphSyncException(this.cause);
   final Object cause;
@@ -481,6 +484,10 @@ class WalletRepository {
     for (final sp in existingSeedPhrases) {
       final existing = await _storage.loadMnemonicForSeedPhrase(sp.id);
       if (existing == normalizedMnemonic) {
+        // A previous create may have stored the mnemonic and rows before its
+        // graph commit failed. Do not let a retry turn that partial result
+        // into reported success while recovery data is still unwritten.
+        await _syncWalletGraph(failOnError: true);
         return _seedPhraseRowToInfo(sp);
       }
     }
@@ -539,7 +546,7 @@ class WalletRepository {
     }
 
     final info = SeedPhraseInfo(id: seedPhraseId, name: seedPhraseName);
-    await _syncWalletGraph();
+    await _syncWalletGraph(failOnError: true);
     return info;
   }
 
@@ -590,9 +597,51 @@ class WalletRepository {
     return true;
   }
 
+  /// The refusal for an add whose address a wallet already holds.
+  ///
+  /// That wallet can be this same add, retried: the first attempt wrote its
+  /// rows (and, for an imported key, the key) and then failed its graph
+  /// commit. Sync the graph before refusing, so the retry leaves recovery
+  /// data that names the wallet. The sync is best-effort: the refusal is the
+  /// truth whatever it does, and a [GraphSyncException] here would tell the
+  /// caller this attempt wrote rows when it wrote nothing. A failed sync
+  /// leaves the stored graph as it was, and the next one rebuilds it from the
+  /// rows.
+  Future<DuplicateWalletException> _duplicateAfterGraphCommit(
+    String address,
+  ) async {
+    await _syncWalletGraph();
+    return DuplicateWalletException(address);
+  }
+
   /// Add an imported private key wallet.
   Future<WalletInfo> addImportedKeyWallet(String privateKey, String name) =>
       _locked(() => _addImportedKeyWalletLocked(privateKey, name));
+
+  /// Completes the retry of an [addImportedKeyWallet] whose key and row were
+  /// stored before its recovery-graph write failed, and which was then
+  /// refused as a duplicate.
+  ///
+  /// Returns the wallet only when an imported-key wallet at the key's address
+  /// still holds exactly this key, and only once a graph naming it is durably
+  /// written: an add must not report success before that, and a lenient sync
+  /// already failed once. Returns null when the address is held any other way
+  /// — the duplicate is then a real refusal — and throws [GraphSyncException]
+  /// when the graph still cannot be written.
+  Future<WalletInfo?> completeImportedKeyRetry(String privateKey) =>
+      _locked(() async {
+        final parsed = await PrivateKeyParser.parse(privateKey);
+        final row = await _lookupWalletByAddress(parsed.address);
+        if (row == null ||
+            WalletType.fromDbString(row.walletType) != WalletType.importedKey) {
+          return null;
+        }
+        if (await _storage.loadPrivateKey(row.id) != parsed.storedKey) {
+          return null;
+        }
+        await _syncWalletGraph(failOnError: true);
+        return _walletRowToInfo(row);
+      });
 
   Future<WalletInfo> _addImportedKeyWalletLocked(
     String privateKey,
@@ -603,7 +652,7 @@ class WalletRepository {
     // A signing import supersedes a watch-only wallet of the same address; a
     // real signer already there is a genuine duplicate.
     if (!await _clearWatchOnlyForSigningImport(parsed.address)) {
-      throw DuplicateWalletException(parsed.address);
+      throw await _duplicateAfterGraphCommit(parsed.address);
     }
 
     final walletId = _generateId();
@@ -641,7 +690,7 @@ class WalletRepository {
     if (await _storage.loadSelectedWalletId() == null) {
       await _storage.storeSelectedWalletId(walletId);
     }
-    await _syncWalletGraph();
+    await _syncWalletGraph(failOnError: true);
     return wallet;
   }
 
@@ -654,7 +703,7 @@ class WalletRepository {
     String name,
   ) async {
     final existing = await _lookupWalletByAddress(address);
-    if (existing != null) throw DuplicateWalletException(address);
+    if (existing != null) throw await _duplicateAfterGraphCommit(address);
 
     final walletId = _generateId();
     final sortIndex = await _db.maxWalletSortIndex() + 1;
@@ -690,7 +739,7 @@ class WalletRepository {
     if (await _storage.loadSelectedWalletId() == null) {
       await _storage.storeSelectedWalletId(walletId);
     }
-    await _syncWalletGraph();
+    await _syncWalletGraph(failOnError: true);
     return wallet;
   }
 
@@ -699,6 +748,10 @@ class WalletRepository {
   /// [chain] reflects which Ledger app the account was derived from (Solana or
   /// Ethereum). Along with [derivationIndex] and [ledgerDeviceId], this is the
   /// data required to re-derive the key and sign on-device later.
+  ///
+  /// [accountName] names the index's account when this import creates it (the
+  /// user named it in the picker); an account that already exists keeps its
+  /// stored name.
   Future<WalletInfo> addLedgerWallet(
     String address,
     String name, {
@@ -706,6 +759,7 @@ class WalletRepository {
     SolanaDerivationScheme derivationScheme = SolanaDerivationScheme.standard,
     Chain chain = Chain.solana,
     String? ledgerDeviceId,
+    String? accountName,
   }) => _locked(
     () => _addLedgerWalletLocked(
       address,
@@ -714,6 +768,7 @@ class WalletRepository {
       derivationScheme: derivationScheme,
       chain: chain,
       ledgerDeviceId: ledgerDeviceId,
+      accountName: accountName,
     ),
   );
 
@@ -724,16 +779,20 @@ class WalletRepository {
     required SolanaDerivationScheme derivationScheme,
     required Chain chain,
     required String? ledgerDeviceId,
+    required String? accountName,
   }) async {
     // A signing import supersedes a watch-only wallet of the same address; a
     // real signer already there is a genuine duplicate.
     if (!await _clearWatchOnlyForSigningImport(address)) {
-      throw DuplicateWalletException(address);
+      throw await _duplicateAfterGraphCommit(address);
     }
 
     final walletId = _generateId();
     final sortIndex = await _db.maxWalletSortIndex() + 1;
-    final accountId = await _ensureHardwareAccount(derivationIndex);
+    final accountId = await _ensureHardwareAccount(
+      derivationIndex,
+      name: accountName,
+    );
 
     await _db.upsertWalletEntry(
       WalletsCompanion.insert(
@@ -768,7 +827,7 @@ class WalletRepository {
     if (await _storage.loadSelectedWalletId() == null) {
       await _storage.storeSelectedWalletId(walletId);
     }
-    await _syncWalletGraph();
+    await _syncWalletGraph(failOnError: true);
     return wallet;
   }
 
@@ -782,17 +841,21 @@ class WalletRepository {
   /// [derivationIndex] and [derivationScheme] are persisted for display, the
   /// `Account NN` grouping and the import picker; the path actually signed with
   /// is the one the vault itself reports, never one rebuilt from these.
+  ///
+  /// [accountName] names the account as [addLedgerWallet] does.
   Future<WalletInfo> addSeedVaultWallet(
     String address,
     String name, {
     int derivationIndex = 0,
     SolanaDerivationScheme derivationScheme = SolanaDerivationScheme.standard,
+    String? accountName,
   }) => _locked(
     () => _addSeedVaultWalletLocked(
       address,
       name,
       derivationIndex: derivationIndex,
       derivationScheme: derivationScheme,
+      accountName: accountName,
     ),
   );
 
@@ -801,16 +864,20 @@ class WalletRepository {
     String name, {
     required int derivationIndex,
     required SolanaDerivationScheme derivationScheme,
+    required String? accountName,
   }) async {
     // A signing import supersedes a watch-only wallet of the same address; a
     // real signer already there is a genuine duplicate.
     if (!await _clearWatchOnlyForSigningImport(address)) {
-      throw DuplicateWalletException(address);
+      throw await _duplicateAfterGraphCommit(address);
     }
 
     final walletId = _generateId();
     final sortIndex = await _db.maxWalletSortIndex() + 1;
-    final accountId = await _ensureSeedVaultAccount(derivationIndex);
+    final accountId = await _ensureSeedVaultAccount(
+      derivationIndex,
+      name: accountName,
+    );
 
     await _db.upsertWalletEntry(
       WalletsCompanion.insert(
@@ -841,7 +908,101 @@ class WalletRepository {
     if (await _storage.loadSelectedWalletId() == null) {
       await _storage.storeSelectedWalletId(walletId);
     }
-    await _syncWalletGraph();
+    await _syncWalletGraph(failOnError: true);
+    return wallet;
+  }
+
+  /// Add a Keystone wallet.
+  ///
+  /// The row records everything a sign request needs — the device's
+  /// [masterFingerprint] plus the [derivationIndex] and [derivationScheme] the
+  /// export reported — and nothing else: the key never leaves the device, so
+  /// there is no secret to store and none to delete on removal.
+  ///
+  /// The account is resolved by fingerprint *and* index, so the same index on
+  /// two Keystones lands in two accounts. [accountName] names the account as
+  /// [addLedgerWallet] does.
+  Future<WalletInfo> addKeystoneWallet(
+    String address,
+    String name, {
+    required int masterFingerprint,
+    int derivationIndex = 0,
+    SolanaDerivationScheme derivationScheme = SolanaDerivationScheme.standard,
+    Chain chain = Chain.solana,
+    String? accountName,
+  }) => _locked(
+    () => _addKeystoneWalletLocked(
+      address,
+      name,
+      masterFingerprint: masterFingerprint,
+      derivationIndex: derivationIndex,
+      derivationScheme: derivationScheme,
+      chain: chain,
+      accountName: accountName,
+    ),
+  );
+
+  Future<WalletInfo> _addKeystoneWalletLocked(
+    String address,
+    String name, {
+    required int masterFingerprint,
+    required int derivationIndex,
+    required SolanaDerivationScheme derivationScheme,
+    required Chain chain,
+    required String? accountName,
+  }) async {
+    // A zero fingerprint is what an unset field decodes to, and the device
+    // refuses every request that names it — reject it here rather than store
+    // a wallet that can never sign.
+    if (masterFingerprint == 0) {
+      throw ArgumentError.value(masterFingerprint, 'masterFingerprint');
+    }
+    // A signing import supersedes a watch-only wallet of the same address; a
+    // real signer already there is a genuine duplicate.
+    if (!await _clearWatchOnlyForSigningImport(address)) {
+      throw await _duplicateAfterGraphCommit(address);
+    }
+
+    final walletId = _generateId();
+    final sortIndex = await _db.maxWalletSortIndex() + 1;
+    final accountId = await _ensureKeystoneAccount(
+      masterFingerprint,
+      derivationIndex,
+      name: accountName,
+    );
+
+    await _db.upsertWalletEntry(
+      WalletsCompanion.insert(
+        id: walletId,
+        accountId: Value(accountId),
+        address: address,
+        name: name,
+        walletType: WalletType.keystone.toDbString(),
+        derivationIndex: Value(derivationIndex),
+        derivationScheme: Value(derivationScheme.name),
+        masterFingerprint: Value(masterFingerprint),
+        chain: Value(chain.toDbString()),
+        createdAt: _nowSeconds(),
+        sortIndex: Value(sortIndex),
+      ),
+    );
+
+    final wallet = WalletInfo(
+      id: walletId,
+      address: address,
+      name: name,
+      walletType: WalletType.keystone,
+      chain: chain.toDbString(),
+      derivationIndex: derivationIndex,
+      derivationScheme: derivationScheme,
+      masterFingerprint: masterFingerprint,
+      accountId: accountId,
+    );
+
+    if (await _storage.loadSelectedWalletId() == null) {
+      await _storage.storeSelectedWalletId(walletId);
+    }
+    await _syncWalletGraph(failOnError: true);
     return wallet;
   }
 
@@ -1000,7 +1161,7 @@ class WalletRepository {
       await _storage.storeSelectedWalletId(solanaWalletId);
     }
 
-    await _syncWalletGraph();
+    await _syncWalletGraph(failOnError: true);
     return (wallets: results, existed: existed);
   }
 
@@ -1102,8 +1263,10 @@ class WalletRepository {
   /// Import the selected wallets from the multi-chain picker.
   ///
   /// Groups [selections] by derivation index — one `seed` [Account] per index
-  /// (named `Account NN`, with a generated avatar seed) — and inserts each
-  /// selected wallet under it. Already-imported addresses are skipped. The
+  /// (named from [accountNames] when the user named it in the picker, else
+  /// `Account NN`, with a generated avatar seed) — and inserts each selected
+  /// wallet under it. A name only applies when the index's account is created
+  /// here; an account that already exists keeps its stored name. Already-imported addresses are skipped. The
   /// first imported Solana wallet is auto-selected when nothing is selected yet
   /// so the post-import session logs in as that account.
   ///
@@ -1113,13 +1276,21 @@ class WalletRepository {
   /// sign, and a restore would faithfully bring them back that way.
   Future<List<WalletInfo>> importAccountsFromPhrase(
     String seedPhraseId,
-    List<WalletImportSelection> selections,
-  ) => _locked(() => _importAccountsFromPhraseLocked(seedPhraseId, selections));
+    List<WalletImportSelection> selections, {
+    Map<int, String> accountNames = const {},
+  }) => _locked(
+    () => _importAccountsFromPhraseLocked(
+      seedPhraseId,
+      selections,
+      accountNames: accountNames,
+    ),
+  );
 
   Future<List<WalletInfo>> _importAccountsFromPhraseLocked(
     String seedPhraseId,
-    List<WalletImportSelection> selections,
-  ) async {
+    List<WalletImportSelection> selections, {
+    Map<int, String> accountNames = const {},
+  }) async {
     if (selections.isEmpty) return const [];
     if (await _db.getSeedPhraseById(seedPhraseId) == null) {
       throw StateError('seed phrase $seedPhraseId not found');
@@ -1136,7 +1307,11 @@ class WalletRepository {
     String? firstSolanaWalletId;
 
     for (final index in sortedIndices) {
-      final accountId = await _ensureSeedAccount(seedPhraseId, index);
+      final accountId = await _ensureSeedAccount(
+        seedPhraseId,
+        index,
+        name: accountNames[index],
+      );
 
       // Order wallets within the account: Solana, Tezos, Ethereum (matches the
       // picker), with legacy/root Solana following standard.
@@ -1190,8 +1365,10 @@ class WalletRepository {
           firstSolanaWalletId != null) {
         await _storage.storeSelectedWalletId(firstSolanaWalletId);
       }
-      await _syncWalletGraph();
     }
+    // Run even when every requested row already exists: that can be a retry
+    // after the prior attempt wrote the rows but failed its graph commit.
+    await _syncWalletGraph(failOnError: true);
     return results;
   }
 
@@ -1450,18 +1627,10 @@ class WalletRepository {
     // "nothing was removed" for a removal that is already done.
     for (final seedPhraseId in removedSeedPhraseIds) {
       await _db.deleteSeedPhraseById(seedPhraseId);
-      try {
-        await _storage.deleteMnemonicForSeedPhrase(seedPhraseId);
-      } catch (e) {
-        // Reported through AppLogger only: it prints the same console line in
-        // debug and drops it in release, where a bare `debugPrint` would still
-        // reach logcat/OSLog — and an exception's own message can quote the
-        // item it failed on.
-        AppLogger.warn(
-          'WalletRepository',
-          'Mnemonic for $seedPhraseId not erased: ${_errorLabel(e)}',
-        );
-      }
+      await _deleteSecret(
+        'mnemonic',
+        () => _storage.deleteMnemonicForSeedPhrase(seedPhraseId),
+      );
     }
 
     for (final accountId in prunedAccountIds) {
@@ -1514,7 +1683,7 @@ class WalletRepository {
     if (walletType == WalletType.importedKey ||
         walletType == WalletType.social) {
       await _deleteSecret(
-        'private key for ${row.id}',
+        'private key',
         () => _storage.deletePrivateKey(row.id),
       );
     }
@@ -1522,14 +1691,14 @@ class WalletRepository {
     // Delete Ledger device ID for hardware wallets
     if (walletType == WalletType.ledger) {
       await _deleteSecret(
-        'ledger device id for ${row.id}',
+        'Ledger device identifier',
         () => _storage.deleteLedgerDeviceId(row.id),
       );
     }
 
     // Delete wallet-sig cookie
     await _deleteSecret(
-      'wallet-sig cookie for ${row.id}',
+      'wallet authentication cookie',
       () => _storage.deleteWalletSigCookie(address),
     );
   }
@@ -1537,27 +1706,28 @@ class WalletRepository {
   /// Run one post-commit secret delete, logging and continuing on failure.
   /// See [_deleteWalletData] for why a failure here is not the caller's.
   ///
-  /// Reported through [AppLogger]: a swallowed erase leaves key material on
-  /// the device that nothing else ever mentions. Not `debugPrint` — that line
-  /// survives into release, where it reaches logcat/OSLog, and it would carry
-  /// the exception's own message, which can quote the item.
+  /// Reported through [AppLogger.error] and [SentryService]: a swallowed erase
+  /// leaves key material on the device that nothing else ever mentions. The
+  /// material category is deliberately generic; wallet ids, addresses and the
+  /// platform exception message never enter either diagnostic path.
   Future<void> _deleteSecret(
     String what,
     Future<void> Function() delete,
   ) async {
     try {
       await delete();
-    } catch (e) {
-      AppLogger.warn('WalletRepository', '$what not erased: ${_errorLabel(e)}');
+    } catch (e, stackTrace) {
+      final message = 'Stored $what could not be erased after wallet removal';
+      AppLogger.error('WalletRepository', message, e, stackTrace);
+      unawaited(
+        SentryService.captureMessage(
+          message,
+          level: SentryLevel.error,
+          extras: {'materialKind': what, 'errorType': e.runtimeType.toString()},
+        ),
+      );
     }
   }
-
-  /// A log-safe label for a failed secret delete: what went wrong, never what
-  /// it went wrong on. The platform code (`delete_failed`, a Keychain status)
-  /// is the diagnostic part; the exception's message can quote the item.
-  static String _errorLabel(Object e) => e is PlatformException
-      ? 'PlatformException(${e.code})'
-      : e.runtimeType.toString();
 
   // ---------------------------------------------------------------------------
   // Delete
@@ -1673,8 +1843,10 @@ class WalletRepository {
   /// snapshot is filtered by the same ids, so removal paths call this
   /// **before** they delete anything (graph-first): the graph write is the
   /// commit point, and a failure there throws [GraphSyncException] with
-  /// nothing removed. Plain syncs keep the old swallow-and-log behaviour —
-  /// a failed refresh just means the next mutation writes the same content.
+  /// nothing removed. Additive key and wallet mutations pass [failOnError]
+  /// too: they cannot report success until the graph durably indexes the new
+  /// recovery material. Cosmetic refreshes keep the swallow-and-log behaviour
+  /// because the previously stored graph remains valid.
   ///
   /// The written `selectedWalletId` is always one of the wallets in the same
   /// write, or null. A removal prunes the active wallet and the graph would
@@ -1688,6 +1860,7 @@ class WalletRepository {
     Set<String> removedWalletIds = const {},
     Set<String> removedAccountIds = const {},
     String? replacementSelectedWalletId,
+    bool failOnError = false,
   }) async {
     final pruning =
         removedSeedPhraseIds.isNotEmpty ||
@@ -1721,6 +1894,7 @@ class WalletRepository {
               'id': a.id,
               'seedPhraseId': a.seedPhraseId,
               'derivationIndex': a.derivationIndex,
+              'masterFingerprint': a.masterFingerprint,
               'kind': a.kind,
               'name': a.name,
               'avatarSeed': a.avatarSeed,
@@ -1739,6 +1913,7 @@ class WalletRepository {
               'seedPhraseId': w.seedPhraseId,
               'derivationIndex': w.derivationIndex,
               'derivationScheme': w.derivationScheme?.name,
+              'masterFingerprint': w.masterFingerprint,
               'socialProvider': w.socialProvider,
               'chain': w.chain,
               'sortIndex': w.sortIndex,
@@ -1776,8 +1951,8 @@ class WalletRepository {
 
       await _storage.storeAccountGraph(jsonEncode(graph));
     } catch (e) {
-      if (pruning) throw GraphSyncException(e);
-      debugPrint('[WalletRepository] Failed to sync wallet graph: $e');
+      if (pruning || failOnError) throw GraphSyncException(e);
+      AppLogger.error('WalletRepository', 'Failed to sync wallet graph', e);
     }
   }
 
@@ -1795,7 +1970,13 @@ class WalletRepository {
     try {
       return jsonDecode(json) as Map<String, dynamic>;
     } catch (e) {
-      debugPrint('[WalletRepository] Stored wallet graph is unreadable: $e');
+      // The error type only: a FormatException's message quotes the JSON it
+      // failed on, and the graph names every wallet, account and address.
+      AppLogger.error(
+        'WalletRepository',
+        'Stored wallet graph is unreadable',
+        e,
+      );
       return null;
     }
   }
@@ -1873,11 +2054,16 @@ class WalletRepository {
   /// Find-or-create the `seed` account for a (seedPhrase, derivationIndex) pair.
   /// HD wallets sharing a derivation index — across chains — share one account.
   /// A newly created account draws the next global account number.
-  Future<String> _ensureSeedAccount(String seedPhraseId, int index) async {
+  Future<String> _ensureSeedAccount(
+    String seedPhraseId,
+    int index, {
+    String? name,
+  }) async {
     final existing = await _db.getSeedAccount(seedPhraseId, index);
     return existing?.id ??
         await _createAccount(
           kind: AccountKind.seed,
+          name: name,
           seedPhraseId: seedPhraseId,
           derivationIndex: index,
         );
@@ -1887,11 +2073,12 @@ class WalletRepository {
   /// each imported index becomes its own account (named `Account NN` from the
   /// global counter, like every other account). Solana wallets sharing an
   /// index — standard, legacy, root — share one account.
-  Future<String> _ensureHardwareAccount(int index) async {
+  Future<String> _ensureHardwareAccount(int index, {String? name}) async {
     final existing = await _db.getHardwareAccountByIndex(index);
     return existing?.id ??
         await _createAccount(
           kind: AccountKind.hardware,
+          name: name,
           derivationIndex: index,
         );
   }
@@ -1901,12 +2088,31 @@ class WalletRepository {
   /// reason [AccountKind.seedVault] records: hardware accounts are keyed by
   /// index alone, so one kind for both devices would merge a Ledger and a
   /// Seed Vault imported at the same index into a single account.
-  Future<String> _ensureSeedVaultAccount(int index) async {
+  Future<String> _ensureSeedVaultAccount(int index, {String? name}) async {
     final existing = await _db.getSeedVaultAccountByIndex(index);
     return existing?.id ??
         await _createAccount(
           kind: AccountKind.seedVault,
+          name: name,
           derivationIndex: index,
+        );
+  }
+
+  /// Find-or-create the `keystone` account for one device's derivation index.
+  /// Keyed on [masterFingerprint] as well as [index] — see
+  /// [AccountKind.keystone].
+  Future<String> _ensureKeystoneAccount(
+    int masterFingerprint,
+    int index, {
+    String? name,
+  }) async {
+    final existing = await _db.getKeystoneAccount(masterFingerprint, index);
+    return existing?.id ??
+        await _createAccount(
+          kind: AccountKind.keystone,
+          name: name,
+          derivationIndex: index,
+          masterFingerprint: masterFingerprint,
         );
   }
 
@@ -1924,6 +2130,7 @@ class WalletRepository {
     String? name,
     String? seedPhraseId,
     int? derivationIndex,
+    int? masterFingerprint,
     String? avatarSeed,
   }) async {
     final number = await _allocateAccountNumber();
@@ -1937,6 +2144,7 @@ class WalletRepository {
         id: id,
         seedPhraseId: Value(seedPhraseId),
         derivationIndex: Value(derivationIndex),
+        masterFingerprint: Value(masterFingerprint),
         kind: kind.toDbString(),
         name: resolvedName,
         avatarSeed: (avatarSeed == null || avatarSeed.isEmpty)
@@ -2026,7 +2234,7 @@ class WalletRepository {
     try {
       graph = jsonDecode(graphJson) as Map<String, dynamic>;
     } catch (e) {
-      debugPrint('[WalletRepository] Failed to restore from graph: $e');
+      AppLogger.error('WalletRepository', 'Failed to restore from graph', e);
       return RestoreFailed(e);
     }
 
@@ -2048,7 +2256,7 @@ class WalletRepository {
         wallets: (graph['wallets'] as List<dynamic>? ?? const []).length,
       );
     } catch (e) {
-      debugPrint('[WalletRepository] Failed to restore from graph: $e');
+      AppLogger.error('WalletRepository', 'Failed to restore from graph', e);
       return RestoreFailed(e);
     }
   }
@@ -2267,6 +2475,9 @@ class WalletRepository {
           id: a['id'] as String,
           seedPhraseId: Value(a['seedPhraseId'] as String?),
           derivationIndex: Value(a['derivationIndex'] as int?),
+          // Absent from graphs written before Keystone, which is the right
+          // answer for every account they hold.
+          masterFingerprint: Value(a['masterFingerprint'] as int?),
           kind: a['kind'] as String,
           name: a['name'] as String,
           avatarSeed: a['avatarSeed'] as String,
@@ -2292,6 +2503,7 @@ class WalletRepository {
           walletType: w['walletType'] as String,
           derivationIndex: Value(w['derivationIndex'] as int?),
           derivationScheme: Value(w['derivationScheme'] as String?),
+          masterFingerprint: Value(w['masterFingerprint'] as int?),
           socialProvider: Value(w['socialProvider'] as String?),
           chain: Value(w['chain'] as String? ?? 'solana'),
           createdAt: _nowSeconds(),
@@ -2531,7 +2743,7 @@ class WalletRepository {
         // A malformed entry (or a row write that fails) must not cost the
         // entries after it their restore, nor the caller its counts.
         skipped++;
-        debugPrint('[WalletRepository] Dormant seed $id skipped: $e');
+        AppLogger.error('WalletRepository', 'Dormant seed entry skipped', e);
       }
     }
 
@@ -2604,7 +2816,7 @@ class WalletRepository {
         walletsRestored++;
       } catch (e) {
         skipped++;
-        debugPrint('[WalletRepository] Dormant wallet $id skipped: $e');
+        AppLogger.error('WalletRepository', 'Dormant wallet entry skipped', e);
       }
     }
 
@@ -2637,7 +2849,11 @@ class WalletRepository {
             // Pruned but not erased: the graph no longer indexes it, so the
             // count is what says this launch left something behind.
             skipped++;
-            debugPrint('[WalletRepository] Dormant seed $id not erased: $e');
+            AppLogger.error(
+              'WalletRepository',
+              'Duplicate dormant seed not erased',
+              e,
+            );
           }
         }
         for (final id in duplicateWalletIds) {
@@ -2648,7 +2864,11 @@ class WalletRepository {
             duplicates++;
           } catch (e) {
             skipped++;
-            debugPrint('[WalletRepository] Dormant key $id not erased: $e');
+            AppLogger.error(
+              'WalletRepository',
+              'Duplicate dormant key not erased',
+              e,
+            );
           }
         }
       }
@@ -2672,7 +2892,13 @@ class WalletRepository {
     try {
       return jsonDecode(json) as Map<String, dynamic>;
     } catch (e) {
-      debugPrint('[WalletRepository] Stored wallet graph is unreadable: $e');
+      // The error type only: a FormatException's message quotes the JSON it
+      // failed on, and the graph names every wallet, account and address.
+      AppLogger.error(
+        'WalletRepository',
+        'Stored wallet graph is unreadable',
+        e,
+      );
       return null;
     }
   }
@@ -2731,6 +2957,7 @@ class WalletRepository {
     seedPhraseId: row.seedPhraseId,
     derivationIndex: row.derivationIndex,
     derivationScheme: _parseDerivationScheme(row.derivationScheme),
+    masterFingerprint: row.masterFingerprint,
     socialProvider: row.socialProvider,
     sortIndex: row.sortIndex,
   );

@@ -60,6 +60,12 @@ class Config {
   /// | [storeCdnBaseUrl] | `/store/dev` | `/store` |
   /// | `explorerUrl` | `?cluster=devnet` appended | no cluster parameter |
   ///
+  /// It also scopes the in-app browser's first-party UI channel
+  /// (`isFirstPartyOrigin`): a production build grants it to the web app's
+  /// built-in hosts only; staging adds the web app's pre-release hosts; and a
+  /// development build adds local and private `https` hosts as well, so a
+  /// developer can point it at their own copy of the web app.
+  ///
   /// 🛑 [web3AuthNetwork] is **part of the social key derivation**: the same
   /// social account yields a *different address* on each network. That is why
   /// an unset variable must not silently pick a network — a build that guessed
@@ -296,6 +302,36 @@ class Config {
       const String.fromEnvironment('ASSET_CDN_BASE_URL'),
     ),
   );
+
+  /// Full URL of the published Solana program-label list: the names the
+  /// signing review shows beside the programs a transaction calls.
+  ///
+  /// Empty (the default) disables the fetch. Program names then fall back to
+  /// addresses; known Solana instruction names remain available locally.
+  static String get programLabelsUrl => _env(
+    'PROGRAM_LABELS_URL',
+    const String.fromEnvironment('PROGRAM_LABELS_URL'),
+  ).trim();
+
+  /// Reown Cloud project id for WalletConnect, created as a wallet project.
+  ///
+  /// Empty (the default) hides WalletConnect entirely: no entry point shows,
+  /// a scanned or deep-linked `wc:` URI only shows a notice that WalletConnect
+  /// is not available, and no relay connection is ever opened.
+  static String get walletConnectProjectId => _env(
+    'WALLETCONNECT_PROJECT_ID',
+    const String.fromEnvironment('WALLETCONNECT_PROJECT_ID'),
+  ).trim();
+
+  /// Marks a build that is not a release, e.g. `preview dev@1a2b3c4d`.
+  ///
+  /// Set by CI for a pre-release build of a named branch. The store version
+  /// cannot carry it, because App Store Connect accepts integers only.
+  /// The app shows it beside the version and attaches it to bug and content
+  /// reports, so a tester's report names the commit it came from. Empty on
+  /// every release build.
+  static String get buildLabel =>
+      _env('BUILD_LABEL', const String.fromEnvironment('BUILD_LABEL')).trim();
 
   /// Base URL for the rewards store metadata CDN. Devnet (development/staging
   /// backends) serves under `/store/dev`; production under `/store`.

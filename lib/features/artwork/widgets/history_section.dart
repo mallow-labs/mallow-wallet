@@ -293,6 +293,7 @@ class _ActivityRow extends StatelessWidget {
       amount: _amount,
       amountWidget: _amountWidget,
       age: event.date == null ? null : formatLastUpdated(event.date),
+      transactionHash: event.txId,
     );
   }
 }

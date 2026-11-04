@@ -215,9 +215,9 @@ class _DrawerHeader extends StatelessWidget {
               const SizedBox(width: 6),
               // Switch — toggles the Wallets/Profiles account list. Reads
               // "Close" while that list is showing.
-              _SwitchPill(
+              SwitchPill(
                 onTap: onToggleMode,
-                showingAccounts: showingAccounts,
+                label: showingAccounts ? 'Close' : 'Switch',
               ),
             ],
           ),
@@ -228,36 +228,5 @@ class _DrawerHeader extends StatelessWidget {
 
   void _openReceive(BuildContext context) {
     showSessionReceiveSheet(context);
-  }
-}
-
-/// Outlined pill that toggles the account switcher list.
-class _SwitchPill extends StatelessWidget {
-  const _SwitchPill({required this.onTap, required this.showingAccounts});
-
-  final VoidCallback onTap;
-  final bool showingAccounts;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.mallowColors;
-    return TapTargetExpander(
-      child: GestureDetector(
-        onTap: onTap,
-        behavior: HitTestBehavior.opaque,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          decoration: BoxDecoration(
-            color: colors.bgSurface,
-            border: Border.all(color: colors.accent),
-            borderRadius: BorderRadius.circular(MallowTheme.radiusFull),
-          ),
-          child: Text(
-            showingAccounts ? 'Close' : 'Switch',
-            style: MallowTheme.uiCaption.copyWith(color: colors.textPrimary),
-          ),
-        ),
-      ),
-    );
   }
 }

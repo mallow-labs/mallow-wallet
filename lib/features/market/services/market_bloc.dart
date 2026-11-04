@@ -28,12 +28,14 @@ import '../../artwork/services/artwork_permission_service.dart';
 import '../../curations/services/curation_attribution_store.dart';
 import '../../portfolio/services/portfolio_refresh_signal.dart';
 import '../../sale/services/direct_proceeds.dart';
+import '../../sell/services/trade_eligibility.dart';
 import '../../sale/services/marketplace_config_service.dart';
 import '../../sale/services/proceeds_calculator.dart'
     show computeProceedsSplits, kMallowFeeAddress;
 import '../models/market_price.dart';
 import 'can_accept_offer.dart';
 import 'edition_buy_routing.dart';
+import 'token_refund_rent.dart';
 
 export '../../../core/services/transaction_flow_state.dart';
 export '../models/market_price.dart' show MarketPrice;
@@ -121,6 +123,26 @@ sealed class MarketEvent with _$MarketEvent {
     MarketPrice? amount,
   }) = MarketCancelOffer;
 
+  /// Withdraw the connected bidder's complete parked balance for a currency.
+  const factory MarketEvent.withdrawBidRefund({
+    required MarketPrice amount,
+    String? destination,
+  }) = MarketWithdrawBidRefund;
+
+  const factory MarketEvent.releaseSolBidRefund({
+    required String bidder,
+    required MarketPrice amount,
+  }) = MarketReleaseSolBidRefund;
+
+  const factory MarketEvent.releaseBidRefund({
+    required String bidder,
+    required MarketPrice amount,
+    String? destination,
+  }) = MarketReleaseBidRefund;
+
+  const factory MarketEvent.recoverBidRefundDeposit({required String claim}) =
+      MarketRecoverBidRefundDeposit;
+
   /// Accept [buyer]'s offer on [mintAccount] as the owner. Builds the
   /// seller-signed `acceptOffer` (or `delistAndAcceptOffer`) tx via
   /// `POST /v2/tx/offers/accept`. [amount] is the offer's value in
@@ -150,7 +172,7 @@ sealed class MarketEvent with _$MarketEvent {
   }) = MarketSetAcceptOfferSplit;
 
   /// Cancel a buy-now listing (delistNft / delistEditions branched
-  /// server-side). Phase 4.
+  /// server-side).
   const factory MarketEvent.cancelListing({required String mintAccount}) =
       MarketCancelListing;
 
@@ -163,7 +185,7 @@ sealed class MarketEvent with _$MarketEvent {
   }) = MarketUpdateListing;
 
   /// Cancel an active auction (no bids) OR reclaim NFT after a no-bid
-  /// expiry. Phase 5. Both dispatch the same on-chain `cancelAuction` ix;
+  /// expiry. Both dispatch the same on-chain `cancelAuction` ix;
   /// [reclaim] only picks the user-facing copy — `true` for the post-expiry
   /// reclaim ("Reclaim NFT"), `false` for cancelling a still-active auction.
   const factory MarketEvent.cancelAuction({
@@ -214,17 +236,22 @@ sealed class MarketEvent with _$MarketEvent {
 /// accept-offer), all in the escrowed amount's currency ([currencyMint]) as raw
 /// atomic units. Populated only when the connected wallet is the seller; the
 /// confirmation sheet renders it as an earnings headline plus a "Fee details"
-/// disclosure (gross − mallow fee − royalties).
+/// disclosure (gross − mallow fee − other deductions).
 ///
 /// [grossBidRaw] / [currencyMint] are known at prep time. The amounts the
 /// seller actually nets ([sellerEarningsRaw], [marketFeeRaw],
 /// [royaltiesToOthersRaw]) are derived from the tx **simulation** — fee bps
 /// can't be re-derived reliably client-side (discount tokens, stale
-/// listingFees) — so they stay null until [isResolved] flips.
+/// listingFees). When simulation cannot answer, arithmetic resolves them with
+/// [isEstimate] set if seller-funded creator rent could lower the native payout.
 ///
-/// [royaltiesToOthersRaw] is `gross − mallowFee − earnings`: it's whatever
-/// reaches OTHER creators. Any royalty the seller earns as a creator lands in
-/// the seller's own token account, so it's already inside [sellerEarningsRaw].
+/// [royaltiesToOthersRaw] is `gross − mallowFee − earnings`: it covers
+/// other creator payouts, seller-funded native account rent and protocol
+/// fees charged to the seller. The existing deltas do not separate these costs.
+/// [hasOtherCreatorPayouts] comes from the arithmetic split, so a protocol fee
+/// alone cannot imply creator rent. Any royalty the seller earns as a creator
+/// lands in the seller's own token
+/// account, so it's already inside [sellerEarningsRaw].
 class SettleProceeds extends Equatable {
   const SettleProceeds({
     required this.grossBidRaw,
@@ -232,6 +259,8 @@ class SettleProceeds extends Equatable {
     this.sellerEarningsRaw,
     this.marketFeeRaw,
     this.royaltiesToOthersRaw,
+    this.hasOtherCreatorPayouts,
+    this.isEstimate = false,
   });
 
   final int grossBidRaw;
@@ -240,19 +269,35 @@ class SettleProceeds extends Equatable {
   final int? marketFeeRaw;
   final int? royaltiesToOthersRaw;
 
-  /// True once the simulation has resolved the actual on-chain amounts.
+  /// Whether the split pays another creator; null until royalties resolve.
+  final bool? hasOtherCreatorPayouts;
+
+  /// Arithmetic native proceeds can be lower after funding creator wallet rent.
+  final bool isEstimate;
+
+  bool get creatorRentMayApply =>
+      (currencyMint ?? solMint) == solMint &&
+      hasOtherCreatorPayouts == true &&
+      (royaltiesToOthersRaw ?? 0) > 0;
+
+  /// True once simulation or the arithmetic fallback has resolved the amounts.
   bool get isResolved => sellerEarningsRaw != null;
 
   SettleProceeds copyWith({
     int? sellerEarningsRaw,
     int? marketFeeRaw,
     int? royaltiesToOthersRaw,
+    bool? hasOtherCreatorPayouts,
+    bool? isEstimate,
   }) => SettleProceeds(
     grossBidRaw: grossBidRaw,
     currencyMint: currencyMint,
     sellerEarningsRaw: sellerEarningsRaw ?? this.sellerEarningsRaw,
     marketFeeRaw: marketFeeRaw ?? this.marketFeeRaw,
     royaltiesToOthersRaw: royaltiesToOthersRaw ?? this.royaltiesToOthersRaw,
+    hasOtherCreatorPayouts:
+        hasOtherCreatorPayouts ?? this.hasOtherCreatorPayouts,
+    isEstimate: isEstimate ?? this.isEstimate,
   );
 
   @override
@@ -262,6 +307,8 @@ class SettleProceeds extends Equatable {
     sellerEarningsRaw,
     marketFeeRaw,
     royaltiesToOthersRaw,
+    hasOtherCreatorPayouts,
+    isEstimate,
   ];
 }
 
@@ -328,6 +375,7 @@ class MarketPrepData extends Equatable {
     this.isSimulating = false,
     this.simulationResult,
     this.simulatedPayerLamportsDelta,
+    this.tokenAccountRentLamports,
   });
 
   final List<String> transactionsBase64;
@@ -428,6 +476,10 @@ class MarketPrepData extends Equatable {
   /// fee. Already includes the deducted tx fee.
   final int? simulatedPayerLamportsDelta;
 
+  /// Payer-funded token account rent, excluding every transaction fee.
+  /// Set only after a successful token refund simulation.
+  final int? tokenAccountRentLamports;
+
   MarketPrepData copyWith({
     List<String>? transactionsBase64,
     String? mintAccount,
@@ -446,6 +498,7 @@ class MarketPrepData extends Equatable {
     bool? isSimulating,
     Object? simulationResult = _sentinel,
     Object? simulatedPayerLamportsDelta = _sentinel,
+    Object? tokenAccountRentLamports = _sentinel,
   }) => MarketPrepData(
     transactionsBase64: transactionsBase64 ?? this.transactionsBase64,
     mintAccount: mintAccount ?? this.mintAccount,
@@ -471,6 +524,9 @@ class MarketPrepData extends Equatable {
         identical(simulatedPayerLamportsDelta, _sentinel)
         ? this.simulatedPayerLamportsDelta
         : simulatedPayerLamportsDelta as int?,
+    tokenAccountRentLamports: identical(tokenAccountRentLamports, _sentinel)
+        ? this.tokenAccountRentLamports
+        : tokenAccountRentLamports as int?,
   );
 
   @override
@@ -492,6 +548,7 @@ class MarketPrepData extends Equatable {
     isSimulating,
     simulationResult,
     simulatedPayerLamportsDelta,
+    tokenAccountRentLamports,
   ];
 }
 
@@ -579,6 +636,10 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     on<MarketPlaceBid>(_onPlaceBid);
     on<MarketMakeOfferV2>(_onMakeOfferV2);
     on<MarketCancelOffer>(_onCancelOffer);
+    on<MarketWithdrawBidRefund>(_onWithdrawBidRefund);
+    on<MarketRecoverBidRefundDeposit>(_onRecoverBidRefundDeposit);
+    on<MarketReleaseSolBidRefund>(_onReleaseSolBidRefund);
+    on<MarketReleaseBidRefund>(_onReleaseBidRefund);
     on<MarketAcceptOffer>(_onAcceptOffer);
     on<MarketSetAcceptOfferSplit>(_onSetAcceptOfferSplit);
     on<MarketCancelListing>(_onCancelListing);
@@ -826,6 +887,8 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
           // this wallet never sends, so nothing here can reach it. Name the
           // answer we got rather than `!` it: a null assertion would turn "the
           // server replied with a swap we can't perform" into an opaque crash.
+          // Creator rent is funded from seller proceeds. Legacy rent quotes
+          // are informational and never increase the buyer's listing price.
           final result = response.result;
           final tx = result.tx;
           if (tx == null) {
@@ -1020,6 +1083,116 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     );
   }
 
+  Future<void> _onWithdrawBidRefund(
+    MarketWithdrawBidRefund event,
+    Emitter<MarketState> emit,
+  ) => _flow.prepare(
+    sink: _sink(emit),
+    tracker: _txTracker,
+    build: (me) async {
+      final response = await _apiV2.withdrawBidRefundTx(
+        WithdrawBidRefundTxRequest(
+          bidder: me,
+          mint: event.amount.effectiveCurrencyMint,
+          // Refund authorization treats this as a return to the bidder.
+          destination: event.amount.effectiveCurrencyMint == solMint
+              ? null
+              : event.destination,
+          targetPriorityFeeLamports: _feeConfig.priorityFeeLamports,
+        ),
+      );
+      return [response.result.tx];
+    },
+    toPrep: (txs, _) => _prep(
+      txs,
+      mintAccount: event.amount.effectiveCurrencyMint,
+      actionType: 'withdraw-bid-refund',
+      flow: AppFlow.auctionRefundWithdraw,
+      totalCost: event.amount,
+    ),
+    errorPrefix: 'Failed to prepare bid refund withdrawal',
+  );
+
+  Future<void> _onReleaseSolBidRefund(
+    MarketReleaseSolBidRefund event,
+    Emitter<MarketState> emit,
+  ) => _flow.prepare(
+    sink: _sink(emit),
+    tracker: _txTracker,
+    build: (me) async {
+      final response = await _apiV2.pushSolBidRefundTx(
+        PushSolBidRefundTxRequest(
+          payer: me,
+          bidder: event.bidder,
+          targetPriorityFeeLamports: _feeConfig.priorityFeeLamports,
+        ),
+      );
+      return [response.result.tx];
+    },
+    toPrep: (txs, _) => _prep(
+      txs,
+      mintAccount: event.bidder,
+      actionType: 'release-sol-bid-refund',
+      flow: AppFlow.auctionRefundWithdraw,
+      totalCost: event.amount,
+    ),
+    errorPrefix: 'Failed to release SOL refund',
+  );
+
+  Future<void> _onReleaseBidRefund(
+    MarketReleaseBidRefund event,
+    Emitter<MarketState> emit,
+  ) => _flow.prepare(
+    sink: _sink(emit),
+    tracker: _txTracker,
+    build: (me) async {
+      final response = await _apiV2.pushBidRefundTx(
+        PushBidRefundTxRequest(
+          payer: me,
+          bidder: event.bidder,
+          mint: event.amount.effectiveCurrencyMint,
+          destination: event.destination,
+          targetPriorityFeeLamports: _feeConfig.priorityFeeLamports,
+        ),
+      );
+      return [response.result.tx];
+    },
+    toPrep: (txs, _) => _prep(
+      txs,
+      mintAccount: event.bidder,
+      actionType: 'release-bid-refund',
+      flow: AppFlow.auctionRefundWithdraw,
+      totalCost: event.amount,
+    ),
+    errorPrefix: 'Failed to release token refund',
+  );
+
+  Future<void> _onRecoverBidRefundDeposit(
+    MarketRecoverBidRefundDeposit event,
+    Emitter<MarketState> emit,
+  ) => _flow.prepare(
+    sink: _sink(emit),
+    tracker: _txTracker,
+    build: (me) async {
+      final response = await _apiV2.closeBidRefundClaimTx(
+        CloseBidRefundClaimTxRequest(
+          rentPayer: me,
+          claim: event.claim,
+          targetPriorityFeeLamports: _feeConfig.priorityFeeLamports,
+        ),
+      );
+      return [response.result.tx];
+    },
+    toPrep: (txs, _) => _prep(
+      txs,
+      mintAccount: event.claim,
+      actionType: 'recover-bid-refund-deposit',
+      flow: AppFlow.auctionRefundWithdraw,
+      totalCost: MarketPrice.zero(),
+    ),
+    errorPrefix: 'Failed to prepare deposit recovery',
+  );
+
   Future<void> _onAcceptOffer(
     MarketAcceptOffer event,
     Emitter<MarketState> emit,
@@ -1037,8 +1210,8 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     // buyer≠seller nor the frozen bit. Same posture as the burn gate: refuse
     // here, with the reason, rather than surface a raw builder/simulation
     // error.
-    final asset = await _resolveAcceptOfferGate(event, emit);
-    if (asset == null) return;
+    final checked = await _resolveAcceptOfferGate(event, emit);
+    if (checked == null) return;
     // Initial prepare: a build failure is terminal — the sheet's pre-confirm
     // listener pops it and the host surfaces the error — so there's no prior
     // ready tx to fall back to.
@@ -1051,11 +1224,12 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
       // where no UI dispatcher does.
       simulateOnReady: false,
       // Reuse the DAS read the gate already paid for.
-      asset: asset,
+      asset: checked.asset,
+      collection: checked.collection,
     );
   }
 
-  /// Run the accept-offer eligibility gate. Returns the fetched [DigitalAsset]
+  /// Run the accept-offer eligibility gate. Returns the asset and collection
   /// when the accept may proceed (so the prepare doesn't re-fetch it), or null
   /// after emitting the refusal / lookup failure.
   ///
@@ -1069,7 +1243,8 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
   /// value, so a flaky network never invents a refusal. The DAS read is the
   /// exception: without an owner there is nothing to gate on, so it fails
   /// closed exactly as the burn gate does.
-  Future<DigitalAsset?> _resolveAcceptOfferGate(
+  Future<({DigitalAsset asset, DigitalAsset? collection})?>
+  _resolveAcceptOfferGate(
     MarketAcceptOffer event,
     Emitter<MarketState> emit,
   ) async {
@@ -1092,6 +1267,25 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     }
     final asset = assetResult.valueOrNull!;
 
+    DigitalAsset? collection;
+    if (asset.tokenStandard == TokenStandard.cnftV2) {
+      if (asset.collectionKey != null) {
+        try {
+          collection = await _dasApi.getAsset(asset.collectionKey!);
+        } catch (_) {
+          // A missing collection cannot prove escrow eligibility.
+        }
+      }
+      final eligibility = resolveTradeEligibility(
+        asset: asset,
+        collection: collection,
+      );
+      if (eligibility != TradeEligibility.eligible) {
+        emit(TxFlowFailure(AppFailure.validation(eligibility.message!)));
+        return null;
+      }
+    }
+
     final hasListing = listingRead.status == OnChainReadStatus.present;
     final hasAuction = auctionRead.status == OnChainReadStatus.present;
     // Only the mallow market/auction programs are readable this way, so this
@@ -1103,6 +1297,19 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
         : hasListing
         ? ListingType.buyNow
         : ListingType.unlisted;
+
+    // Compressed listings hold the leaf in escrow. The accept builder needs
+    // a fresh proof after cancellation returns ownership to the seller.
+    if ((asset.tokenStandard == TokenStandard.cnft ||
+            asset.tokenStandard == TokenStandard.cnftV2) &&
+        listingRead.status != OnChainReadStatus.absent &&
+        asset.owner != me) {
+      final message = listingRead.status == OnChainReadStatus.unknown
+          ? 'Could not verify the listing. Try again before accepting the offer.'
+          : 'Cancel the listing before accepting an offer.';
+      emit(TxFlowFailure(AppFailure.validation(message)));
+      return null;
+    }
 
     final refusal = acceptOfferRefusal(
       isUserOwner: asset.owner == me,
@@ -1121,7 +1328,7 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
       emit(TxFlowFailure(AppFailure.unknown(refusal.message)));
       return null;
     }
-    return asset;
+    return (asset: asset, collection: collection);
   }
 
   /// Re-prepare the accept-offer with a flipped split when the confirmation
@@ -1171,21 +1378,26 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     required MarketPrepData? previousPrep,
     required bool simulateOnReady,
     DigitalAsset? asset,
+    DigitalAsset? collection,
   }) async {
     final args = _pendingAcceptArgs;
     if (args == null) return;
 
-    // R1: leave TxFlowReady *synchronously* — before the DAS/proceeds awaits —
+    // Leave TxFlowReady *synchronously* — before the DAS/proceeds awaits —
     // so a Confirm tap during a re-prepare fails [_onConfirmAndSign]'s
     // TxFlowReady guard and can't sign the pre-toggle tx. Bumping the
-    // generation here also orders concurrent prepares (R2): an older prepare
+    // generation here also orders concurrent prepares: an older prepare
     // resuming past an await sees a newer [_acceptPrepGen] and aborts.
     final gen = ++_acceptPrepGen;
     _emitFlow(emit, const TxFlowPreparing<MarketPrepData, MarketSuccessData>());
 
     final (proceedsResult, gate) = await (
       _resolveProceedsInputs(args.amount),
-      _resolveDirectProceedsGate(args.mint, asset: asset),
+      _resolveDirectProceedsGate(
+        args.mint,
+        asset: asset,
+        collection: collection,
+      ),
     ).wait;
     if (gen != _acceptPrepGen) return; // superseded by a newer toggle.
     final (proceeds, simInputs) = proceedsResult;
@@ -1212,7 +1424,7 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
       onReady: (prep) {
         if (gen != _acceptPrepGen) return;
         emit(TxFlowReady<MarketPrepData, MarketSuccessData>(prep));
-        // R3: on a toggle re-prepare the freshly rebuilt tx carries no
+        // On a toggle re-prepare the freshly rebuilt tx carries no
         // simulation and no UI dispatcher re-fires simulate — so drive it from
         // the bloc. The "You'll receive" breakdown resolves in place. (The
         // initial prepare leaves this to the confirmation sheet's own mount.)
@@ -1223,7 +1435,7 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
       onSuccess: (_, _) {},
       onFailure: (failure) {
         if (gen != _acceptPrepGen) return;
-        // R5: a toggle re-prepare that fails must not pop the sheet — revert to
+        // A toggle re-prepare that fails must not pop the sheet — revert to
         // the previous signable ready (previous split + checkbox value). The
         // initial prepare (previousPrep == null) still fails terminally.
         //
@@ -1321,6 +1533,7 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
   Future<_ProceedsGate> _resolveDirectProceedsGate(
     String mint, {
     DigitalAsset? asset,
+    DigitalAsset? collection,
   }) async {
     const none = (
       showOption: false,
@@ -1332,11 +1545,11 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     if (seller == null) return none;
     try {
       final resolved = asset ?? await _dasApi.getAsset(mint);
-      // Only grouped Core assets classify off / read royalties from the parent
-      // collection; token-metadata standards read everything from the asset, so
-      // never pay for the extra round-trip. Mirrors `resolveListingContext`.
-      DigitalAsset? collection;
-      if (resolved.tokenStandard == TokenStandard.core &&
+      // Reuse the v2 collection from eligibility; other callers fetch it once
+      // for Core classification or Bubblegum v2 royalty inheritance.
+      if (collection == null &&
+          (resolved.tokenStandard == TokenStandard.core ||
+              resolved.tokenStandard == TokenStandard.cnftV2) &&
           resolved.collectionKey != null) {
         try {
           collection = await _dasApi.getAsset(resolved.collectionKey!);
@@ -1371,7 +1584,8 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
   /// Splits are keyed by address, so any royalty the seller earns *as a
   /// creator* is already inside their row — the same accounting the simulated
   /// path produces (the payout lands in the seller's own account), which is why
-  /// royalties-to-others stays `gross − fee − earnings`.
+  /// royalties-to-others stays `gross − fee − earnings`. Native estimates omit
+  /// creator wallet rent and must be qualified before confirmation.
   ///
   /// Fee bps come from the on-chain marketplace config, matching webapp
   /// `marketMarketplaceConfig.feeConfig`. That config read never throws (it
@@ -1412,6 +1626,14 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
       sellerEarningsRaw: earnings,
       marketFeeRaw: marketFee,
       royaltiesToOthersRaw: royaltiesToOthers < 0 ? 0 : royaltiesToOthers,
+      hasOtherCreatorPayouts: splits.any(
+        (split) =>
+            split.address != seller &&
+            split.address != kMallowFeeAddress &&
+            split.amountRaw > 0,
+      ),
+      isEstimate:
+          (base.currencyMint ?? solMint) == solMint && royaltiesToOthers > 0,
     );
   }
 
@@ -1659,21 +1881,13 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     }
     final asset = assetResult.valueOrNull!;
 
-    // The standards `/v2/tx/assets/burn` can actually build. This is a second
-    // gate behind [ArtworkPermissionService.canBurnAsset] (re-checked below),
-    // and the two disagreeing is a bug in itself: a standard the server burns
-    // fine but this set omits shows the user a Burn action that can only ever
-    // fail here. `cnft` was exactly that — the route has dispatched
-    // `TokenStandard::Cnft` to `build_cnft_burn_ixs` (Bubblegum `Burn` / V2
-    // `BurnV2`, leaf + proof + collection all resolved server-side off the same
-    // `{authority, asset, tokenStandard}` body) all along. Everything outside
-    // this set — `objkt`, the EVM standards — the route rejects with
-    // "token standard not supported by burn route", so refusing it here saves
-    // a round trip for a guaranteed 400.
+    // Keep the burn route's supported standards in sync with the permission
+    // gate. Leaf, proof and collection accounts are resolved server-side.
     const supported = {
       TokenStandard.nft,
       TokenStandard.pnft,
       TokenStandard.cnft,
+      TokenStandard.cnftV2,
       TokenStandard.core,
       TokenStandard.coreCollection,
     };
@@ -1691,7 +1905,8 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     // gained members or the asset been frozen since the sheet opened — and
     // failing here beats surfacing a raw simulation error later.
     DigitalAsset? collectionAsset;
-    if (asset.tokenStandard == TokenStandard.core &&
+    if ((asset.tokenStandard == TokenStandard.core ||
+            asset.tokenStandard == TokenStandard.cnftV2) &&
         asset.collectionKey != null) {
       try {
         collectionAsset = await _dasApi.getAsset(asset.collectionKey!);
@@ -1767,7 +1982,12 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
 
     final outflowMint = prep.totalCost.effectiveCurrencyMint;
     final outflowRaw = prep.totalCost.rawAmount;
-    final usdOutflow = outflowRaw == 0
+    final usdOutflow =
+        outflowRaw == 0 ||
+            prep.actionType == 'withdraw-bid-refund' ||
+            prep.actionType == 'release-sol-bid-refund' ||
+            prep.actionType == 'release-bid-refund' ||
+            prep.actionType == 'recover-bid-refund-deposit'
         ? 0.0
         : _priceService.usdValueOfRaw(outflowRaw, outflowMint);
 
@@ -1781,11 +2001,14 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
       // offer/bid, cancel/update→delist/relist, settle→sale) that the
       // artwork screen reads off `/byMint`, so gate the post-tx refresh on
       // the entry landing — otherwise the refetch races the entry-indexing
-      // lag and reads stale pre-action state. `burn` is the exception: it
-      // destroys the token and produces no marketplace entry, so it stays
-      // on the tx-level ack alone (gating it would poll a never-landing
-      // entry until the retries exhaust).
-      requireEntry: prep.actionType != 'burn',
+      // lag and reads stale pre-action state. Burn, currency refunds and
+      // deposit recovery use the transaction acknowledgement.
+      requireEntry:
+          prep.actionType != 'burn' &&
+          prep.actionType != 'withdraw-bid-refund' &&
+          prep.actionType != 'release-sol-bid-refund' &&
+          prep.actionType != 'release-bid-refund' &&
+          prep.actionType != 'recover-bid-refund-deposit',
       isClosed: () => isClosed,
       onIndexedAck: (sig, ok) =>
           add(MarketEvent.indexedAck(signature: sig, ok: ok)),
@@ -1845,11 +2068,16 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     if (_portfolioAffectingActions.contains(current.result.actionType)) {
       notifyPortfolioRefresh();
     }
-    // Every market action changes the price / listing badge that browse and
+    // Artwork market actions change the price / listing badge that browse and
     // list surfaces render for this mint (home rails, collection + curation
     // grids, profile grids). They aren't subscribed to the detail screen's
     // refetch, so without this they keep serving the pre-action price.
-    notifyArtworkEdited(current.result.mintAccount);
+    if (current.result.actionType != 'withdraw-bid-refund' &&
+        current.result.actionType != 'release-sol-bid-refund' &&
+        current.result.actionType != 'release-bid-refund' &&
+        current.result.actionType != 'recover-bid-refund-deposit') {
+      notifyArtworkEdited(current.result.mintAccount);
+    }
 
     // Honor a reset that was deferred while this success awaited its ack. The
     // `indexed` flip above is emitted first, so listeners (the artwork screen's
@@ -1910,6 +2138,7 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
           isSimulating: true,
           simulationResult: null,
           simulatedPayerLamportsDelta: null,
+          tokenAccountRentLamports: null,
         ),
       ),
     );
@@ -1931,12 +2160,50 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
       return;
     }
 
-    // Burns refund SOL (rent reclaim) and edition buys spend SOL on rent +
-    // protocol fees beyond the print fee — both need the payer's net lamport
-    // delta to show an accurate breakdown. Other buys/offers skip the extra
-    // pre-balance roundtrip.
+    if ((prep.actionType == 'withdraw-bid-refund' ||
+            prep.actionType == 'release-bid-refund') &&
+        prep.totalCost.effectiveCurrencyMint != solMint) {
+      final payer = _authService.currentAddress;
+      final rent = payer == null
+          ? null
+          : TokenRefundRent.decode(prep.transactionsBase64.first, payer);
+      Map<String, int> pre = const {};
+      if (rent != null && rent.associatedAccounts.isNotEmpty) {
+        try {
+          pre = await _rpcService.getAccountLamportsForAddresses(
+            rent.associatedAccounts,
+          );
+        } catch (_) {
+          // Still simulate; missing pre-state leaves the rent quote unknown.
+        }
+      }
+      final result = await _rpcService.simulateEncodedTransaction(
+        prep.transactionsBase64.first,
+        inspectAccounts: rent?.associatedAccounts ?? const [],
+      );
+      final post = state;
+      if (post is! TxFlowReady<MarketPrepData, MarketSuccessData>) return;
+      emit(
+        TxFlowReady(
+          post.data.copyWith(
+            isSimulating: false,
+            simulationResult: result,
+            tokenAccountRentLamports: result.success
+                ? rent?.resolve(pre, result.inspectedAccountLamports)
+                : null,
+          ),
+        ),
+      );
+      return;
+    }
+
+    // Burn and deposit recovery reclaim SOL; edition buys spend SOL on rent
+    // and protocol fees beyond the print fee. These need the payer's net delta for
+    // the breakdown. Other buys/offers skip the extra pre-balance roundtrip.
     final inspectPayer =
-        prep.actionType == 'burn' || prep.mallowFeeLamports != null
+        prep.actionType == 'burn' ||
+            prep.actionType == 'recover-bid-refund-deposit' ||
+            prep.mallowFeeLamports != null
         ? _authService.currentAddress
         : null;
 
@@ -1981,7 +2248,7 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
 
   /// Resolves the seller's settle proceeds from a tx simulation: how much the
   /// seller's account gains (earnings) and how much the mallow fee account
-  /// gains (fee), with royalties-to-others the remainder. For an SPL bid mint
+  /// gains (fee), with other deductions the remainder. For an SPL bid mint
   /// these come from token-amount deltas on the associated token accounts; for
   /// a native-SOL bid mint from lamport deltas (and gas is added back to the
   /// seller side, since the seller is also the payer).
@@ -2053,6 +2320,9 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
             sellerEarningsRaw: nonNeg(earnings),
             marketFeeRaw: nonNeg(fee),
             royaltiesToOthersRaw: nonNeg(royalties),
+            hasOtherCreatorPayouts:
+                post.data.settleProceedsFallback?.hasOtherCreatorPayouts,
+            isEstimate: false,
           ),
         ),
       ),

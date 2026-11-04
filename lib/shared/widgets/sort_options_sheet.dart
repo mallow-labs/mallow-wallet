@@ -5,7 +5,8 @@ import 'mallow_sheet.dart';
 import 'mallow_svg_icon.dart';
 import 'sheet_drag_handle.dart';
 
-/// Generic "Sort by" bottom sheet: drag handle, title, one row per option
+/// Generic single-choice bottom sheet ("Sort by" unless [title] says
+/// otherwise): drag handle, title, one row per option
 /// with the current selection highlighted in the accent color (label +
 /// checkmark). Pops with the tapped option, or null when dismissed.
 ///
@@ -15,6 +16,7 @@ Future<T?> showSortOptionsSheet<T>(
   required List<T> options,
   required T currentSort,
   required String Function(T) labelFor,
+  String title = 'Sort by',
 }) {
   return showMallowSheet<T>(
     context: context,
@@ -28,6 +30,7 @@ Future<T?> showSortOptionsSheet<T>(
       options: options,
       currentSort: currentSort,
       labelFor: labelFor,
+      title: title,
     ),
   );
 }
@@ -37,50 +40,49 @@ class _SortOptionsSheet<T> extends StatelessWidget {
     required this.options,
     required this.currentSort,
     required this.labelFor,
+    required this.title,
   });
 
   final List<T> options;
   final T currentSort;
   final String Function(T) labelFor;
+  final String title;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: EdgeInsets.only(bottom: sheetBottomInset(context)),
-      child: Padding(
-        padding: const EdgeInsets.only(top: 8),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SheetDragHandle(),
-            const SizedBox(height: 4),
-            // Title
-            Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: MallowTheme.spacing20,
-              ),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Sort by',
-                  style: MallowTheme.uiBody.copyWith(
-                    color: context.mallowColors.textPrimary,
-                  ),
-                  textAlign: TextAlign.left,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SheetDragHandle(),
+          const SizedBox(height: 4),
+          // Title
+          Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: MallowTheme.spacing20,
+            ),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                title,
+                style: MallowTheme.uiBody.copyWith(
+                  color: context.mallowColors.textPrimary,
                 ),
+                textAlign: TextAlign.left,
               ),
             ),
-            const SizedBox(height: 8),
-            // Options
-            for (final option in options)
-              _SortOptionTile(
-                label: labelFor(option),
-                isSelected: option == currentSort,
-                onTap: () => Navigator.of(context).pop(option),
-              ),
-            const SizedBox(height: 8),
-          ],
-        ),
+          ),
+          const SizedBox(height: 8),
+          // Options
+          for (final option in options)
+            _SortOptionTile(
+              label: labelFor(option),
+              isSelected: option == currentSort,
+              onTap: () => Navigator.of(context).pop(option),
+            ),
+          const SizedBox(height: 8),
+        ],
       ),
     );
   }

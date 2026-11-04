@@ -153,6 +153,10 @@ class _MarketPipelineSheetViewState extends State<MarketPipelineSheetView> {
       'buy' => ('Success!', 'The artwork is now yours'),
       'offer' => ('Offer submitted', null),
       'bid' => ('Bid placed', null),
+      'withdraw-bid-refund' => ('Bid refund withdrawn', null),
+      'release-sol-bid-refund' => ('SOL refund released', null),
+      'release-bid-refund' => ('Token refund released', null),
+      'recover-bid-refund-deposit' => ('Deposit recovered', null),
       'cancel-offer' => ('Offer cancelled', null),
       // Mirrors the webapp's accept-offer success toast.
       'accept-offer' => ('Artwork sold!', null),

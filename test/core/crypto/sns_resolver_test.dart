@@ -6,17 +6,17 @@ import 'package:mallow_wallet/core/crypto/sns_resolver.dart';
 /// Every fixture below is a real mainnet account, captured so the decode +
 /// selection rules can be exercised without a network round trip.
 ///
-/// - `sloth.sol` — plain domain, resolves to its registry owner.
+/// - `bonfida.sol` — plain domain, resolves to its registry owner.
 /// - `bobtoshi.sol` — carries a Solana-validated SNS-IP-5 `SOL` record.
 /// - `chiba.sol` — wrapped as an NFT: its registry owner is the tokenizer PDA,
 ///   which is off-curve and cannot receive funds.
 /// - `vesting_lsdai_team2.sol` — carries a legacy signed `SOL` record whose
 ///   content differs from the registry owner and whose signature still checks
 ///   out, so the record (not the owner) is the payable address.
-const _slothRegistry =
-    'PVPCSzg2DtOBOiPfst/YIKtYIct5KaONLqqyUug4JZUM5QlDopVhrM93Fsvi85zWS5M4MnFe'
-    '2+ugZYdFIdDLcwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
-const _slothOwner = 'sLTHMt3rEnnKNe6ixeSR41wNSDxVuDkfE1sKe9wfhFQ';
+const _plainRegistry =
+    'PVPCSzg2DtOBOiPfst/YIKtYIct5KaONLqqyUug4JZXd2T43CyhRYg4Vw8Pp55sKbLCn2Y+K'
+    'DVYSu33vP3hIJQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const _plainOwner = 'Fw1ETanDZafof7xEULsnq9UY6o71Tpds89tNwPkWLb1v';
 
 const _bobtoshiRegistry =
     'PVPCSzg2DtOBOiPfst/YIKtYIct5KaONLqqyUug4JZVQ14uNAb3PI3OJLYgrpACsh+XRLFQk'
@@ -89,10 +89,10 @@ void main() {
     // A wrong derivation reads someone else's account, so these are pinned to
     // addresses verified against mainnet.
     test('derives the registry account of a second-level domain', () async {
-      final keys = await SnsResolver.deriveAccountKeys('sloth.sol');
+      final keys = await SnsResolver.deriveAccountKeys('bobtoshi.sol');
       expect(
         keys!.registry.toBase58(),
-        'BQZBBSk1bXEqrRPJrsZSHxTVdFcEGFb8UeLSUoTKFoxY',
+        'G2KGzA6ZZTrER4qJCtfecNYzW7Nn9pQrh8UyBWgCmvx3',
       );
     });
 
@@ -128,10 +128,10 @@ void main() {
     });
 
     test('is case- and whitespace-insensitive', () async {
-      final keys = await SnsResolver.deriveAccountKeys('  SLOTH.SOL ');
+      final keys = await SnsResolver.deriveAccountKeys('  BOBTOSHI.SOL ');
       expect(
         keys!.registry.toBase58(),
-        'BQZBBSk1bXEqrRPJrsZSHxTVdFcEGFb8UeLSUoTKFoxY',
+        'G2KGzA6ZZTrER4qJCtfecNYzW7Nn9pQrh8UyBWgCmvx3',
       );
     });
 
@@ -150,13 +150,13 @@ void main() {
   });
 
   group('SnsResolver.resolveFromAccounts', () {
-    late SnsAccountKeys slothKeys;
+    late SnsAccountKeys plainKeys;
     late SnsAccountKeys chibaKeys;
     late SnsAccountKeys bobtoshiKeys;
     late SnsAccountKeys vestingKeys;
 
     setUpAll(() async {
-      slothKeys = (await SnsResolver.deriveAccountKeys('sloth.sol'))!;
+      plainKeys = (await SnsResolver.deriveAccountKeys('bonfida.sol'))!;
       chibaKeys = (await SnsResolver.deriveAccountKeys('chiba.sol'))!;
       bobtoshiKeys = (await SnsResolver.deriveAccountKeys('bobtoshi.sol'))!;
       vestingKeys = (await SnsResolver.deriveAccountKeys(
@@ -166,19 +166,19 @@ void main() {
 
     test('a plain domain resolves to its registry owner', () async {
       final result = await SnsResolver.resolveFromAccounts(
-        keys: slothKeys,
-        registry: base64Decode(_slothRegistry),
+        keys: plainKeys,
+        registry: base64Decode(_plainRegistry),
         nftRecord: null,
         solRecordV1: null,
         solRecordV2: null,
       );
       expect(result, isA<SnsResolvedAddress>());
-      expect((result as SnsResolvedAddress).address, _slothOwner);
+      expect((result as SnsResolvedAddress).address, _plainOwner);
     });
 
     test('a missing registry does not resolve', () async {
       final result = await SnsResolver.resolveFromAccounts(
-        keys: slothKeys,
+        keys: plainKeys,
         registry: null,
         nftRecord: null,
         solRecordV1: null,
@@ -223,13 +223,13 @@ void main() {
       final unwrapped = base64Decode(_chibaNftRecord);
       unwrapped[0] = 3;
       final result = await SnsResolver.resolveFromAccounts(
-        keys: slothKeys,
-        registry: base64Decode(_slothRegistry),
+        keys: plainKeys,
+        registry: base64Decode(_plainRegistry),
         nftRecord: unwrapped,
         solRecordV1: null,
         solRecordV2: null,
       );
-      expect((result as SnsResolvedAddress).address, _slothOwner);
+      expect((result as SnsResolvedAddress).address, _plainOwner);
     });
 
     test('a valid SNS-IP-5 record resolves to its content', () async {
@@ -249,12 +249,12 @@ void main() {
       // not survive the sale.
       final result = await SnsResolver.resolveFromAccounts(
         keys: bobtoshiKeys,
-        registry: _registryOwnedBy(_slothOwner),
+        registry: _registryOwnedBy(_plainOwner),
         nftRecord: null,
         solRecordV1: null,
         solRecordV2: base64Decode(_bobtoshiSolRecordV2),
       );
-      expect((result as SnsResolvedAddress).address, _slothOwner);
+      expect((result as SnsResolvedAddress).address, _plainOwner);
     });
 
     test('an unverified SNS-IP-5 record blocks resolution', () async {
@@ -292,12 +292,12 @@ void main() {
       // behind by a previous owner cannot redirect the funds.
       final result = await SnsResolver.resolveFromAccounts(
         keys: vestingKeys,
-        registry: _registryOwnedBy(_slothOwner),
+        registry: _registryOwnedBy(_plainOwner),
         nftRecord: null,
         solRecordV1: base64Decode(_vestingSolRecordV1),
         solRecordV2: null,
       );
-      expect((result as SnsResolvedAddress).address, _slothOwner);
+      expect((result as SnsResolvedAddress).address, _plainOwner);
     });
 
     test(
@@ -306,7 +306,7 @@ void main() {
         // The signed payload commits to the record's own address; verifying with
         // another domain's record key must not pass.
         final result = await SnsResolver.resolveFromAccounts(
-          keys: slothKeys,
+          keys: plainKeys,
           registry: _registryOwnedBy(_vestingOwner),
           nftRecord: null,
           solRecordV1: base64Decode(_vestingSolRecordV1),

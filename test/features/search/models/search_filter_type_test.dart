@@ -158,5 +158,59 @@ void main() {
         }
       });
     });
+
+    group('forCategoryTag', () {
+      // The artwork page's category chips carry the tag slug; they must open
+      // the landing page's own category drilldown, not a look-alike.
+      test('maps every category slug back to its filter', () {
+        for (final c in SearchFilterType.categories) {
+          expect(SearchFilterType.forCategoryTag(c.categoryTag!), c);
+        }
+      });
+
+      test('returns null for a tag that is not a category', () {
+        expect(SearchFilterType.forCategoryTag('sunset'), isNull);
+        expect(SearchFilterType.forCategoryTag('Digital Art'), isNull);
+      });
+    });
+  });
+
+  group('TagDrilldownTarget', () {
+    test('labels the header with the hashtag', () {
+      expect(const TagDrilldownTarget('sunset').label, '#sunset');
+    });
+
+    test('pins its tag over any category picked in the sheet', () {
+      final pinned = const TagDrilldownTarget('sunset').pinTo(
+        const api.ExploreFilter(
+          tags: ['abstract'],
+          listingTypes: ['auction'],
+          mode: api.ExploreMode.editions,
+        ),
+      );
+      expect(pinned.tags, ['sunset']);
+      expect(pinned.listingTypes, ['auction']);
+      expect(pinned.mode, api.ExploreMode.editions);
+    });
+
+    // The pin overwrites `tags`, so the sheet's category section would be a
+    // control with no effect.
+    test('pins only the category facet', () {
+      const target = TagDrilldownTarget('sunset');
+      expect(target.pinsCategory, isTrue);
+      expect(target.pinsListingType, isFalse);
+      expect(target.pinsSupplyType, isFalse);
+    });
+
+    test('compares by tag', () {
+      expect(
+        const TagDrilldownTarget('sunset'),
+        const TagDrilldownTarget('sunset'),
+      );
+      expect(
+        const TagDrilldownTarget('sunset'),
+        isNot(const TagDrilldownTarget('dawn')),
+      );
+    });
   });
 }

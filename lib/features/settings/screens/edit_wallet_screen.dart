@@ -6,6 +6,7 @@ import '../../../core/models/account.dart';
 import '../../../core/network/auth_service.dart';
 import '../../../core/observability/app_logger.dart';
 import '../../../core/router/auth_state_notifier.dart';
+import '../../../core/security/reauth_gate.dart';
 import '../../../core/services/wallet_repository.dart';
 import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
@@ -113,35 +114,37 @@ class _EditWalletScreenState extends State<EditWalletScreen> {
     WalletInfo wallet,
   ) async {
     try {
-      if (wallet.walletType == WalletType.importedKey) {
-        return 'This wallet and its private key will be removed from this '
-            'device. Make sure you have a copy of the private key — it cannot '
-            'be recovered from the app.';
-      }
-      if (wallet.walletType == WalletType.social) {
-        // The stored key goes too, but signing in with the same account
-        // derives it again — there is no phrase to back up here.
-        return 'This wallet and its stored key will be removed from this '
-            'device. You can add it back by signing in with the same account '
-            'again.';
-      }
-      if (wallet.walletType == WalletType.ledger) {
-        // Nothing signable is stored here; the row is a pointer to the device.
-        return 'This wallet will be removed from this device. The key stays '
-            'on your Ledger.';
-      }
-      if (wallet.walletType == WalletType.seedVault) {
-        // Same shape as the Ledger branch, and it has to be its own arm:
-        // without it a Seed Vault wallet falls through to the seed-phrase
-        // branch below, which tells the user to back up a recovery phrase this
-        // app has never held. The key is in the device's Seed Vault and stays
-        // there.
-        return 'This wallet will be removed from this device. The key stays '
-            'in Seed Vault.';
-      }
-      if (wallet.walletType == WalletType.viewOnly) {
-        return 'This watch-only wallet will be removed from this device. No '
-            'key is stored for it.';
+      // Exhaustive, so a wallet type added later has to say what removing
+      // it means. As a chain of `if`s, every new hardware type compiled clean
+      // and fell through to the seed-phrase copy below, which tells the user
+      // to back up a recovery phrase this app has never held.
+      switch (wallet.walletType) {
+        case WalletType.importedKey:
+          return 'This wallet and its private key will be removed from this '
+              'device. Make sure you have a copy of the private key — it '
+              'cannot be recovered from the app.';
+        case WalletType.social:
+          // The stored key goes too, but signing in with the same account
+          // derives it again — there is no phrase to back up here.
+          return 'This wallet and its stored key will be removed from this '
+              'device. You can add it back by signing in with the same '
+              'account again.';
+        case WalletType.ledger:
+          // Nothing signable is stored here; the row is a pointer to the
+          // device.
+          return 'This wallet will be removed from this device. The key '
+              'stays on your Ledger.';
+        case WalletType.seedVault:
+          return 'This wallet will be removed from this device. The key '
+              'stays in Seed Vault.';
+        case WalletType.keystone:
+          return 'This wallet will be removed from this device. The key '
+              'stays on your Keystone.';
+        case WalletType.viewOnly:
+          return 'This watch-only wallet will be removed from this device. '
+              'No key is stored for it.';
+        case WalletType.hd:
+          break;
       }
       final seedPhraseId = wallet.seedPhraseId;
       if (seedPhraseId != null) {
@@ -196,6 +199,10 @@ class _EditWalletScreenState extends State<EditWalletScreen> {
       );
 
       if (confirmed != true || !mounted) return;
+      if (!await requireReauthForRemoval(context, [removed.walletType]) ||
+          !mounted) {
+        return;
+      }
 
       // Open decision, deliberately not implemented: removing the last wallet
       // of a Seed Vault seed could also drop this app's authorization for that
@@ -228,7 +235,8 @@ class _EditWalletScreenState extends State<EditWalletScreen> {
         await sl<WalletManager>().clearWalletSelection();
         await sl<AuthStateNotifier>().onLogout();
       } else {
-        // Switch to replacement wallet (fires onWalletChanged → re-auth)
+        // Switch to replacement wallet (fires onWalletChanged → session
+        // re-auth).
         await sl<WalletManager>().switchWalletById(replacementId);
         if (!mounted) return;
         sl<AccountWalletBloc>().add(const AccountWalletEvent.load());

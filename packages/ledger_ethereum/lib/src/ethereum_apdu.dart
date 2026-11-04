@@ -17,6 +17,39 @@ class EthereumApdu {
   /// `\x19Ethereum Signed Message:\n<len>` prefix, keccak256-hashes, and signs.
   static const int insSignPersonalMessage = 0x08;
 
+  /// Sign EIP-712 typed data. With P2 [p2Eip712Full] the device hashes the
+  /// struct definitions and values streamed before it; with P2
+  /// [p2Eip712Hashes] it signs a host-computed domain separator and message
+  /// hash (app versions before 1.9.19).
+  static const int insSignEip712 = 0x0C;
+
+  /// EIP-712: send a struct definition (its name, then one APDU per field).
+  static const int insEip712StructDefinition = 0x1A;
+
+  /// EIP-712: send the values (root struct name, array sizes, field values).
+  static const int insEip712StructImplementation = 0x1C;
+
+  /// P2 for [insSignEip712]: sign the host-computed hashes ("v0").
+  static const int p2Eip712Hashes = 0x00;
+
+  /// P2 for [insSignEip712]: sign what the device hashed itself.
+  static const int p2Eip712Full = 0x01;
+
+  /// P2 for the EIP-712 struct commands: a struct (or root struct) name.
+  static const int p2Eip712Name = 0x00;
+
+  /// P2 for [insEip712StructImplementation]: the size of the next array.
+  static const int p2Eip712Array = 0x0F;
+
+  /// P2 for the EIP-712 struct commands: a field (definition or value).
+  static const int p2Eip712Field = 0xFF;
+
+  /// P1 for an EIP-712 APDU that completes its item.
+  static const int p1Eip712Complete = 0x00;
+
+  /// P1 for an EIP-712 field value that continues in the next APDU.
+  static const int p1Eip712Partial = 0x01;
+
   /// P1: derive without prompting the user to confirm on the device screen.
   static const int p1NoConfirm = 0x00;
 

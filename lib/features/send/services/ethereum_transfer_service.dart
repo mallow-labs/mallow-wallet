@@ -6,6 +6,7 @@ import 'package:mallow_api/mallow_api.dart';
 import 'package:wallet/wallet.dart' show EthereumAddress;
 import 'package:web3dart/web3dart.dart';
 
+import '../../../core/config/remote_config.dart';
 import '../../../core/crypto/wallet_manager.dart';
 import '../../../core/network/ethereum_rpc_service.dart';
 import '../../../core/network/evm_transfer_core.dart';
@@ -314,6 +315,9 @@ class EthereumTransferService {
           feeOverride?.maxPriorityFeePerGas ??
           prepared.estimate.maxPriorityFeePerGas,
       refreshFees: feeOverride == null,
+      ledgerFlow: prepared.data == null
+          ? AppFlow.nativeSend
+          : AppFlow.tokenSend,
       onBroadcasting: onBroadcasting,
       onBroadcastRegistered: onBroadcastRegistered,
       trackKind: PendingEvmTxKind.send,

@@ -13,12 +13,12 @@ class HardwareVerifyRequest {
 
   final String address;
 
-  /// Which device holds the key — [WalletType.ledger] or
-  /// [WalletType.seedVault].
+  /// Which device holds the key — [WalletType.ledger],
+  /// [WalletType.seedVault] or [WalletType.keystone].
   ///
   /// The sheet renders a different flow for each, so this is not cosmetic:
-  /// telling a Seed Vault user to switch on Bluetooth and open the Solana app
-  /// is a dead end they cannot act on.
+  /// telling a Seed Vault or Keystone user to switch on Bluetooth and open the
+  /// Solana app is a dead end they cannot act on.
   final WalletType walletType;
 
   final Completer<bool> completer = Completer<bool>();

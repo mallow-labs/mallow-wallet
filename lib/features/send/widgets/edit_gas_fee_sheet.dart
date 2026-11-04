@@ -37,9 +37,10 @@ class EditGasFeeSheetData {
 
 /// Opens the Edit Gas Fee sheet
 /// over the send confirm step. Returns the fee the user applied, or null if
-/// they cancelled. The chosen tier / custom fee is persisted to
+/// they cancelled. By default, the chosen tier / custom fee is persisted to
 /// [PreferencesService] here (mirroring the swap-settings pattern); the caller
-/// dispatches the returned selection into the send bloc.
+/// dispatches the returned selection into the send bloc. Set [persist] to false
+/// for transaction-specific fees, such as caps suggested by a website.
 ///
 /// [title] retitles the root page — "Speed Up Transaction" when the sheet is
 /// re-pricing a stuck transaction rather than an unsent one.
@@ -62,6 +63,7 @@ Future<EthGasSelection?> showEditGasFeeSheet(
   double? ethPriceUsd,
   String title = 'Edit Gas Fee',
   EvmFeeCaps? replacementFloor,
+  bool persist = true,
 }) {
   return showMallowSheet<EthGasSelection>(
     context: context,
@@ -74,6 +76,7 @@ Future<EthGasSelection?> showEditGasFeeSheet(
       ethPriceUsd: ethPriceUsd,
       title: title,
       replacementFloor: replacementFloor,
+      persist: persist,
     ),
   );
 }
@@ -200,6 +203,7 @@ class _EditGasFeeSheet extends StatefulWidget {
     required this.ethPriceUsd,
     required this.title,
     required this.replacementFloor,
+    this.persist = true,
   });
 
   final EthGasMarket market;
@@ -208,6 +212,7 @@ class _EditGasFeeSheet extends StatefulWidget {
   final int defaultGasLimit;
   final double? ethPriceUsd;
   final String title;
+  final bool persist;
 
   /// Non-null in replacement (speed-up) mode — see [showEditGasFeeSheet].
   final EvmFeeCaps? replacementFloor;
@@ -307,10 +312,21 @@ class _EditGasFeeSheetState extends State<_EditGasFeeSheet> {
         double.tryParse(_maxBaseFeeController.text) ?? _seed.maxBaseFeeGwei;
     final priority =
         double.tryParse(_priorityController.text) ?? _seed.priorityFeeGwei;
+    // The input text is rounded for display. Keep the seed's exact wei for
+    // each untouched field so a gas-limit-only edit does not change fee caps.
+    final maxBaseWei =
+        _maxBaseFeeController.text == _trimGwei(_seed.maxBaseFeeGwei)
+        ? _seed.maxFeePerGas - _seed.maxPriorityFeePerGas
+        : EthGasMarket.gweiToWei(maxBase);
+    final priorityWei =
+        _priorityController.text == _trimGwei(_seed.priorityFeeGwei)
+        ? _seed.maxPriorityFeePerGas
+        : EthGasMarket.gweiToWei(priority);
     return _flooredSelection(
-      EthGasSelection.custom(
-        maxBaseFeeGwei: maxBase,
-        priorityFeeGwei: priority,
+      EthGasSelection(
+        mode: EthGasMode.custom,
+        maxFeePerGas: maxBaseWei + priorityWei,
+        maxPriorityFeePerGas: priorityWei,
         gasLimit: _advancedGasLimit,
       ),
     );
@@ -326,7 +342,7 @@ class _EditGasFeeSheetState extends State<_EditGasFeeSheet> {
       return;
     }
     final selection = _tierSelection(_mode);
-    if (!_isReplacement) {
+    if (widget.persist && !_isReplacement) {
       await _prefs.setEthGasMode(_mode == EthGasMode.low ? 'low' : 'market');
     }
     if (mounted) Navigator.of(context).pop(selection);
@@ -334,7 +350,7 @@ class _EditGasFeeSheetState extends State<_EditGasFeeSheet> {
 
   Future<void> _applyCustomAndClose() async {
     final selection = _customSelection();
-    if (!_isReplacement) {
+    if (widget.persist && !_isReplacement) {
       await _prefs.setEthGasMode('custom');
       await _prefs.setEthGasMaxBaseFeeGwei(selection.maxBaseFeeGwei);
       await _prefs.setEthGasPriorityFeeGwei(selection.priorityFeeGwei);

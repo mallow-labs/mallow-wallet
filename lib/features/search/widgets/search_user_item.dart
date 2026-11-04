@@ -54,6 +54,7 @@ class SearchUserItem extends StatelessWidget {
           child: Text(
             label,
             style: TextStyle(fontSize: 15, color: colors.textPrimary),
+            maxLines: 1,
             overflow: TextOverflow.ellipsis,
           ),
         ),

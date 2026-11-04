@@ -101,6 +101,13 @@ class _MenuContent extends StatelessWidget {
                   ),
                   const SizedBox(height: 8),
                   MenuRow(
+                    icon: 'assets/icons/qr.svg',
+                    label: 'Scan QR Code',
+                    iconSize: 20,
+                    onTap: () => scanQrCode(context),
+                  ),
+                  const SizedBox(height: 8),
+                  MenuRow(
                     icon: 'assets/icons/settings.svg',
                     label: 'Settings',
                     onTap: () => context.push(AppRoutes.settings),

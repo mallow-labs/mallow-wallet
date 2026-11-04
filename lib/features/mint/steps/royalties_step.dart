@@ -11,8 +11,8 @@ import '../widgets/mint_creator_row.dart';
 
 /// Royalties step.
 ///
-/// Captures royalty percentage and proceed splits. The user's own wallet
-/// is locked at index 0; additional wallets can be added up to a cap of 5
+/// Captures royalty percentage and proceed splits. The row holding the user's
+/// own wallet is locked; additional wallets can be added up to a cap of 5
 /// (webapp parity).
 class RoyaltiesStep extends StatefulWidget {
   const RoyaltiesStep({super.key});

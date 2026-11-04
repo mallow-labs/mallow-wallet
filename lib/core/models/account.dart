@@ -13,6 +13,10 @@ part 'account.freezed.dart';
 String formatAccountName(int number) =>
     'Account ${number.toString().padLeft(2, '0')}';
 
+/// Longest account name the user can enter — in Edit Account and when naming
+/// an account in the import pickers.
+const int kMaxAccountNameLength = 32;
+
 /// Maximum wallets a single profile may link — the cap [ProfileGroup.isFull]
 /// enforces in the wallet drawer and the Create/Edit Profile wizard enforces
 /// client-side (linking is applied one wallet at a time, so an over-cap
@@ -44,7 +48,16 @@ enum AccountKind {
   /// derivation index alone, so a Ledger and a Seed Vault imported at the same
   /// index would collapse into a single account card holding two unrelated
   /// devices' addresses.
-  seedVault;
+  seedVault,
+
+  /// Keystone wallets at one (master fingerprint, derivation index), grouped
+  /// into one account.
+  ///
+  /// Its own kind for the same reason as [seedVault], and keyed one level
+  /// tighter: two Keystone devices both export index 0, so resolving by index
+  /// alone would merge two unrelated devices into one account card. The
+  /// device's master fingerprint lives on the account row to tell them apart.
+  keystone;
 
   String toDbString() => switch (this) {
     AccountKind.seed => 'seed',
@@ -53,6 +66,7 @@ enum AccountKind {
     AccountKind.social => 'social',
     AccountKind.hardware => 'hardware',
     AccountKind.seedVault => 'seedVault',
+    AccountKind.keystone => 'keystone',
   };
 
   static AccountKind fromDbString(String value) => switch (value) {
@@ -62,6 +76,12 @@ enum AccountKind {
     'social' => AccountKind.social,
     'hardware' => AccountKind.hardware,
     'seedVault' => AccountKind.seedVault,
+    'keystone' => AccountKind.keystone,
+    // 🛑 Fails soft to `seed`, which is a worse downgrade than
+    // [WalletType.fromDbString]'s `hd`: an older build shows a Keystone
+    // account as a seed account. It still cannot sign — the rows inside load
+    // as HD wallets with no seed phrase behind them — so the failure is at
+    // signing, not at load.
     _ => AccountKind.seed,
   };
 }
@@ -96,9 +116,14 @@ enum WalletType {
   /// explicit user approval outside our process — but the transport is
   /// same-device IPC rather than BLE, and Seed Vault defines exactly one
   /// purpose, so these rows are always Solana.
-  seedVault;
+  seedVault,
 
-  // Future: keystone — QR-based air-gapped signing
+  /// Held on a Keystone air-gapped hardware wallet. Every signature is a QR
+  /// round trip: the app shows the request as an animated QR, the device
+  /// shows its signature back as a QR, and nothing crosses any other channel.
+  /// The row carries the device's master fingerprint, which every sign
+  /// request must name. Solana today; the device has no Tezos support at all.
+  keystone;
 
   /// Database string representation.
   String toDbString() => switch (this) {
@@ -108,6 +133,7 @@ enum WalletType {
     WalletType.social => 'social',
     WalletType.ledger => 'ledger',
     WalletType.seedVault => 'seed_vault',
+    WalletType.keystone => 'keystone',
   };
 
   /// Parse from database string.
@@ -119,21 +145,38 @@ enum WalletType {
     'ledger' => WalletType.ledger,
     'hardware' => WalletType.ledger, // backward compat
     'seed_vault' => WalletType.seedVault,
+    'keystone' => WalletType.keystone,
     _ => WalletType.hd,
   };
 
-  /// Whether this is a hardware wallet type (Ledger, Seed Vault, etc.)
-  bool get isHardware =>
-      this == WalletType.ledger || this == WalletType.seedVault;
+  /// Whether this is a hardware wallet type (Ledger, Seed Vault, Keystone).
+  bool get isHardware => switch (this) {
+    WalletType.ledger || WalletType.seedVault || WalletType.keystone => true,
+    WalletType.hd ||
+    WalletType.importedKey ||
+    WalletType.viewOnly ||
+    WalletType.social => false,
+  };
 
   /// Whether signing requires an external device.
   bool get needsDeviceForSigning => isHardware;
+
+  /// Whether this app holds the signing key in its own vault: a seed phrase,
+  /// an imported private key or a social login key. Removing such a wallet
+  /// can delete that key from the device, so removal re-authenticates first.
+  bool get storesKeyOnDevice => switch (this) {
+    WalletType.hd || WalletType.importedKey || WalletType.social => true,
+    WalletType.viewOnly ||
+    WalletType.ledger ||
+    WalletType.seedVault ||
+    WalletType.keystone => false,
+  };
 }
 
 /// The provenance badge shown beside a wallet/account name. Each value maps to
 /// a single icon (see `WalletTypeBadge`). Plain HD/imported wallets carry no
 /// badge.
-enum WalletBadge { watchOnly, ledger, seedVault, google, apple }
+enum WalletBadge { watchOnly, ledger, seedVault, keystone, google, apple }
 
 /// A single wallet (HD, imported key, view-only, social, or hardware).
 @freezed
@@ -152,8 +195,14 @@ abstract class WalletInfo with _$WalletInfo {
     String? seedPhraseId,
     int? derivationIndex,
 
-    /// Ledger derivation scheme (null for non-Ledger wallets).
+    /// Solana derivation scheme — set for HD Solana rows and every hardware
+    /// row; null where the chain has a single fixed path.
     SolanaDerivationScheme? derivationScheme,
+
+    /// The Keystone device's BIP32 master fingerprint (uint32) — set for
+    /// Keystone rows only. Every sign request must carry it, and the device
+    /// refuses a request whose fingerprint is not its own.
+    int? masterFingerprint,
 
     /// Social-auth provider ('google' or 'apple') — set only for social
     /// wallets, drives the brand badge beside the name. Null otherwise.
@@ -186,8 +235,8 @@ abstract class WalletInfo with _$WalletInfo {
   /// supports, because a wallet that passes this gate but throws at signing
   /// dead-ends the user **after** the biometric prompt:
   ///
-  /// - Ethereum — HD / imported-key / social (local secp256k1) or Ledger
-  ///   (on-device).
+  /// - Ethereum — HD / imported-key / social (local secp256k1), Ledger
+  ///   (on-device) or Keystone (on-device, over QR).
   /// - Tezos — HD / imported-key / social (local ed25519 seed).
   ///   [WalletManager.signTezosOperation] still throws
   ///   `TezosOperationSigningNotSupportedException` for ledger and view-only,
@@ -200,15 +249,23 @@ abstract class WalletInfo with _$WalletInfo {
   /// per-chain private key on-device (`WalletRepository.addSocialAccount`) and
   /// signs through the same local paths as an imported key — nothing is remote.
   bool get canSignSendTransfer => switch (chainEnum) {
-    Chain.ethereum =>
-      walletType == WalletType.hd ||
-          walletType == WalletType.importedKey ||
-          walletType == WalletType.social ||
-          walletType == WalletType.ledger,
-    Chain.tezos =>
-      walletType == WalletType.hd ||
-          walletType == WalletType.importedKey ||
-          walletType == WalletType.social,
+    // Exhaustive on purpose: an `==` chain compiles clean when a wallet type
+    // is added and silently answers false for it.
+    Chain.ethereum => switch (walletType) {
+      WalletType.hd ||
+      WalletType.importedKey ||
+      WalletType.social ||
+      WalletType.ledger ||
+      WalletType.keystone => true,
+      WalletType.viewOnly || WalletType.seedVault => false,
+    },
+    Chain.tezos => switch (walletType) {
+      WalletType.hd || WalletType.importedKey || WalletType.social => true,
+      WalletType.ledger ||
+      WalletType.viewOnly ||
+      WalletType.seedVault ||
+      WalletType.keystone => false,
+    },
     Chain.solana => canSign,
   };
 
@@ -238,16 +295,17 @@ abstract class WalletInfo with _$WalletInfo {
   /// The provenance badge for this wallet, or null for plain HD/imported keys.
   /// Social wallets without a recorded provider default to the Google mark.
   ///
-  /// Ledger and Seed Vault each carry their own mark. Both are hardware
+  /// Ledger, Seed Vault and Keystone each carry their own mark. Both are hardware
   /// wallets, but the badge names *which* device holds the key, and that is
   /// the one thing a user cannot infer from the account name: the two demand
-  /// different things to sign — a paired Ledger over BLE, or an on-device
-  /// Seed Vault prompt. Use [WalletType.isHardware] to ask the weaker
+  /// different things to sign — a paired Ledger over BLE, an on-device
+  /// Seed Vault prompt, or a QR exchange with a Keystone. Use [WalletType.isHardware] to ask the weaker
   /// "needs an external signer?" question.
   WalletBadge? get badge => switch (walletType) {
     WalletType.viewOnly => WalletBadge.watchOnly,
     WalletType.ledger => WalletBadge.ledger,
     WalletType.seedVault => WalletBadge.seedVault,
+    WalletType.keystone => WalletBadge.keystone,
     WalletType.social =>
       socialProvider == 'apple' ? WalletBadge.apple : WalletBadge.google,
     WalletType.hd || WalletType.importedKey => null,

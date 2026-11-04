@@ -33,11 +33,22 @@ class _FakeApi implements MallowApiClient {
 // The holder rides on the sibling top-level `ownerAddress` field.
 void main() {
   const mint = 'Mint111111111111111111111111111111111111111';
-  const firstLinked = 'EtnrTfgycnvSwcviqjCBzMvazNyv2qp66Wi8YU7THe8P';
-  const holder = 'FD3sQ62fPLAf8MrCuWakiqqW6dLV2b6RtrmBy6LC76c7';
+  const firstLinked = '6k78AbasGMFFrhG95Pj6jQbqkVt7FQMhVgemxJovWKR6';
+  const holder = '7tj9biW3KRJ7EEWmVUGigHiouCTXhV2dzcyvwma7Cyu7';
 
   Future<ArtworkDetails> detailsFor(NftDetail item) =>
       ArtworkRepository(_FakeApi(item)).getArtworkDetail(mint);
+
+  test('royalty inheritance sentinel never renders as a percentage', () async {
+    final details = await detailsFor(
+      const NftDetail(
+        mintAccount: mint,
+        name: 'Artwork',
+        sellerFeeBasisPoints: 65535,
+      ),
+    );
+    expect(details.royaltyPercent, isNull);
+  });
 
   test('the signing authority is the holding wallet, not the owner profile’s '
       'first linked wallet', () async {

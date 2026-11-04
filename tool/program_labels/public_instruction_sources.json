@@ -1,0 +1,143 @@
+{
+  "sources": [
+    {
+      "name": "Associated Token Account",
+      "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+      "format": "codama",
+      "url": "https://raw.githubusercontent.com/solana-program/associated-token-account/6ead6cbab1b349b4b365573b0b6366dad865c2ac/idl.json",
+      "sha256": "e47349065e84f1737791464c08c8984bcf97341742487a9dba941acc7a62da67"
+    },
+    {
+      "name": "Token-2022",
+      "address": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+      "format": "codama",
+      "url": "https://raw.githubusercontent.com/solana-program/token-2022/e27c3ad7e7d0db0e9a40940e584d3b20c1f6b491/idl.json",
+      "sha256": "13cbda7213599f3312e1b7ffd1c7f176f36ebd74dba9feabe6e9a6874dc1d5d2"
+    },
+    {
+      "name": "Address Lookup Table",
+      "address": "AddressLookupTab1e1111111111111111111111111",
+      "format": "codama",
+      "url": "https://raw.githubusercontent.com/solana-program/address-lookup-table/a4d0d2cc64c51724a433278f51afbe92d209948b/idl.json",
+      "sha256": "f23e8397def424afc9b38648ca3d7b7ed7fbcfa1c690af2c910b9e556bfd4a8a"
+    },
+    {
+      "name": "Stake Program",
+      "address": "Stake11111111111111111111111111111111111111",
+      "format": "codama",
+      "url": "https://raw.githubusercontent.com/solana-program/stake/5bee9f4c5694c154d9607c205b8e82fe723e766a/idl.json",
+      "sha256": "9527f716b5f449ce809ad6d3c05b4d4e743dff6c80242531df6a2f24067a6b9a"
+    },
+    {
+      "name": "Metaplex Token Metadata",
+      "address": "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s",
+      "format": "codama",
+      "url": "https://raw.githubusercontent.com/metaplex-foundation/mpl-token-metadata/353d01be4af3018e1daf49d0cd35ba9f731d9c9c/trees/codama.json",
+      "sha256": "9a29b92c612beafac1ae594b079300502b85aa140291b4d6c7fba1c522df5141"
+    },
+    {
+      "name": "Metaplex Core",
+      "address": "CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d",
+      "format": "idl",
+      "url": "https://raw.githubusercontent.com/metaplex-foundation/mpl-core/e72d63e4118a0a95ac9b40221e81b19d49e1e102/idls/mpl_core.json",
+      "sha256": "ba75e3dbc1c332f63ddfd0ad4224590c725559679c5aa84eb8c43b6067bd3471"
+    },
+    {
+      "name": "Metaplex Bubblegum V2",
+      "address": "BGUMAp9Gq7iTEuizy4pqaxsTyUCBK68MDfK752saRPUY",
+      "format": "idl",
+      "url": "https://raw.githubusercontent.com/metaplex-foundation/mpl-bubblegum/ad7d32b477625190704eb204741667b5df15221d/idls/bubblegum.json",
+      "sha256": "3c7e0f6d57375b5204d7c831b4cd4fed2ae7ae045f6fd458b695fbde1cfc246f"
+    },
+    {
+      "name": "SPL Account Compression",
+      "address": "cmtDvXumGCrqC1Age74AVPhSRVXJMd8PJS91L8KbNCK",
+      "format": "idl",
+      "url": "https://raw.githubusercontent.com/metaplex-foundation/mpl-bubblegum/ad7d32b477625190704eb204741667b5df15221d/idls/spl_account_compression.json",
+      "sha256": "dfa3b02d386e258b9b5a711a563d8ba0d1e60a8734d933eccd1aab8ab665fc5b"
+    },
+    {
+      "name": "Metaplex Account Compression",
+      "address": "mcmt6YrQEMKw8Mw43FmpRLmf7BqRnFMKmAcbxE3xkAW",
+      "format": "idl",
+      "url": "https://raw.githubusercontent.com/metaplex-foundation/mpl-bubblegum/ad7d32b477625190704eb204741667b5df15221d/idls/mpl_account_compression.json",
+      "sha256": "8412457ca48b37166b929dadd9a2cc5ad4053074698a9af1e5a78ca488199040"
+    },
+    {
+      "name": "Metaplex Token Auth Rules",
+      "address": "auth9SigNpDKz4sJJ1DfCTuZrZNSAgh9sFD3rboVmgg",
+      "format": "idl",
+      "url": "https://raw.githubusercontent.com/metaplex-foundation/mpl-token-auth-rules/5b8b8973543a1e1e139912d0c210d902af77a6b5/idls/mpl_token_auth_rules.json",
+      "sha256": "bd358a749d73ba1edbd5fbb605d0447c58e030d836370d38683368184d5a9b78"
+    },
+    {
+      "name": "Metaplex Candy Guard",
+      "address": "Guard1JwRhJkVH6XZhzoYxeBVQe872VH6QggF4BWmS9g",
+      "format": "idl",
+      "url": "https://raw.githubusercontent.com/metaplex-foundation/mpl-candy-machine/8ec4c333d73a083ad008bc25ac0451cb8f034f7f/idls/candy_guard.json",
+      "sha256": "1b7f52c9e504c46d2f03d54c76b66f7b809ea0d7e010235d0ed994ec1b2f922c"
+    },
+    {
+      "name": "Metaplex Candy Machine",
+      "address": "CndyV3LdqHUfDLmE5naZjVN8rBZz4tqhdefbAnjHG3JR",
+      "format": "idl",
+      "url": "https://raw.githubusercontent.com/metaplex-foundation/mpl-candy-machine/8ec4c333d73a083ad008bc25ac0451cb8f034f7f/idls/candy_machine_core.json",
+      "sha256": "7ace7621abe0d09eee3a5ba6c896d536fd87436405021782465aa7f25f63b72a"
+    },
+    {
+      "name": "Metaplex Core Candy Guard",
+      "address": "CMAGAKJ67e9hRZgfC5SFTbZH8MgEmtqazKXjmkaJjWTJ",
+      "format": "idl",
+      "url": "https://raw.githubusercontent.com/metaplex-foundation/mpl-core-candy-machine/ea3620b7436004f62e1e7bc3d69147f4feef2ae0/idls/candy_guard.json",
+      "sha256": "d3fc23e31d2f3699c1966196fd4800148c8a47b6e146db14f0ad1ccc63cce4ac"
+    },
+    {
+      "name": "Metaplex Core Candy Machine",
+      "address": "CMACYFENjoBMHzapRXyo1JZkVS6EtaDDzkjMrmQLvr4J",
+      "format": "idl",
+      "url": "https://raw.githubusercontent.com/metaplex-foundation/mpl-core-candy-machine/ea3620b7436004f62e1e7bc3d69147f4feef2ae0/idls/candy_machine_core.json",
+      "sha256": "18cab8f536478ac568a7ee362d87b7d0e9ee6003fa4552d4731adb61023d272a"
+    },
+    {
+      "name": "Jupiter v6",
+      "address": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+      "format": "idl",
+      "url": "https://raw.githubusercontent.com/jup-ag/jupiter-cpi/12bc5f67b94a2c3edc74d6e721a19442124a0bad/idl.json",
+      "sha256": "764ea6d71b77458fd33aeb308d6e6bb19e660fc5320c5359f3b9cac96eba5c50",
+      "origin": "anchor",
+      "addressSource": {
+        "url": "https://raw.githubusercontent.com/jup-ag/jupiter-cpi/12bc5f67b94a2c3edc74d6e721a19442124a0bad/src/lib.rs",
+        "sha256": "ecf6c058177e3777aedb0c2cccd1aac07fa94dcc9bab134702ab768f7492591a"
+      }
+    },
+    {
+      "name": "Orca Whirlpool",
+      "address": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+      "format": "orca",
+      "url": "https://raw.githubusercontent.com/orca-so/whirlpools/f4b99e79e7140f3917e4ce81a2e8ad06ccdf8ce4/ts-sdk/client/src/generated/programs/whirlpool.ts",
+      "sha256": "6a03ba7c13c10e3d12e1772e36bfead5e0ebfc21faed91c79dafbfb49b48890a",
+      "instructionCount": 66
+    },
+    {
+      "name": "Raydium CLMM",
+      "address": "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+      "format": "idl",
+      "url": "https://raw.githubusercontent.com/raydium-io/raydium-idl/e7e0c96fe77bcf6a020b84a44c47a722aac8e359/raydium_clmm/raydium_clmm.json",
+      "sha256": "040a8c4866317fa028be8a81db54325ce6d9b92aeb10582d89992855bbbce5c1"
+    },
+    {
+      "name": "Raydium CPMM",
+      "address": "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
+      "format": "idl",
+      "url": "https://raw.githubusercontent.com/raydium-io/raydium-idl/e7e0c96fe77bcf6a020b84a44c47a722aac8e359/raydium_cpmm/raydium_cp_swap.json",
+      "sha256": "1202f6dc8e1c3216598f2ad5c620b9aa8c64ac584563fafed68125c27fb6df81"
+    },
+    {
+      "name": "Raydium Launchpad",
+      "address": "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj",
+      "format": "idl",
+      "url": "https://raw.githubusercontent.com/raydium-io/raydium-idl/e7e0c96fe77bcf6a020b84a44c47a722aac8e359/raydium_launchpad/raydium_launchpad.json",
+      "sha256": "963189409945069409f32e345d4adf2892e0b3ca1be504372577fe34a23c6cdb"
+    }
+  ]
+}

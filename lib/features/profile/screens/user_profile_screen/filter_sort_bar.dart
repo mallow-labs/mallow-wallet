@@ -116,9 +116,8 @@ class _IconButton extends StatelessWidget {
 }
 
 /// Filter chip row + sort row with a fade-out gradient at the bottom.
-/// Used in two positions: in-flow at its natural scroll position (no
-/// [topInset]) and as a floating overlay at the top of the screen when
-/// pinning kicks in ([topInset] = system safe-area height).
+/// Used in two positions: in-flow at its natural scroll position, and as a
+/// floating overlay under a [PinnedTopBar] once pinning kicks in.
 class _FilterSortBar extends StatelessWidget {
   const _FilterSortBar({
     required this.visibleTabs,
@@ -129,7 +128,6 @@ class _FilterSortBar extends StatelessWidget {
     required this.onFilterTap,
     required this.filterCount,
     super.key,
-    this.topInset = 0,
   });
 
   final List<ProfileTab> visibleTabs;
@@ -143,10 +141,6 @@ class _FilterSortBar extends StatelessWidget {
 
   /// Number of active filter constraints; drives the badge on the button.
   final int filterCount;
-
-  /// Reserved at the very top of the bar. Set to the system safe-area
-  /// height for the floating overlay so the chips clear the notch.
-  final double topInset;
 
   static const double _topPadding = MallowTheme.spacingMd;
   static const double _filterRowHeight = 32;
@@ -166,7 +160,7 @@ class _FilterSortBar extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              SizedBox(height: topInset + _topPadding),
+              const SizedBox(height: _topPadding),
               if (visibleTabs.isNotEmpty) ...[
                 SizedBox(
                   height: _filterRowHeight,

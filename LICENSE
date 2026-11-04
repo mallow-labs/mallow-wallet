@@ -24,8 +24,9 @@ SOFTWARE.
 
 The MIT grant above covers the source code. It does NOT cover:
 
-  * The "mallow" and "mallow wallet" names, wordmarks, and logos, or the brand
-    material under `assets/`. See TRADEMARK.md.
+  * The "mallow" and "mallow wallet" names, wordmarks, and logos, wherever they
+    appear (including the brand material under `assets/` and the app icons
+    under `ios/` and `android/`). See TRADEMARK.md.
   * The bundled fonts under `assets/fonts/`, which are third-party works under
     their own licenses (see the accompanying `*-OFL.txt` files).
   * The bundled artwork under `assets/images/carousel/`, which is the work of
@@ -33,3 +34,10 @@ The MIT grant above covers the source code. It does NOT cover:
     grant above. A fork must replace these files.
   * The icon sets and third-party marks under `assets/icons/`, and the token
     marks under `assets/images/tokens/`. See THIRD_PARTY_NOTICES.md.
+  * The bundled `<model-viewer>` under `assets/model_viewer/` (Apache-2.0, with
+    the libraries compiled into it under their own licences) and the Public
+    Suffix List in `assets/data/public_suffix_list.dat` (MPL-2.0). See
+    THIRD_PARTY_NOTICES.md.
+  * The files in `packages/keystone_ur/` that are ported from Blockchain
+    Commons' bc-ur (BSD-2-Clause Plus Patent). See that package's LICENSE and
+    NOTICE.

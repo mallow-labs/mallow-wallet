@@ -14,6 +14,7 @@ import '../services/auction_bloc.dart';
 import '../../../shared/widgets/currency_picker_sheet.dart';
 import '../../../shared/widgets/mallow_sheet.dart';
 import '../../../shared/widgets/tappable.dart';
+import '../../../shared/widgets/usd_estimate.dart';
 
 const _endPhaseOptions = [
   ('None', 0),
@@ -236,6 +237,9 @@ class _BidIncrementRowState extends State<_BidIncrementRow> {
               FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d*')),
             ],
             onChanged: _onChanged,
+            suffix: widget.absolute
+                ? UsdEstimate(rawAmount: widget.value, mint: widget.token.mint)
+                : null,
           ),
         ),
       ],

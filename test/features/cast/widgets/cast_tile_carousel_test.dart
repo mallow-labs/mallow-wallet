@@ -139,4 +139,43 @@ void main() {
       expect(element.hashCode, before[mint], reason: 'slide $mint reused');
     }
   });
+
+  /// Horizontal alignment of [mint]'s slide inside its slot.
+  double alignX(WidgetTester tester, String mint) =>
+      slideFor(tester, mint)!.alignment.x;
+
+  testWidgets('peeks lean toward the centred slide', (tester) async {
+    // Contain-fitted art is usually narrower than its 75%-wide slot. Centred
+    // in it, a peek's artwork sits wholly in the off-screen part of the slot
+    // and the viewer sees only the blurred background either side.
+    await pumpSlide(tester, 'B', prev: 'A', next: 'C');
+    await tester.pump();
+    expect(alignX(tester, 'A'), 1, reason: 'prev hugs its right edge');
+    expect(alignX(tester, 'B'), 0, reason: 'current is centred');
+    expect(alignX(tester, 'C'), -1, reason: 'next hugs its left edge');
+  });
+
+  testWidgets('the alignment moves with the slide on an advance', (
+    tester,
+  ) async {
+    await pumpSlide(tester, 'B', prev: 'A', next: 'C');
+    await tester.pump();
+    await pumpSlide(tester, 'C', prev: 'B', next: 'D');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    // Mid-slide: C is on its way from left-aligned peek to centred, and B
+    // from centred to right-aligned peek. A jump here would read as the
+    // artwork snapping sideways inside its slot.
+    final c = alignX(tester, 'C');
+    final b = alignX(tester, 'B');
+    expect(c, inExclusiveRange(-1, 0));
+    expect(b, inExclusiveRange(0, 1));
+
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump();
+    expect(alignX(tester, 'B'), 1);
+    expect(alignX(tester, 'C'), 0);
+    expect(alignX(tester, 'D'), -1);
+  });
 }

@@ -14,9 +14,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../core/crypto/wallet_manager.dart';
 import '../../../core/network/auth_service.dart';
-import '../../../core/network/hardware_verify_controller.dart';
 import '../../../core/result/result.dart';
 import '../../../core/services/wallet_change_listening.dart';
+import '../../../core/session/session_manager.dart';
 import '../../../core/utils/price_formatter.dart';
 import '../../../di.dart';
 import '../../../shared/utils/chain.dart' show Chain;
@@ -680,7 +680,6 @@ class PortfolioBloc extends Bloc<PortfolioEvent, PortfolioState>
     this._repository,
     this._curationRepository,
     this._authService,
-    this._hardwareVerifyController,
     this.walletManager,
   ) : super(const PortfolioState.initial()) {
     on<PortfolioLoad>(_onLoad);
@@ -755,7 +754,6 @@ class PortfolioBloc extends Bloc<PortfolioEvent, PortfolioState>
   final PortfolioRepository _repository;
   final CurationRepository _curationRepository;
   final AuthService _authService;
-  final HardwareVerifyController _hardwareVerifyController;
 
   StreamSubscription<void>? _refreshSignalSub;
   StreamSubscription<void>? _curationsSignalSub;
@@ -1543,11 +1541,24 @@ class PortfolioBloc extends Bloc<PortfolioEvent, PortfolioState>
     final address =
         _authService.currentAddress ?? await walletManager.getAddress();
 
+    // Sign, not just ask: Seed Vault's and Keystone's verify sheets collect
+    // consent and sign nothing, so treating that sheet's answer as "verified"
+    // refetched without a wallet-sig. signAndVerifyForWallet runs each device's
+    // whole handshake — Ledger's sheet, the Seed Vault approval, the Keystone
+    // QR exchange — straight from this tap, and caches the sig.
+    final wallet = sl.isRegistered<SessionManager>()
+        ? sl<SessionManager>().sessionWalletForAddress(address)
+        : null;
     var verified = false;
-    try {
-      verified = await _hardwareVerifyController.requestVerification(address);
-    } catch (e) {
-      debugPrint('[PortfolioBloc] Hardware verification failed: $e');
+    if (wallet != null && wallet.canSign) {
+      try {
+        await _authService.signAndVerifyForWallet(wallet.id, wallet.address);
+        verified = true;
+      } on HardwareVerificationCancelledException {
+        // The device's own sheet already said why.
+      } catch (e) {
+        debugPrint('[PortfolioBloc] Hardware verification failed: $e');
+      }
     }
     if (isClosed) return;
 

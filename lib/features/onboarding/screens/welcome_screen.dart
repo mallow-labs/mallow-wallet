@@ -6,10 +6,12 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../../core/router/app_router.dart';
+import '../../../core/services/onboarding_notice_slot.dart';
 import '../../../core/services/social_auth_service.dart';
 import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/widgets/mallow_button.dart';
+import '../../accounts/screens/hardware_wallet_chooser_screen.dart';
 import '../widgets/artwork_ring_3d.dart';
 import '../widgets/create_wallet_menu.dart';
 import '../widgets/import_wallet_menu.dart';
@@ -127,6 +129,27 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
                 textAlign: TextAlign.left,
               ),
               const Spacer(flex: 2),
+              // A line another feature wants the new user to see, if any.
+              ValueListenableBuilder<String?>(
+                valueListenable: sl<OnboardingNoticeSlot>().notice,
+                builder: (context, notice, _) {
+                  if (notice == null) return const SizedBox.shrink();
+                  return Padding(
+                    padding: const EdgeInsets.only(
+                      bottom: MallowTheme.spacingMd,
+                    ),
+                    child: Center(
+                      child: Text(
+                        notice,
+                        style: MallowTheme.uiMeta.copyWith(
+                          color: context.mallowColors.accent,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  );
+                },
+              ),
               // Select option text
               Center(
                 child: Text(
@@ -185,7 +208,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
       },
       onHardwareWalletTap: () {
         Navigator.pop(context);
-        context.push(AppRoutes.ledgerScan);
+        openHardwareWalletImport(context);
       },
       // Null on a device without Seed Vault, which hides the row entirely.
       onSeedVaultTap: _seedVaultAvailable

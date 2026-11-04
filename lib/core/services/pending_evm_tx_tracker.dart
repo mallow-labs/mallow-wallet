@@ -14,6 +14,7 @@ import '../../features/portfolio/services/balance_optimistic_updater.dart';
 import '../../features/portfolio/services/portfolio_refresh_signal.dart';
 import '../../features/send/models/eth_gas.dart';
 import '../../shared/utils/chain.dart' show Chain, apiOwnerAddress;
+import '../config/remote_config.dart';
 import '../crypto/wallet_manager.dart';
 import '../database/database.dart';
 import '../network/ethereum_rpc_service.dart';
@@ -107,6 +108,18 @@ class PendingEvmTxTracker with WidgetsBindingObserver {
   /// Resolutions as they happen, for the app-wide toast. Broadcast, so a
   /// resolution with no listener is dropped rather than queued.
   Stream<PendingTxResolution> get resolutions => _resolutionsController.stream;
+
+  final _resolutionObservers = <Future<void> Function(PendingTxResolution)>[];
+
+  /// Durable consumers save their recovery state before this tracker retires
+  /// a nonce slot. A failed save leaves the slot for the next watcher pass.
+  void addResolutionObserver(
+    Future<void> Function(PendingTxResolution) observer,
+  ) => _resolutionObservers.add(observer);
+
+  void removeResolutionObserver(
+    Future<void> Function(PendingTxResolution) observer,
+  ) => _resolutionObservers.remove(observer);
 
   /// Run one watcher pass now — app start, resume, or activity-sheet open.
   Future<void> refreshNow() => _runPass();
@@ -447,8 +460,12 @@ class PendingEvmTxTracker with WidgetsBindingObserver {
       final entry = _toEntry(row);
       final kind = await _classify(entry);
       if (kind == null) continue; // receipt read failed — retry next pass.
+      final resolution = PendingTxResolution(tx: entry, kind: kind);
+      for (final observer in List.of(_resolutionObservers)) {
+        await observer(resolution);
+      }
       await _db.deletePendingEvmTransaction(row.walletAddress, row.nonce);
-      resolved.add(PendingTxResolution(tx: entry, kind: kind));
+      resolved.add(resolution);
     }
 
     // 2. Nonce gaps: slots between the confirmed count and the mempool count
@@ -639,6 +656,7 @@ class PendingEvmTxTracker with WidgetsBindingObserver {
         maxFeePerGas: caps.maxFeePerGas,
         maxPriorityFeePerGas: caps.maxPriorityFeePerGas,
         refreshFees: false,
+        ledgerFlow: _ledgerFlowOf(entry),
         nonceOverride: plan.nonce,
         trackKind: entry.kind,
         trackRole: plan.role,
@@ -659,6 +677,22 @@ class PendingEvmTxTracker with WidgetsBindingObserver {
       }
     }
   }
+
+  /// The ledger flow a replacement is reported under: the flow that sent the
+  /// slot's original, where its kind says which. OpenSea purchases share
+  /// [PendingEvmTxKind.other] with other callers and an external slot was not
+  /// sent by this app, so those report no flow — the `replacement` role still
+  /// marks them.
+  static AppFlow? _ledgerFlowOf(PendingEvmTx entry) => switch (entry.kind) {
+    PendingEvmTxKind.send =>
+      evmHexToBytes(entry.data).isEmpty
+          ? AppFlow.nativeSend
+          : AppFlow.tokenSend,
+    PendingEvmTxKind.nftTransfer => AppFlow.nftTransfer,
+    PendingEvmTxKind.swap ||
+    PendingEvmTxKind.other ||
+    PendingEvmTxKind.external => null,
+  };
 
   // ==========================================================================
   // Snapshot

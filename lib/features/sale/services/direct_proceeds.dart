@@ -1,8 +1,7 @@
 // Single source of truth for the "Direct all proceeds to creators"
 // (`disablePrimarySplit`) gate and the primary/secondary-market
-// classification that drives it. Faithful Dart port of the webapp helpers so
-// the listing blocs and (in a later phase) MarketBloc share one implementation
-// rather than three drifting copies.
+// classification that drives it. The listing blocs and MarketBloc share
+// the webapp royalty and sale-classification rules through these helpers.
 //
 // Parity sources, all on the webapp side:
 //   - `assets` — `isSecondaryMarket`
@@ -16,23 +15,33 @@ import '../../artwork/models/on_chain_asset.dart';
 import '../../artwork/services/artwork_bloc.dart'
     show ArtworkDetails, ArtworkRoyaltySplit;
 import 'marketplace_config_service.dart';
+import '../../sell/services/trade_eligibility.dart';
 
-/// Whether the asset trades on the secondary market. Exact port of
-/// `assets` per token standard:
-///   - Nft / pNFT / cNFT → `primarySaleHappened`.
+/// Whether the asset trades on the secondary market, per token standard.
+/// Ported from the webapp's `isSecondaryMarket`, which matches what the
+/// programs settle:
+///   - Nft → `primarySaleHappened`.
+///   - pNFT → always secondary. Token Metadata refuses to flip
+///     `primarySaleHappened` on a programmable NFT, so the marketplace and
+///     auction programs settle every pNFT sale at the secondary rate and split.
+///   - cNFT (Bubblegum v1 and v2) → always secondary. The marketplace program
+///     sells every compressed leaf at the secondary rate, whatever the leaf's
+///     `primarySaleHappened` says.
 ///   - Core → `owner != collection.updateAuthority` when the parent
 ///     collection asset is supplied, else `owner != asset.updateAuthority`.
 ///   - CoreCollection → always false (primary).
 ///
 /// [collection] is the fetched parent-collection asset; supply it only for
-/// Core assets that carry a `collectionKey`. Non-Solana standards (EVM/Tezos)
+/// Core or Bubblegum v2 assets that carry a `collectionKey`. Non-Solana standards (EVM/Tezos)
 /// never reach the Solana listing flows and default to primary (false).
 bool isSecondaryMarketOf(DigitalAsset asset, {DigitalAsset? collection}) {
   switch (asset.tokenStandard) {
     case TokenStandard.nft:
+      return asset.primarySaleHappened;
     case TokenStandard.pnft:
     case TokenStandard.cnft:
-      return asset.primarySaleHappened;
+    case TokenStandard.cnftV2:
+      return true;
     case TokenStandard.core:
       if (collection != null) {
         return asset.owner != collection.updateAuthority;
@@ -107,6 +116,23 @@ ResolvedRoyalties resolveOnChainRoyalties(
         royaltyBps: asset.royaltiesPluginBasisPoints ?? 0,
         shares: _fromOnChainCreators(asset.royaltiesPluginCreators),
       );
+    case TokenStandard.cnftV2:
+      if (asset.sellerFeeBasisPoints != 65535 &&
+          asset.tokenMetadataCreators.isNotEmpty) {
+        return (
+          royaltyBps: asset.sellerFeeBasisPoints ?? 0,
+          shares: _fromOnChainCreators(asset.tokenMetadataCreators),
+        );
+      }
+      if (collection != null &&
+          collection.id == asset.collectionKey &&
+          collection.tokenStandard == TokenStandard.coreCollection) {
+        return (
+          royaltyBps: collection.royaltiesPluginBasisPoints ?? 0,
+          shares: _fromOnChainCreators(collection.royaltiesPluginCreators),
+        );
+      }
+      return (royaltyBps: 0, shares: const []);
     case TokenStandard.nft:
     case TokenStandard.pnft:
     case TokenStandard.cnft:
@@ -153,14 +179,18 @@ ResolvedListingEconomics resolveListingEconomics({
     royaltyShares = detail.royaltySplits;
     // `royaltyPercent` is a whole-percent string like "10" — convert to bps.
     final pct = double.tryParse(detail.royaltyPercent ?? '');
-    if (pct != null) royaltyBps = (pct * 100).round();
+    if (pct != null && (pct * 100).round() != 65535) {
+      royaltyBps = (pct * 100).round();
+    }
   }
 
   final apiFees = detail?.listingFees;
   final apiFeeBps = apiFees?.feeBps;
   return (
     royaltyShares: royaltyShares,
-    royaltyBps: apiFees?.royaltyBps ?? royaltyBps,
+    royaltyBps: apiFees?.royaltyBps == 65535
+        ? royaltyBps
+        : (apiFees?.royaltyBps ?? royaltyBps),
     primaryFeeBps: apiFeeBps ?? fees.primaryBps,
     secondaryFeeBps: apiFeeBps ?? fees.secondaryBps,
   );
@@ -171,6 +201,7 @@ ResolvedListingEconomics resolveListingEconomics({
 /// listing blocs and by their `_onStarted` and select-artwork handlers.
 typedef ListingContextData = ({
   DigitalAsset? asset,
+  TradeEligibility tradeEligibility,
   ArtworkDetails? detail,
   bool isSecondaryMarket,
   bool isVerifiedSeller,
@@ -183,38 +214,45 @@ typedef ListingContextData = ({
 
 /// Fetch and resolve the listing context for [mint]. All network calls
 /// degrade gracefully: a rejected DAS/detail future resolves to null (hidden
-/// options / empty breakdown) rather than throwing. Handlers are attached at
+/// options / empty breakdown), with incomplete v2 or unknown eligibility reported
+/// as unverified. Handlers are attached at
 /// future creation — never after an intervening `await` — so a rejection
 /// during the marketplace-config round-trip can't escape to the zone's
 /// uncaught-error handler.
 Future<ListingContextData> resolveListingContext({
   required String mint,
   required String sellerPubkey,
+  String? expectedTokenStandard,
   required DasApiService dasApi,
   required ArtworkRepository artworkRepo,
   required MarketplaceConfigService marketplaceConfig,
 }) async {
-  final assetFuture = dasApi
-      .getAsset(mint)
-      .then<DigitalAsset?>((a) => a, onError: (Object _) => null);
-  final detailFuture = artworkRepo
-      .getArtworkDetail(mint)
-      .then<ArtworkDetails?>((d) => d, onError: (Object _) => null);
+  final assetFuture = Future<DigitalAsset>.sync(
+    () => dasApi.getAsset(mint),
+  ).then<DigitalAsset?>((a) => a, onError: (Object _) => null);
+  final detailFuture = Future<ArtworkDetails>.sync(
+    () => artworkRepo.getArtworkDetail(mint),
+  ).then<ArtworkDetails?>((d) => d, onError: (Object _) => null);
+  // Start the dependent parent read as soon as DAS resolves; it overlaps the
+  // independent artwork/config reads and is reused for eligibility and royalties.
+  final collectionFuture = assetFuture.then<DigitalAsset?>((asset) async {
+    if (asset != null &&
+        (asset.tokenStandard == TokenStandard.core ||
+            asset.tokenStandard == TokenStandard.cnftV2) &&
+        asset.collectionKey != null) {
+      try {
+        return await dasApi.getAsset(asset.collectionKey!);
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
+  });
 
   final fees = await marketplaceConfig.get();
   final asset = await assetFuture;
   final detail = await detailFuture;
-
-  // Core assets classify off the parent collection's update authority when
-  // grouped — fetch it only in that case, tolerating failure.
-  DigitalAsset? collection;
-  if (asset != null &&
-      asset.tokenStandard == TokenStandard.core &&
-      asset.collectionKey != null) {
-    collection = await dasApi
-        .getAsset(asset.collectionKey!)
-        .then<DigitalAsset?>((a) => a, onError: (Object _) => null);
-  }
+  final collection = await collectionFuture;
 
   final isSecondary = asset != null
       ? isSecondaryMarketOf(asset, collection: collection)
@@ -227,14 +265,26 @@ Future<ListingContextData> resolveListingContext({
 
   final econ = resolveListingEconomics(detail: detail, fees: fees);
 
+  final tradeEligibility = resolveTradeEligibility(
+    asset: asset,
+    collection: collection,
+    expectedTokenStandard: detail?.tokenStandard == 'cnft-v2'
+        ? 'cnft-v2'
+        : expectedTokenStandard ?? detail?.tokenStandard,
+  );
+  final v2Royalties = asset?.tokenStandard == TokenStandard.cnftV2
+      ? resolveOnChainRoyalties(asset!, collection: collection)
+      : null;
+
   return (
     asset: asset,
+    tradeEligibility: tradeEligibility,
     detail: detail,
     isSecondaryMarket: isSecondary,
     isVerifiedSeller: isVerifiedSeller,
     updateAuthority: asset?.updateAuthority ?? detail?.updateAuthority,
-    royaltyShares: econ.royaltyShares,
-    royaltyBps: econ.royaltyBps,
+    royaltyShares: v2Royalties?.shares ?? econ.royaltyShares,
+    royaltyBps: v2Royalties?.royaltyBps ?? econ.royaltyBps,
     primaryFeeBps: econ.primaryFeeBps,
     secondaryFeeBps: econ.secondaryFeeBps,
   );

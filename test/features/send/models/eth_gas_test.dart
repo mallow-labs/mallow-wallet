@@ -157,7 +157,7 @@ void main() {
       expect(s.speedEta, '—'); // no measured ETA for a hand-tuned fee
     });
 
-    // WHY (FINDING 1, funds loss): a gas limit is per-transaction. A limit
+    // WHY (funds loss): a gas limit is per-transaction. A limit
     // persisted by a plain-ETH send (~25 200) must NEVER be replayed onto an
     // artwork transfer (~90 000-gas safeTransferFrom) — signing 25 200 mines an
     // out-of-gas revert, burning the fee and stranding the NFT. resolveFromPrefs

@@ -64,11 +64,17 @@ import 'portfolio_removal_refresh.dart';
 /// the transfer is prepared + signed by that specific ETH wallet even when it
 /// isn't the active one (there is no per-chain active-wallet selection). Null
 /// for Solana, where the signer resolves from the active wallet.
+///
+/// [initialRecipient] starts the recipient field filled, as when the user
+/// scanned the address before picking the artwork. It must be on the
+/// artwork's chain. It is validated like typed text and not sent to until
+/// the user taps Next.
 Future<bool> runTransferArtworkFlow(
   BuildContext context, {
   required PortfolioArtwork artwork,
   bool? isMasterEdition,
   String? evmHolder,
+  String? initialRecipient,
 }) async {
   final isEvm = isEthereumArtwork(
     mintAccount: artwork.mintAccount,
@@ -190,6 +196,7 @@ Future<bool> runTransferArtworkFlow(
           artwork: artwork,
           isMasterEdition: isMasterEdition,
           evmHolder: evmHolder,
+          initialRecipient: initialRecipient,
         ),
       ),
     );
@@ -207,10 +214,14 @@ class _TransferArtworkSheet extends StatefulWidget {
     required this.artwork,
     this.isMasterEdition,
     this.evmHolder,
+    this.initialRecipient,
   });
 
   final PortfolioArtwork artwork;
   final bool? isMasterEdition;
+
+  /// See [runTransferArtworkFlow].
+  final String? initialRecipient;
 
   /// The EVM asset's on-chain holder — the wallet the transfer is prepared and
   /// signed by (see [runTransferArtworkFlow]). Null for Solana, and for EVM
@@ -300,6 +311,14 @@ class _TransferArtworkSheetState extends State<_TransferArtworkSheet> {
     unawaited(_resolveRecentAccounts());
     unawaited(_resolveRecentProfiles());
     unawaited(_loadSelfAddress());
+    final initialRecipient = widget.initialRecipient;
+    if (initialRecipient != null) {
+      // After the first frame, as the field's handler sets state and talks
+      // to the bloc.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _setAddress(initialRecipient);
+      });
+    }
   }
 
   /// Loads the address this transfer will be signed *from*, then drops it from
@@ -722,7 +741,7 @@ class _TransferArtworkSheetState extends State<_TransferArtworkSheet> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      SheetDragHandle(color: colors.divider),
+                      const SheetDragHandle(),
                       Flexible(
                         child: AnimatedSwitcher(
                           duration: MallowTheme.sheetDuration,
@@ -990,7 +1009,7 @@ class _TransferArtworkSheetState extends State<_TransferArtworkSheet> {
         _pill(
           context,
           child: Text(
-            isEvm ? 'Ethereum' : 'Solana',
+            (isEvm ? Chain.ethereum : Chain.solana).networkLabel,
             style: MallowTheme.uiBody.copyWith(color: colors.textPrimary),
           ),
         ),

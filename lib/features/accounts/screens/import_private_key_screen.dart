@@ -167,6 +167,8 @@ class _ImportPrivateKeyBodyState extends State<_ImportPrivateKeyBody> {
             hintText: 'Paste your private key here...',
             autocorrect: false,
             enableSuggestions: false,
+            enableIMEPersonalizedLearning: false,
+            autofillHints: null,
             onChanged: (_) => setState(() {}),
           ),
           if (errorMessage != null) ...[

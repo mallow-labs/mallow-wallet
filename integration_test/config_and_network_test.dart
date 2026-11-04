@@ -42,7 +42,7 @@
 //     carries only the mnemonic, so there is no key to type into the import
 //     field. Belongs with `onboarding_import_test.dart`, which owns that
 //     screen and would have to add the constant.
-//   * `CFG-003`, `NET-003`, `NET-007` — deferred to Phase 3.
+//   * `CFG-003`, `NET-003`, `NET-007` — deferred.
 //     All three need a real signing flow (the `authorize()` backstop, an
 //     interrupted broadcast, an RPC outage mid-send), which needs the
 //     portfolio fixtures the send buckets own.
@@ -54,7 +54,7 @@
 //     owns; putting them here duplicates that file's navigation helpers.
 //
 // The store-button tap in `CFG-007` and the hardware-back dismiss attempt are
-// native, so they stay with Patrol (Phase 4). What is asserted here is the
+// native, so they stay with Patrol. What is asserted here is the
 // half observable from the Dart tree: the wall is up, it carries the
 // operator's copy verbatim, and nothing underneath it is reachable.
 //
@@ -141,10 +141,10 @@ void main() {
 
   // -------------------------------------------------------------------------
   // Harness guard. Runs first, deliberately: this file is the first consumer of
-  // `MockControl` from inside the app process (Wave 0 verified the control
-  // endpoints by curl from the host only). If the client call path is broken,
-  // every test below fails in a way that reads like an app bug. This one fails
-  // first and names the harness.
+  // `MockControl` from inside the app process (before it, the control
+  // endpoints were only checked by curl from the host). If the client call
+  // path is broken, every test below fails in a way that reads like an app
+  // bug. This one fails first and names the harness.
   // -------------------------------------------------------------------------
   testWidgets('mock control surface answers from inside the app process', (
     tester,

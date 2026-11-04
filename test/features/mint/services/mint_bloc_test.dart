@@ -12,12 +12,16 @@ import 'package:mallow_wallet/core/network/auth_service.dart';
 import 'package:mallow_wallet/core/network/solana_rpc_service.dart';
 import 'package:mallow_wallet/core/result/app_failure.dart';
 import 'package:mallow_wallet/core/result/result.dart';
+import 'package:mallow_wallet/core/security/transaction_auth_gate.dart'
+    show TransactionAuthGate, TransactionAuthOutcome;
 import 'package:mallow_wallet/core/session/session_manager.dart';
 import 'package:mallow_wallet/core/services/fee_config.dart';
+import 'package:mallow_wallet/core/services/ledger_service.dart';
 import 'package:mallow_wallet/core/services/signing_copy.dart';
 import 'package:mallow_wallet/core/services/token_price_service.dart';
 import 'package:mallow_wallet/core/services/transaction_executor.dart';
 import 'package:mallow_wallet/core/services/transaction_pipeline.dart';
+import 'package:mallow_wallet/core/services/transaction_signing.dart';
 import 'package:mallow_wallet/features/mint/data/edit_prefill.dart';
 import 'package:mallow_wallet/features/mint/data/mint_repository.dart';
 import 'package:mallow_wallet/features/mint/models/mint_form_models.dart';
@@ -26,7 +30,7 @@ import 'package:mallow_wallet/features/mint/services/mint_bloc.dart';
 import 'package:mallow_wallet/di.dart';
 import 'package:mockito/annotations.dart';
 import 'package:mockito/mockito.dart';
-import 'package:solana/encoder.dart' show SignedTx;
+import 'package:solana/encoder.dart' show Signature, SignedTx;
 import 'package:solana/solana.dart'
     show Ed25519HDKeyPair, Ed25519HDPublicKey, Message, SystemInstruction;
 
@@ -67,7 +71,7 @@ void main() {
     ipfsUrl: 'https://pin-gw.example.com/ipfs/Qmtest',
   );
 
-  MintBloc buildBloc() => MintBloc(
+  MintBloc buildBloc({TransactionExecutor? executor}) => MintBloc(
     mockRepository,
     mockWalletManager,
     mockRpcService,
@@ -75,7 +79,7 @@ void main() {
     mockPipeline,
     mockPriceService,
     const FeeConfig(),
-    mockExecutor,
+    executor ?? mockExecutor,
   );
 
   /// Stub the executor to walk awaitingApproval → broadcasting then return a
@@ -241,6 +245,116 @@ void main() {
         ).thenAnswer((_) async {});
         stubExecutorSuccess();
       });
+
+      for (final preSigned in [true, false]) {
+        blocTest<MintBloc, MintState>(
+          preSigned
+              ? 'slow co-signed mint surfaces expiry without rebuilding or finalizing'
+              : 'slow unsigned mint refreshes again and succeeds',
+          build: () {
+            final tx = _buildParseableTxBase64(
+              testWalletAddress,
+              preSigned: preSigned,
+            );
+            when(mockRepository.buildMintNftTx(any)).thenAnswer(
+              (_) async => ApiResponse(result: UnsignedTxResponse(tx: tx)),
+            );
+            when(
+              mockWalletManager.activeSignerIsKeystone(),
+            ).thenAnswer((_) async => true);
+            when(
+              mockWalletManager.signCompiledTx(
+                unsignedTx: anyNamed('unsignedTx'),
+                additionalSigners: anyNamed('additionalSigners'),
+              ),
+            ).thenAnswer(
+              (inv) async => inv.namedArguments[#unsignedTx] as SignedTx,
+            );
+            var refreshes = 0;
+            when(mockRpcService.getLatestBlockhash()).thenAnswer(
+              (_) async => ++refreshes == 1
+                  ? '11111111111111111111111111111112'
+                  : '11111111111111111111111111111113',
+            );
+            var checks = 0;
+            when(
+              mockRpcService.isBlockhashStillValid(any),
+            ).thenAnswer((_) async => ++checks > 1);
+            when(
+              mockRpcService.sendTransaction(any),
+            ).thenAnswer((_) async => testSignature);
+            when(
+              mockRpcService.awaitConfirmationOrThrow(
+                any,
+                rebroadcast: anyNamed('rebroadcast'),
+              ),
+            ).thenAnswer((_) async {});
+            return buildBloc(
+              executor: TransactionExecutor(
+                _CheckEverySignaturePipeline(mockWalletManager, mockRpcService),
+              ),
+            );
+          },
+          seed: () => seedState,
+          act: (bloc) async {
+            final terminal = bloc.stream.firstWhere(
+              (s) =>
+                  s.pipelineStatus == MintPipelineStatus.error ||
+                  s.pipelineStatus == MintPipelineStatus.success,
+            );
+            bloc.add(const MintEvent.confirmMint());
+            await terminal;
+          },
+          verify: (bloc) {
+            final state = bloc.state;
+            verify(mockRepository.buildMintNftTx(any)).called(1);
+            verify(mockRepository.generateMintKeypair()).called(1);
+            if (preSigned) {
+              expect(state.pipelineStatus, MintPipelineStatus.error);
+              expect(
+                state.pipelineError,
+                'That took too long, so the transaction expired. Try again.',
+              );
+              expect(
+                state.pipelineFailure?.cause,
+                isA<SignedTooLateException>(),
+              );
+              verify(
+                mockWalletManager.signCompiledTx(
+                  unsignedTx: anyNamed('unsignedTx'),
+                  additionalSigners: anyNamed('additionalSigners'),
+                ),
+              ).called(1);
+              verifyNever(mockRpcService.getLatestBlockhash());
+              verifyNever(mockRpcService.sendTransaction(any));
+              verifyNever(
+                mockRepository.finalize(
+                  mintAccount: anyNamed('mintAccount'),
+                  txIds: anyNamed('txIds'),
+                  type: anyNamed('type'),
+                ),
+              );
+            } else {
+              expect(state.pipelineStatus, MintPipelineStatus.success);
+              verify(
+                mockWalletManager.signCompiledTx(
+                  unsignedTx: anyNamed('unsignedTx'),
+                  additionalSigners: anyNamed('additionalSigners'),
+                ),
+              ).called(2);
+              verify(mockRpcService.getLatestBlockhash()).called(2);
+              verify(mockRpcService.sendTransaction(any)).called(1);
+              verify(
+                mockRepository.finalize(
+                  mintAccount: anyNamed('mintAccount'),
+                  txIds: anyNamed('txIds'),
+                  type: anyNamed('type'),
+                ),
+              ).called(1);
+            }
+          },
+        );
+      }
 
       blocTest<MintBloc, MintState>(
         'stages through uploading → buildingTx → awaitingApproval → broadcasting → finalizing → success',
@@ -1325,6 +1439,239 @@ void main() {
     );
   });
 
+  // An asset minted without creators (no Royalties plugin, or a legacy NFT
+  // with no creator list) used to open the royalties step with no rows: the
+  // 100% check could never pass, and "Add another wallet" made row 0 a blank
+  // row the bloc refused to edit. Webapp parity: `withDefaultCreator`.
+  group('edit of an asset with no on-chain creators', () {
+    const coCreator = '2zTdfnJqQ8jNPDrEXpDqYQoHhgH3RqvzZzYmBRnkgLcw';
+    const updateAuthority = 'Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS';
+
+    EditNftPrefill collectionPrefill({
+      List<MintCreator> creators = const [],
+      String? authority,
+      TokenStandard tokenStandard = TokenStandard.coreCollection,
+    }) => EditNftPrefill(
+      mintAccount: testMintAccount,
+      tokenStandard: tokenStandard,
+      name: 'Collection',
+      description: 'd',
+      attributes: const [],
+      tags: const [],
+      nsfw: false,
+      sellerFeeBasisPoints: 0,
+      creators: creators,
+      isMasterEdition: false,
+      isCollection: true,
+      maxSupply: 0,
+      currentSupply: 0,
+      isMutable: true,
+      updateAuthority: authority,
+      existingImageUrl: 'ipfs://image.png',
+      existingBannerUrl: 'ipfs://banner.png',
+    );
+
+    void stubPrefill(EditNftPrefill prefill) {
+      when(mockRepository.fetchTxFees()).thenAnswer((_) async => null);
+      when(mockEditPrefill.load(any)).thenAnswer((_) async => prefill);
+    }
+
+    const startEdit = MintEvent.startedForEdit(
+      mintAccount: testMintAccount,
+      isCollection: true,
+    );
+
+    blocTest<MintBloc, MintState>(
+      'seeds the editing wallet at 100% and counts the edit as an update',
+      setUp: () => stubPrefill(collectionPrefill()),
+      build: buildBloc,
+      act: (bloc) => bloc.add(startEdit),
+      verify: (bloc) {
+        final state = bloc.state;
+        expect(state.creators, const [
+          MintCreatorInput(address: testWalletAddress, isSelf: true),
+        ]);
+        expect(state.creatorsError, isNull);
+        // The snapshot keeps the on-chain (empty) list.
+        expect(state.preEditRoyaltyFields, const <Object>[0]);
+        expect(state.requiresUpdate, isTrue);
+      },
+    );
+
+    // The legacy path is the one that failed in the field: a Token Metadata
+    // collection NFT minted with `creators: None` sent `creators: []`, which
+    // the program rejects (`CreatorsMustBeAtleastOne`, 0x25).
+    blocTest<MintBloc, MintState>(
+      'a legacy collection with no creators submits the seeded wallet',
+      setUp: () {
+        stubPrefill(
+          collectionPrefill(
+            authority: testWalletAddress,
+            tokenStandard: TokenStandard.nft,
+          ),
+        );
+        when(mockSession.sessionWalletForAddress(testWalletAddress)).thenReturn(
+          const WalletInfo(
+            id: 'ua-wallet',
+            address: testWalletAddress,
+            name: 'authority wallet',
+            walletType: WalletType.hd,
+            chain: 'solana',
+          ),
+        );
+        when(
+          mockRepository.uploadMetadata(any),
+        ).thenAnswer((_) async => 'ipfs://metadata');
+        when(mockRepository.buildEditNftTx(any)).thenAnswer(
+          (_) async => const ApiResponse<UnsignedTxWithSetupResponse>(
+            result: UnsignedTxWithSetupResponse(tx: 'unsigned-tx'),
+          ),
+        );
+        when(
+          mockRepository.finalizeEdit(
+            mintAccount: anyNamed('mintAccount'),
+            txIds: anyNamed('txIds'),
+            type: anyNamed('type'),
+          ),
+        ).thenAnswer((_) async {});
+        stubExecutorSuccess();
+      },
+      build: buildBloc,
+      act: (bloc) async {
+        bloc.add(startEdit);
+        await Future<void>.delayed(Duration.zero);
+        bloc.add(const MintEvent.confirmMint());
+      },
+      wait: const Duration(milliseconds: 100),
+      verify: (_) {
+        final req =
+            verify(mockRepository.buildEditNftTx(captureAny)).captured.last
+                as EditNftV2Request;
+        expect(req.editTarget, EditNftV2EditTarget.parentCollection);
+        expect(req.tokenStandard, TokenStandard.nft);
+        expect(req.nftMetadata.creators, const [
+          EditNftV2Creator(address: testWalletAddress, share: 100),
+        ]);
+      },
+    );
+
+    blocTest<MintBloc, MintState>(
+      'seeds the update authority when it is a signable session wallet, '
+      'since the edit is signed by it rather than the active wallet',
+      setUp: () {
+        stubPrefill(collectionPrefill(authority: updateAuthority));
+        when(mockSession.sessionWalletForAddress(updateAuthority)).thenReturn(
+          const WalletInfo(
+            id: 'ua-wallet',
+            address: updateAuthority,
+            name: 'authority wallet',
+            walletType: WalletType.hd,
+            chain: 'solana',
+          ),
+        );
+      },
+      build: buildBloc,
+      act: (bloc) => bloc.add(startEdit),
+      verify: (bloc) => expect(bloc.state.creators, const [
+        MintCreatorInput(address: updateAuthority, isSelf: true),
+      ]),
+    );
+
+    blocTest<MintBloc, MintState>(
+      'keeps the on-chain creators when there are any, and leaves a row the '
+      'user does not own editable even in first position',
+      setUp: () => stubPrefill(
+        collectionPrefill(
+          creators: const [MintCreator(address: coCreator, share: 100)],
+        ),
+      ),
+      build: buildBloc,
+      act: (bloc) async {
+        bloc.add(startEdit);
+        await Future<void>.delayed(Duration.zero);
+        bloc.add(const MintEvent.setCreatorAddress(0, updateAuthority));
+      },
+      verify: (bloc) {
+        expect(bloc.state.creators, const [
+          MintCreatorInput(address: updateAuthority),
+        ]);
+        expect(bloc.state.requiresUpdate, isTrue);
+      },
+    );
+
+    blocTest<MintBloc, MintState>(
+      'an untouched edit of an asset with creators is still a no-op',
+      setUp: () => stubPrefill(
+        collectionPrefill(
+          creators: const [MintCreator(address: testWalletAddress, share: 100)],
+        ),
+      ),
+      build: buildBloc,
+      act: (bloc) => bloc.add(startEdit),
+      verify: (bloc) => expect(bloc.state.requiresUpdate, isFalse),
+    );
+
+    blocTest<MintBloc, MintState>(
+      'a royalties-only change counts as an update',
+      setUp: () => stubPrefill(
+        collectionPrefill(
+          creators: const [MintCreator(address: testWalletAddress, share: 100)],
+        ),
+      ),
+      build: buildBloc,
+      act: (bloc) async {
+        bloc.add(startEdit);
+        await Future<void>.delayed(Duration.zero);
+        bloc.add(const MintEvent.setRoyaltyPercent('5'));
+      },
+      verify: (bloc) => expect(bloc.state.requiresUpdate, isTrue),
+    );
+
+    blocTest<MintBloc, MintState>(
+      'the user\'s own row stays locked wherever it sits',
+      build: buildBloc,
+      seed: () => const MintState(
+        userPubkey: testWalletAddress,
+        creators: [
+          MintCreatorInput(address: coCreator, shareText: '50'),
+          MintCreatorInput(
+            address: testWalletAddress,
+            shareText: '50',
+            isSelf: true,
+          ),
+        ],
+      ),
+      act: (bloc) => bloc
+        ..add(const MintEvent.setCreatorAddress(1, updateAuthority))
+        ..add(const MintEvent.removeCreator(1))
+        ..add(const MintEvent.removeCreator(0)),
+      verify: (bloc) => expect(bloc.state.creators, const [
+        MintCreatorInput(
+          address: testWalletAddress,
+          shareText: '50',
+          isSelf: true,
+        ),
+      ]),
+    );
+
+    blocTest<MintBloc, MintState>(
+      'adding the first wallet to an empty list adds the user\'s own at 100%',
+      build: buildBloc,
+      seed: () => const MintState(userPubkey: testWalletAddress),
+      act: (bloc) => bloc.add(const MintEvent.addCreator()),
+      verify: (bloc) => expect(bloc.state.creators, const [
+        MintCreatorInput(address: testWalletAddress, isSelf: true),
+      ]),
+    );
+
+    test('an empty creator list never passes the royalties step', () {
+      expect(
+        const MintState().creatorsError,
+        'Proceed splits must add up to 100%',
+      );
+    });
+  });
+
   // The mint source picker commits the wallet switch
   // itself; this event is what stops the *form* from carrying the previous
   // wallet's identity and numbers into the tx. The wallet it picks is written
@@ -2071,7 +2418,11 @@ void main() {
 /// it round-trips through `SignedTx.fromBytes` cleanly. Vary [lamports] for a
 /// byte-distinct second transaction, so a batch's ORDER is assertable and not
 /// just its length.
-String _buildParseableTxBase64(String walletAddress, {int lamports = 1}) {
+String _buildParseableTxBase64(
+  String walletAddress, {
+  int lamports = 1,
+  bool preSigned = false,
+}) {
   final pubkey = Ed25519HDPublicKey.fromBase58(walletAddress);
   final message = Message.only(
     SystemInstruction.transfer(
@@ -2081,9 +2432,55 @@ String _buildParseableTxBase64(String walletAddress, {int lamports = 1}) {
     ),
   );
   return SignedTx(
+    signatures: [
+      Signature(List<int>.filled(64, preSigned ? 7 : 0), publicKey: pubkey),
+    ],
     compiledMessage: message.compile(
       recentBlockhash: '11111111111111111111111111111111',
       feePayer: pubkey,
     ),
   ).encode();
+}
+
+/// Runs the real signing primitive and executor without a ten-second wait.
+/// Indexer polling remains on the bloc's separate mock pipeline.
+class _CheckEverySignaturePipeline extends Fake implements TransactionPipeline {
+  _CheckEverySignaturePipeline(this.wallet, this.rpc);
+
+  final WalletManager wallet;
+  final SolanaRpcService rpc;
+
+  @override
+  Future<Result<String, AppFailure>> signAndBroadcast({
+    required String unsignedTxBase64,
+    required double? usdValue,
+    required FlowKey flow,
+    List<Ed25519HDKeyPair> additionalSigners = const [],
+    void Function()? onSigned,
+    void Function(LedgerSigningState)? onLedgerSigning,
+    bool useLedger = true,
+    SolanaRpcService? rpcOverride,
+    bool Function()? discardSignatureIf,
+  }) => Result.guard(
+    () => signSendConfirm(
+      unsignedTxBase64,
+      walletManager: wallet,
+      rpcService: rpcOverride ?? rpc,
+      authGate: _AllowAllAuthGate(),
+      usdValue: usdValue,
+      flow: flow,
+      additionalSigners: additionalSigners,
+      onSigned: onSigned,
+      discardSignatureIf: discardSignatureIf,
+      slowSigningThreshold: Duration.zero,
+    ),
+  );
+}
+
+class _AllowAllAuthGate extends Fake implements TransactionAuthGate {
+  @override
+  Future<TransactionAuthOutcome> authorize({
+    required double? usdValue,
+    required FlowKey flow,
+  }) async => TransactionAuthOutcome.allowed;
 }

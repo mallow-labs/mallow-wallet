@@ -4,6 +4,7 @@ import 'package:bloc_test/bloc_test.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_wallet/core/config/remote_config.dart';
 import 'package:mallow_wallet/core/crypto/wallet_manager.dart';
+import 'package:mallow_wallet/core/network/solana_pay_tags.dart';
 import 'package:mallow_wallet/core/network/solana_rpc_service.dart';
 import 'package:mallow_wallet/core/result/app_failure.dart';
 import 'package:mallow_wallet/core/result/result.dart';
@@ -1035,6 +1036,37 @@ void main() {
         act: (bloc) => typeAfterSourcePicked(bloc, '99999'),
         expect: () => [const SendState.input(amount: '99999')],
       );
+
+      // A payment request fills the amount and asks for the review in the same
+      // frame the source is picked, before the field's balance read can land.
+      // The review has to read the balance itself, or the request walks
+      // straight to the confirm step with an amount the wallet cannot pay.
+      blocTest<SendBloc, SendState>(
+        'review reads a balance the field had not got yet, and stops on it',
+        setUp: () {
+          when(
+            mockRpcService.getBalanceForAddress(testWalletAddress),
+          ).thenAnswer((_) async => 1000000000); // 1 SOL
+        },
+        build: build,
+        seed: () => const SendState.input(
+          recipient: testRecipientAddress,
+          amount: '1000000',
+        ),
+        act: (bloc) => bloc.add(const SendEvent.validateAndProceed()),
+        expect: () => [
+          const SendState.input(
+            recipient: testRecipientAddress,
+            amount: '1000000',
+            isValidating: true,
+          ),
+          const SendState.input(
+            recipient: testRecipientAddress,
+            amount: '1000000',
+            amountError: 'Insufficient balance',
+          ),
+        ],
+      );
     });
 
     group('ValidateAndProceed event', () {
@@ -1112,6 +1144,93 @@ void main() {
     });
 
     group('Execute event', () {
+      group('with Solana Pay tags', () {
+        const tags = SolanaPayTags(
+          references: [testRecipientAddress],
+          memo: 'order 42',
+        );
+
+        SendBloc build() => SendBloc(
+          mockRpcService,
+          mockWalletManager,
+          authGate,
+          mockPriceService,
+          const FeeConfig(),
+          mockExecutor,
+          mockTezos,
+          mockEthereum,
+          sl<PreferencesService>(),
+        );
+
+        setUp(() {
+          when(
+            mockRpcService.buildSolTransferTx(
+              destination: anyNamed('destination'),
+              lamports: anyNamed('lamports'),
+              pinnedBudget: anyNamed('pinnedBudget'),
+              tags: tags,
+            ),
+          ).thenAnswer((_) async => 'unsigned-tx-base64');
+          when(
+            mockRpcService.buildSplTransferTx(
+              destination: anyNamed('destination'),
+              tokenMint: anyNamed('tokenMint'),
+              amount: anyNamed('amount'),
+              tags: tags,
+            ),
+          ).thenAnswer((_) async => 'unsigned-tx-base64');
+        });
+
+        // The merchant finds its payment by these, so a transfer built
+        // without them pays without ever being seen.
+        blocTest<SendBloc, SendState>(
+          'a SOL payment carries them',
+          build: build,
+          seed: () => const SendState.ready(
+            recipient: testRecipientAddress,
+            amountString: '1.0',
+            amount: 1.0,
+            token: null,
+            estimatedFeeLamports: 5000,
+            totalCost: 1.000005,
+          ),
+          act: (bloc) => bloc
+            ..add(const SendEvent.setPaymentTags(tags))
+            ..add(const SendEvent.execute()),
+          verify: (_) => verify(
+            mockRpcService.buildSolTransferTx(
+              destination: testRecipientAddress,
+              lamports: 1000000000,
+              tags: tags,
+            ),
+          ).called(1),
+        );
+
+        blocTest<SendBloc, SendState>(
+          'an SPL payment carries them',
+          build: build,
+          seed: () => const SendState.ready(
+            recipient: testRecipientAddress,
+            amountString: '25.0',
+            amount: 25.0,
+            token: testToken,
+            estimatedFeeLamports: 5000,
+            totalCost: 25.0,
+          ),
+          act: (bloc) => bloc
+            ..add(const SendEvent.setPaymentTags(tags))
+            ..add(const SendEvent.execute()),
+          verify: (_) => verify(
+            mockRpcService.buildSplTransferTx(
+              destination: testRecipientAddress,
+              tokenMint: testToken.mint,
+              amount: 25000000,
+              tags: tags,
+            ),
+          ).called(1),
+        );
+      });
+
       blocTest<SendBloc, SendState>(
         'successfully sends SOL transfer',
         // buildSolTransferTx + executor.execute are stubbed in setUp.
@@ -2974,7 +3093,7 @@ void main() {
         },
       );
 
-      // WHY (FINDING 2, variant a — CONTRACT RECIPIENT): a Max native send to a
+      // WHY (CONTRACT RECIPIENT): a Max native send to a
       // contract wallet (Safe/Argent) runs the recipient's receive/fallback, so
       // its transfer costs more than the flat 21 000-gas EOA path — here 50 000
       // gas → 60 000 padded. The reserve MUST use that real per-recipient limit
@@ -3060,7 +3179,7 @@ void main() {
         },
       );
 
-      // FINDING 5 (stale-transfer hazard) + FINDING 8b (concurrent fee market).
+      // Stale-transfer hazard + concurrent fee market.
       // The review step caches the validated prepared transfer for execute to
       // sign. These tests prove the cache is never signed once it no longer
       // matches the live ready state, and that the fee-market fetch (now kicked
@@ -3137,7 +3256,7 @@ void main() {
           marketGate = Completer<EthGasMarket>();
         });
 
-        // WHY (FINDING 8b): the fee-market fetch runs concurrently with prepare
+        // WHY: the fee-market fetch runs concurrently with prepare
         // now. A market failure must still degrade to a null market/selection
         // and never block the review — the concurrency change must not alter the
         // non-fatal semantics.
@@ -3172,7 +3291,7 @@ void main() {
           },
         );
 
-        // WHY (FINDING 5, part a): an amount edit landing while a review is in
+        // WHY (stale cache): an amount edit landing while a review is in
         // flight must invalidate (clear) the cached prepared, so execute
         // re-prepares from the ready state instead of signing the orphaned one.
         blocTest<SendBloc, SendState>(
@@ -3223,7 +3342,7 @@ void main() {
           },
         );
 
-        // WHY (FINDING 5, part b — load-bearing): when the cache holds a
+        // WHY (stale cache — load-bearing): when the cache holds a
         // prepared from a SUPERSEDED review (different recipient + amount than
         // the live ready state), execute must re-prepare from the ready state
         // and NEVER sign the stale cache. The signed recipient/amount must be

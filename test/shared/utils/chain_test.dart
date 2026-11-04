@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mallow_wallet/core/config/environment.dart';
 import 'package:mallow_wallet/shared/utils/chain.dart';
 
 void main() {
@@ -129,6 +130,41 @@ void main() {
       // API ships a new chain we haven't mapped yet.
       expect(chainLabel('cosmos'), 'cosmos');
       expect(chainLabel('btc'), 'btc');
+    });
+  });
+
+  group('Chain.networkLabel', () {
+    tearDown(Config.debugOverrides.clear);
+
+    test('Solana names the network the build runs on', () {
+      Config.debugOverrides['ENV'] = 'production';
+      expect(Chain.solana.networkLabel, 'Solana Mainnet');
+      Config.debugOverrides['ENV'] = 'staging';
+      expect(Chain.solana.networkLabel, 'Solana Devnet');
+      Config.debugOverrides['ENV'] = 'development';
+      expect(Chain.solana.networkLabel, 'Solana Devnet');
+    });
+
+    test('Ethereum and Tezos are mainnet in every build', () {
+      for (final env in ['production', 'staging', 'development']) {
+        Config.debugOverrides['ENV'] = env;
+        expect(Chain.ethereum.networkLabel, 'Ethereum Mainnet');
+        expect(Chain.tezos.networkLabel, 'Tezos Mainnet');
+      }
+    });
+  });
+
+  group('caip2NetworkLabel', () {
+    test('maps each supported chain id', () {
+      expect(caip2NetworkLabel('solana:mainnet'), 'Solana Mainnet');
+      expect(caip2NetworkLabel('solana:devnet'), 'Solana Devnet');
+      expect(caip2NetworkLabel('eip155:1'), 'Ethereum Mainnet');
+      expect(caip2NetworkLabel('tezos:NetXdQprcVkpaWU'), 'Tezos Mainnet');
+    });
+
+    test('an unknown id is shown raw, never as a supported network', () {
+      expect(caip2NetworkLabel('eip155:137'), 'eip155:137');
+      expect(caip2NetworkLabel('solana:testnet'), 'solana:testnet');
     });
   });
 

@@ -45,24 +45,136 @@ DigitalAsset _asset({
 );
 
 void main() {
-  group('isSecondaryMarketOf - token-metadata (Nft/pNFT/cNFT)', () {
-    for (final standard in [
-      TokenStandard.nft,
-      TokenStandard.pnft,
-      TokenStandard.cnft,
-    ]) {
-      test('$standard keys off primarySaleHappened', () {
-        expect(
-          isSecondaryMarketOf(_asset(standard: standard)),
-          isFalse,
-          reason: 'no primary sale yet (default false) → primary market',
+  test(
+    'v2 trades are secondary even before the leaf primary-sale flag is set',
+    () {
+      expect(
+        isSecondaryMarketOf(_asset(standard: TokenStandard.cnftV2)),
+        isTrue,
+      );
+    },
+  );
+  group('Bubblegum v2 royalty inheritance', () {
+    const leafCreator = OnChainCreator(
+      address: 'leafCreator',
+      share: 100,
+      verified: true,
+    );
+    const collectionCreator = OnChainCreator(
+      address: 'collectionCreator',
+      share: 100,
+      verified: true,
+    );
+    final collection = _asset(
+      standard: TokenStandard.coreCollection,
+      royaltiesPluginBasisPoints: 750,
+      royaltiesPluginCreators: [collectionCreator],
+    );
+    for (final bps in [500, 65535]) {
+      for (final creators in [
+        <OnChainCreator>[],
+        [leafCreator],
+      ]) {
+        test(
+          'bps $bps and ${creators.length} leaf creators choose the authenticated source',
+          () {
+            final asset = _asset(
+              standard: TokenStandard.cnftV2,
+              collectionKey: 'mint',
+              sellerFeeBasisPoints: bps,
+              tokenMetadataCreators: creators,
+            );
+            final royalties = resolveOnChainRoyalties(
+              asset,
+              collection: collection,
+            );
+            final useLeaf = bps != 65535 && creators.isNotEmpty;
+            expect(royalties.royaltyBps, useLeaf ? 500 : 750);
+            expect(
+              royalties.shares.single.address,
+              useLeaf ? 'leafCreator' : 'collectionCreator',
+            );
+          },
         );
+      }
+    }
+    for (final standard in [TokenStandard.coreCollection, TokenStandard.nft]) {
+      test(
+        'mismatched collection or non-Core parent $standard resolves to zero',
+        () {
+          final result = resolveOnChainRoyalties(
+            _asset(
+              standard: TokenStandard.cnftV2,
+              collectionKey: standard == TokenStandard.coreCollection
+                  ? 'different'
+                  : 'mint',
+              sellerFeeBasisPoints: 65535,
+              tokenMetadataCreators: [leafCreator],
+            ),
+            collection: _asset(
+              standard: standard,
+              royaltiesPluginBasisPoints: 750,
+              royaltiesPluginCreators: [collectionCreator],
+            ),
+          );
+          expect(result.royaltyBps, 0);
+          expect(result.shares, isEmpty);
+        },
+      );
+    }
+    test('sentinel with no collection resolves to zero', () {
+      final royalties = resolveOnChainRoyalties(
+        _asset(
+          standard: TokenStandard.cnftV2,
+          sellerFeeBasisPoints: 65535,
+          tokenMetadataCreators: [leafCreator],
+        ),
+      );
+      expect(royalties.royaltyBps, 0);
+      expect(royalties.shares, isEmpty);
+    });
+  });
+
+  group('isSecondaryMarketOf - token-metadata Nft', () {
+    test('nft keys off primarySaleHappened', () {
+      expect(
+        isSecondaryMarketOf(_asset(standard: TokenStandard.nft)),
+        isFalse,
+        reason: 'no primary sale yet (default false) → primary market',
+      );
+      expect(
+        isSecondaryMarketOf(
+          _asset(standard: TokenStandard.nft, primarySaleHappened: true),
+        ),
+        isTrue,
+        reason: 'primary sale happened → secondary market',
+      );
+    });
+  });
+
+  // Token Metadata cannot flip primarySaleHappened on a pNFT, so the programs
+  // settle every pNFT sale as secondary whatever the flag says.
+  test('isSecondaryMarketOf - pNFT is always secondary', () {
+    expect(isSecondaryMarketOf(_asset(standard: TokenStandard.pnft)), isTrue);
+    expect(
+      isSecondaryMarketOf(
+        _asset(standard: TokenStandard.pnft, primarySaleHappened: true),
+      ),
+      isTrue,
+    );
+  });
+
+  // The marketplace program charges every compressed sale the secondary fee,
+  // and DAS reports `primarySaleHappened: false` for every leaf.
+  group('isSecondaryMarketOf - cNFT', () {
+    for (final standard in [TokenStandard.cnft, TokenStandard.cnftV2]) {
+      test('$standard is always secondary', () {
+        expect(isSecondaryMarketOf(_asset(standard: standard)), isTrue);
         expect(
           isSecondaryMarketOf(
             _asset(standard: standard, primarySaleHappened: true),
           ),
           isTrue,
-          reason: 'primary sale happened → secondary market',
         );
       });
     }

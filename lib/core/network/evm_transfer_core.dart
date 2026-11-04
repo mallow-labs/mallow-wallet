@@ -5,6 +5,10 @@ import 'dart:typed_data';
 import 'package:wallet/wallet.dart' show EtherAmount, EthereumAddress;
 import 'package:web3dart/web3dart.dart';
 
+import '../../shared/utils/chain.dart';
+import '../analytics/analytics_events.dart';
+import '../analytics/transaction_ledger.dart';
+import '../config/remote_config.dart';
 import '../crypto/wallet_manager.dart';
 import '../services/pending_evm_tx_tracker.dart';
 import 'ethereum_rpc_service.dart';
@@ -157,6 +161,10 @@ int effectiveSignedGasLimit({
 /// even when [refreshFees] is true — re-fetching the market could sign *below*
 /// the 110% bump the node demands over the transaction being replaced.
 ///
+/// [ledgerFlow] is the flow the broadcast is reported under in the analytics
+/// transaction ledger — required so no EVM caller can leave its transactions
+/// out of it. Null only for a replacement of a transaction no known flow sent.
+///
 /// The broadcast is registered with `PendingEvmTxTracker` ([trackKind] /
 /// [trackAs] describe it for display; [trackRole] says whether it opens a nonce
 /// slot or joins one). Registration is fire-and-forget: the transaction is
@@ -190,6 +198,7 @@ Future<String> signAndBroadcastEvmTransfer({
   required BigInt maxFeePerGas,
   required BigInt maxPriorityFeePerGas,
   required bool refreshFees,
+  required AppFlow? ledgerFlow,
   int gasHeadroomNum = 12,
   int gasHeadroomDen = 10,
   void Function()? onBroadcasting,
@@ -264,6 +273,18 @@ Future<String> signAndBroadcastEvmTransfer({
   );
   onBroadcasting?.call();
   final hash = await rpc.sendRawTransaction(signed);
+  // Recorded at broadcast, not inclusion: a caller may stop waiting (the send
+  // pipeline's early exit, every replacement), and the tx is on the wire now.
+  recordSubmittedTransaction(
+    chain: Chain.ethereum,
+    flow: ledgerFlow,
+    signature: hash,
+    walletAddress: () => source,
+    confirmation: TxConfirmation.pending,
+    replacement: trackRole == PendingTxCandidateRole.original
+        ? null
+        : trackRole.name,
+  );
   // Persist the broadcast so the nonce stays actionable (speed up / cancel)
   // across restarts. Fire-and-forget by contract — see the doc comment.
   notifyPendingEvmBroadcast(

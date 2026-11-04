@@ -94,7 +94,15 @@ class _ArtworkDetailBodyState extends State<_ArtworkDetailBody> {
           onCurationsTap: widget.onOpenCurations,
         ),
         const SizedBox(height: MallowTheme.spacing20),
-        ArtworkInfoTabs(data: widget.viewData),
+        ArtworkInfoTabs(
+          data: widget.viewData,
+          onCategoryTap: (name) => openSearchDrilldown(
+            context,
+            _categoryDrilldownTarget(mintCategoryIdFor(name)),
+          ),
+          onTagTap: (tag) =>
+              openSearchDrilldown(context, TagDrilldownTarget(tag)),
+        ),
         const SizedBox(height: MallowTheme.spacing20),
         MallowUnderlineTabBar(
           tabs: _tab2Labels,
@@ -287,3 +295,10 @@ ArtworkInfoViewData _buildArtworkInfoViewData(
     ],
   );
 }
+
+/// The search page's drilldown for the category tag [tag], so a category chip
+/// opens the same page as the matching button on the search landing page. The
+/// two category lists are the same, so the tag fallback only covers a category
+/// added to one and not yet the other.
+ArtworkDrilldownTarget _categoryDrilldownTarget(String tag) =>
+    SearchFilterType.forCategoryTag(tag) ?? TagDrilldownTarget(tag);

@@ -173,6 +173,8 @@ class ArtworkDetails {
     this.quantityTotal,
     this.animationUrl,
     this.playbackId,
+    this.htmlUrl,
+    this.modelUrl,
     this.royaltyPercent,
     this.royaltySplits = const [],
     this.createdAt,
@@ -201,6 +203,17 @@ class ArtworkDetails {
   /// multi-megabyte original is left to the fullscreen viewer. Null on an
   /// artwork with no video, or one Mux has not finished transcoding.
   final String? playbackId;
+
+  /// Interactive HTML document for HTML artworks. The detail screen renders it
+  /// in a sandboxed web view in place of the still poster ([imageUrl]), which
+  /// stays the fallback when no gateway serves the page.
+  final String? htmlUrl;
+
+  /// Binary glTF (`.glb`) model for 3D artworks. The detail screen renders it
+  /// in an interactive viewer, ahead of [htmlUrl] and [animationUrl] as on
+  /// the webapp; the still poster ([imageUrl]) stays the fallback when the
+  /// model cannot load.
+  final String? modelUrl;
   final String artistName;
   final String artistAddress;
 
@@ -218,8 +231,7 @@ class ArtworkDetails {
   final String? currency;
 
   /// Marketplace listing discriminator. Drives the bottom-sheet dispatcher
-  /// in [resolveArtworkActionState] and is documented in
-  /// `docs/artwork_state.md`.
+  /// in [resolveArtworkActionState].
   final ListingType listingType;
 
   /// Server-derived listing lifecycle state (`none|pending|active|ended`).
@@ -285,13 +297,13 @@ class ArtworkDetails {
   /// (`item.creator.isFlagged`). Hides the owner "List artwork" CTA and
   /// nothing else — the webapp's `!creator?.isFlagged && !isFlagged` wraps
   /// only "List for sale" (`ActionBox`);
-  /// Transfer sits outside it at `:200-217`.
+  /// Transfer sits outside it.
   final bool creatorIsFlagged;
 
   /// Marketplace this artwork's listing / last sale came from. Null on a
   /// mallow-native artwork and on anything the indexer hasn't attributed;
-  /// both are treated as mallow. A foreign source suppresses the action
-  /// sheet entirely — see [MarketSourceX.isForeignMarketplace].
+  /// both are treated as mallow. External listing management is suppressed;
+  /// Magic Eden buy-now listings have a dedicated purchase review.
   final MarketSource? lastSource;
 
   /// Moderation flag: artwork marked not-safe-for-work. The detail media is
@@ -300,8 +312,7 @@ class ArtworkDetails {
 
   /// Highest active offer in SOL (display units). Null when no offers exist.
   /// `userOwnOffer` (whether the connected wallet is the offer maker) is not
-  /// available from `/byMint` — see `docs/artwork_state.md` data
-  /// requirements.
+  /// available from `/byMint`.
   final double? highestOffer;
 
   /// Total active offers on this artwork.
@@ -412,6 +423,7 @@ class ArtworkDetails {
     Object? buyNowMetadata = _unset,
     Object? auctionMetadata = _unset,
     Object? ownerAddress = _unset,
+    MarketSource? lastSource,
     List<String>? ownerAddresses,
   }) {
     return ArtworkDetails(
@@ -450,7 +462,7 @@ class ArtworkDetails {
       offChainWhitelistDenied: offChainWhitelistDenied,
       isFlagged: isFlagged,
       creatorIsFlagged: creatorIsFlagged,
-      lastSource: lastSource,
+      lastSource: lastSource ?? this.lastSource,
       nsfw: nsfw,
       highestOffer: highestOffer,
       offersCount: offersCount,
@@ -477,6 +489,8 @@ class ArtworkDetails {
       quantityTotal: quantityTotal,
       animationUrl: animationUrl,
       playbackId: playbackId,
+      htmlUrl: htmlUrl,
+      modelUrl: modelUrl,
       royaltyPercent: royaltyPercent,
       royaltySplits: royaltySplits,
       createdAt: createdAt,
@@ -561,6 +575,7 @@ sealed class ArtworkEvent with _$ArtworkEvent {
     String? currentBidder,
     DateTime? endsAt,
     int? bidCount,
+    @Default(false) bool refunded,
   }) = ArtworkAuctionLiveUpdate;
 
   /// Overlay live on-chain listing state (from the `/v2/ws/accounts` push) onto
@@ -744,10 +759,12 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
   /// lagging indexer payload doesn't visibly revert the live bid for a beat.
   ({
     String account,
+    DateTime? startsAt,
     double? currentBidAmount,
     String? currentBidder,
     DateTime? endsAt,
     int bidCount,
+    bool refunded,
   })?
   _auctionOverlay;
 
@@ -1299,6 +1316,7 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
           // widget divides by the token's decimals). No SOL-specific scaling.
           currentBidAmount: update.highestBidAmount?.toDouble(),
           currentBidder: update.highestBidder,
+          refunded: update.cnftRefunded,
           endsAt: update.endTime,
         ),
       );
@@ -1333,8 +1351,8 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
   /// for this mint — offer accounts aren't subscribed here, so an offer
   /// tombstone never reaches this handler.) The matched side is cleared via the
   /// existing [ArtworkExistenceReconcile] `absent` path so the listingType
-  /// guards and `_auctionOverlay` reset stay in one place; the unmatched side
-  /// is left `unknown` (no-op).
+  /// guards stay in one place; the unmatched side is left `unknown` (no-op).
+  /// A close always retires the overlay, including during local-action grace.
   void _onAccountClosed(String pubkey) {
     final cur = state;
     if (cur is! ArtworkLoaded) return;
@@ -1355,6 +1373,8 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
       );
       return;
     }
+
+    if (isAuction) _auctionOverlay = null;
 
     debugPrint(
       '[LIST-DEBUG] ArtworkBloc account-closed pubkey=$pubkey '
@@ -1394,6 +1414,7 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
         currentBidder: state.currentBidder,
         endsAt: state.endsAt,
         bidCount: state.bidCount,
+        refunded: state.refunded,
       ),
     );
   }
@@ -1408,7 +1429,16 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
     String? currentBidder,
     DateTime? endsAt,
     int? bidCount,
+    bool refunded = false,
   }) {
+    if (refunded || base.refunded) {
+      return base.copyWith(
+        refunded: true,
+        currentBidAmount: null,
+        currentBidder: null,
+        bidCount: 0,
+      );
+    }
     final existingAmount = base.currentBidAmount;
     final takeBid =
         currentBidAmount != null &&
@@ -1447,6 +1477,16 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
         auction.auctionAccount != overlay.account) {
       return value;
     }
+    // The PDA is reused on relist. A later or unknown start cannot prove this
+    // is the refunded auction when its close tombstone was missed.
+    if (overlay.refunded &&
+        !auction.refunded &&
+        (auction.startsAt == null ||
+            overlay.startsAt == null ||
+            auction.startsAt!.isAfter(overlay.startsAt!))) {
+      _auctionOverlay = null;
+      return value;
+    }
     return value.copyWith(
       auctionMetadata: _mergeAuctionOverlay(
         auction,
@@ -1454,6 +1494,7 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
         currentBidder: overlay.currentBidder,
         endsAt: overlay.endsAt,
         bidCount: overlay.bidCount,
+        refunded: overlay.refunded,
       ),
     );
   }
@@ -1504,15 +1545,18 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
       currentBidder: event.currentBidder,
       endsAt: event.endsAt,
       bidCount: event.bidCount,
+      refunded: event.refunded,
     );
     // Cache even when the merge is a no-op vs the current overlay, so a later
     // byMint refresh still re-applies the on-chain bid.
     _auctionOverlay = (
       account: event.auctionAccount,
+      startsAt: merged.startsAt,
       currentBidAmount: merged.currentBidAmount,
       currentBidder: merged.currentBidder,
       endsAt: merged.endsAt,
       bidCount: merged.bidCount,
+      refunded: merged.refunded,
     );
     if (merged == auction) return;
 
@@ -1623,9 +1667,9 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
   /// Read the on-chain Listing / AuctionConfig accounts for [value] and
   /// dispatch an [ArtworkExistenceReconcile] with the pre-extracted chain
   /// state. Builds listing metadata whenever the listing is present (the
-  /// handler decides drift-vs-synth) but auction metadata only when the
-  /// indexer is unaware (known auctions reconcile via the [_primeLiveAuction]
-  /// path), so the two auction sources never fight.
+  /// handler decides drift-vs-synth). Auction metadata synthesizes missing
+  /// auctions or replaces a disproven terminal refund; other known auctions
+  /// reconcile via [_primeLiveAuction].
   Future<void> _reconcileExistence(ArtworkDetails value) async {
     if (!_shouldReconcileExistence(value)) return;
     final mint = value.mintAccount;
@@ -1691,17 +1735,34 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
       }
     }
 
-    // ── Auction (synthesize only) ──
+    // Account reads resolve the terminal refund state, including the fallback
+    // for older decoders. Apply it even when the indexer already knows the auction.
+    if (auctionRead.status == OnChainReadStatus.present &&
+        auctionRead.account!.cnftRefunded &&
+        value.auctionMetadata != null) {
+      add(
+        ArtworkEvent.auctionLiveUpdate(
+          auctionAccount: auctionRead.account!.pubkey,
+          refunded: true,
+        ),
+      );
+    }
+
+    // ── Auction (synthesize or replace a stale refunded auction) ──
     final auctionStatus = auctionRead.status;
     AuctionReconcileData? auctionData;
     if (auctionStatus == OnChainReadStatus.present &&
-        value.auctionMetadata == null) {
+        (value.auctionMetadata == null ||
+            (!auctionRead.account!.cnftRefunded &&
+                (value.auctionMetadata!.refunded ||
+                    _auctionOverlay?.refunded == true)))) {
       final acct = auctionRead.account!;
       final bid = acct.highestBidAmount?.toDouble();
       auctionData = AuctionReconcileData(
         currency: acct.bidMint,
         metadata: AuctionMetadata(
           auctionAccount: acct.pubkey,
+          refunded: acct.cnftRefunded,
           seller: acct.seller,
           bidMint: acct.bidMint,
           reservePrice: acct.reservePrice?.toDouble(),
@@ -1758,6 +1819,25 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
     // it doesn't contradict the action's direction.
     final inGrace = _inLocalActionGrace;
     var changed = false;
+
+    // A missing Mallow PDA says nothing about an external order. A real
+    // Mallow listing, however, outranks stale indexed marketplace provenance.
+    if (artwork.isListed && artwork.lastSource.isForeignMarketplace) {
+      final listing = event.listing;
+      if (event.listingStatus != OnChainReadStatus.present ||
+          listing == null ||
+          !eligible) {
+        return;
+      }
+      artwork = artwork.copyWith(
+        lastSource: MarketSource.mallow,
+        listingType: ListingType.buyNow,
+        buyNowMetadata: listing.metadata,
+        price: listing.metadata.amount,
+        currency: listing.currency,
+      );
+      changed = true;
+    }
 
     // ── Listing ──
     switch (event.listingStatus) {
@@ -1820,8 +1900,30 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
         if (!eligible) break;
         final data = event.auction;
         final chain = data?.metadata;
-        // Synthesize only — known auctions reconcile via _primeLiveAuction.
+        // A present non-refunded account disproves a cached terminal refund.
+        // Replace its metadata as well as the overlay to restore bids/CTAs.
         if (chain != null &&
+            !chain.refunded &&
+            artwork.auctionMetadata?.auctionAccount == chain.auctionAccount &&
+            !inGrace &&
+            _absentOutranksAuctionEvidence(artwork, event.auctionViewSlot) &&
+            (artwork.auctionMetadata?.refunded == true ||
+                _auctionOverlay?.refunded == true)) {
+          _auctionOverlay = null;
+          artwork = artwork.copyWith(
+            listingType: artwork.listingType == ListingType.unlisted
+                ? ListingType.auction
+                : artwork.listingType,
+            auctionMetadata: chain,
+            currency: artwork.listingType == ListingType.buyNow
+                ? artwork.currency
+                : data?.currency,
+          );
+          changed = true;
+        }
+        // Other known auctions reconcile via _primeLiveAuction.
+        if (chain != null &&
+            artwork.auctionMetadata == null &&
             artwork.listingType == ListingType.unlisted &&
             !inGrace) {
           artwork = artwork.copyWith(
@@ -1832,16 +1934,20 @@ class ArtworkBloc extends Bloc<ArtworkEvent, ArtworkState> {
           changed = true;
         }
       case OnChainReadStatus.absent:
-        if (artwork.listingType == ListingType.auction &&
+        if ((artwork.listingType == ListingType.auction ||
+                artwork.auctionMetadata?.refunded == true) &&
             !inGrace &&
             _absentOutranksAuctionEvidence(artwork, event.auctionViewSlot)) {
           // Clear: the indexer still shows an auction the chain no longer has.
           // Drop the cached overlay so a lagging byMint refresh can't revive it.
           _auctionOverlay = null;
+          final wasAuction = artwork.listingType == ListingType.auction;
           artwork = artwork.copyWith(
-            listingType: ListingType.unlisted,
+            listingType: wasAuction
+                ? ListingType.unlisted
+                : artwork.listingType,
             auctionMetadata: null,
-            price: null,
+            price: wasAuction ? null : artwork.price,
           );
           changed = true;
         }

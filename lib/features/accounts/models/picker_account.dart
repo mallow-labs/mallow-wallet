@@ -134,7 +134,10 @@ class PickerAccount {
 ///   (they consume no number);
 /// - selected, not-yet-imported cards preview the exact `Account NN` they will
 ///   be saved as, numbered ascending by derivation index from [baseCounter];
-/// - unselected, not-yet-imported cards show a bare `Account` (no number).
+/// - unselected, not-yet-imported cards show a bare `Account` (no number);
+/// - a not-yet-imported card the user named in the picker shows that name from
+///   [customNames], selected or not. A selected one still consumes its number,
+///   because the repository advances the counter for a named account too.
 ///
 /// Returns a map keyed by [PickerAccount.index]. The ascending walk mirrors the
 /// repository's import order, so previews equal the persisted names.
@@ -142,19 +145,50 @@ Map<int, String> previewAccountNames({
   required List<PickerAccount> accounts,
   required Set<String> selectedKeys,
   required int baseCounter,
+  Map<int, String> customNames = const {},
 }) {
   final ordered = [...accounts]..sort((a, b) => a.index.compareTo(b.index));
   final names = <int, String>{};
   var next = baseCounter;
   for (final a in ordered) {
+    final custom = customNames[a.index];
     if (a.importedName != null) {
       names[a.index] = a.importedName!;
     } else if (a.isSelectedIn(selectedKeys)) {
-      names[a.index] = formatAccountName(next);
+      names[a.index] = custom ?? formatAccountName(next);
       next++;
+    } else if (custom != null) {
+      names[a.index] = custom;
     } else {
       names[a.index] = 'Account';
     }
+  }
+  return names;
+}
+
+/// [customNames] after the user names the card at [index] [name] in an import
+/// picker, or null when nothing changes.
+///
+/// The name is trimmed, and a blank one clears the card back to its default
+/// `Account NN`. An account that already exists keeps its stored name, because
+/// the import only names the accounts it creates — so a card with an
+/// [PickerAccount.importedName] returns null.
+Map<int, String>? renamePickerAccount({
+  required List<PickerAccount> accounts,
+  required Map<int, String> customNames,
+  required int index,
+  required String name,
+}) {
+  final exists = accounts.any(
+    (a) => a.index == index && a.importedName != null,
+  );
+  if (exists) return null;
+  final trimmed = name.trim();
+  final names = Map<int, String>.from(customNames);
+  if (trimmed.isEmpty) {
+    names.remove(index);
+  } else {
+    names[index] = trimmed;
   }
   return names;
 }

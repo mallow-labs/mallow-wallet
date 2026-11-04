@@ -1,8 +1,11 @@
 library;
 
+export 'src/eip712/eip712_ledger_frames.dart';
 export 'src/ethereum_apdu.dart';
 export 'src/ethereum_ledger_app.dart';
 export 'src/models/ethereum_derivation_path.dart';
+export 'src/operations/ethereum_frame_operation.dart'
+    show EthereumFrameOperation;
 export 'src/operations/ethereum_get_address_operation.dart'
     show EthereumGetAddressOperation, EthereumLedgerAddress;
 export 'src/operations/ethereum_sign_personal_message_operation.dart'

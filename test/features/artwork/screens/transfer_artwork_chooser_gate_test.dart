@@ -8,6 +8,7 @@ import 'package:mallow_wallet/features/artwork/screens/transfer_artwork_chooser_
 import 'package:mallow_wallet/features/artwork/services/artwork_permission_service.dart';
 import 'package:mallow_wallet/features/portfolio/data/portfolio_repository.dart';
 import 'package:mallow_wallet/features/portfolio/services/portfolio_bloc.dart';
+import 'package:mallow_wallet/features/send/models/recipient_address.dart';
 import 'package:mallow_wallet/shared/theme/mallow_theme.dart';
 import 'package:mallow_wallet/shared/utils/chain.dart' show Chain;
 import 'package:mocktail/mocktail.dart';
@@ -260,5 +261,40 @@ void main() {
 
     expect(find.text('T'), findsOneWidget);
     verify(() => portfolio.getOwnedArtworks()).called(1);
+  });
+
+  testWidgets('a scanned recipient asks for its chain only', (tester) async {
+    final portfolio = _MockPortfolioRepository();
+    when(() => portfolio.getOwnedArtworks(chain: Chain.ethereum)).thenAnswer(
+      (_) async => const PortfolioArtworksResult(artworks: [], total: 0),
+    );
+    if (sl.isRegistered<PortfolioRepository>()) {
+      sl.unregister<PortfolioRepository>();
+    }
+    sl.registerSingleton<PortfolioRepository>(portfolio);
+    addTearDown(() {
+      if (sl.isRegistered<PortfolioRepository>()) {
+        sl.unregister<PortfolioRepository>();
+      }
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: MallowTheme.lightTheme,
+        home: const TransferArtworkChooserScreen(
+          recipient: RecipientAddress(
+            address: '0x2222222222222222222222222222222222222222',
+            chain: Chain.ethereum,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    verify(() => portfolio.getOwnedArtworks(chain: Chain.ethereum)).called(1);
+    expect(
+      find.text("You don't own any transferrable Ethereum artworks"),
+      findsOneWidget,
+    );
   });
 }

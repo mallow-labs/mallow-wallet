@@ -324,6 +324,7 @@ class EvmArtworkTransferService {
         maxPriorityFeePerGas:
             feeOverride?.maxPriorityFeePerGas ?? prepared.maxPriorityFeePerGas,
         refreshFees: feeOverride == null,
+        ledgerFlow: AppFlow.nftTransfer,
         onBroadcasting: onBroadcasting,
         onBroadcastRegistered: onBroadcastRegistered,
         trackKind: PendingEvmTxKind.nftTransfer,

@@ -60,7 +60,7 @@
 // SET-085  | back navigation from every settings screen         | nightly
 // SET-021  | network toggles reach the import picker            | nightly
 //
-// TODO(SET-002): needs the `profile` scenario fixture (Phase 2).
+// TODO(SET-002): needs the `profile` scenario fixture.
 // TODO(SET-005): needs a wallet-multi bootstrap (>=2 accounts) in the shared
 //   harness; it is scoped to the `wallet-multi` fixture.
 // TODO(SET-006): unreachable in this sandbox. `SettingsScreen._loadData` reads
@@ -69,9 +69,9 @@
 //   `pushOffForFirebaselessSandbox` in `support/navigation.dart` — the whole
 //   bucket depends on short-circuiting that call, so the push toggle itself
 //   cannot be exercised.
-// TODO(SET-015): needs the `art-roles` artwork fixture (Phase 2).
+// TODO(SET-015): needs the `art-roles` artwork fixture.
 // TODO(SET-017): needs the `port-funded` portfolio fixture.
-// TODO(SET-019, SET-020): need the `profile` scenario fixture (Phase 2).
+// TODO(SET-019, SET-020): need the `profile` scenario fixture.
 // TODO(SET-027): the app refuses to reach "no biometrics AND no PIN" — the PIN
 //   screen only offers "Skip for now" when biometrics are already enabled, and
 //   Turn off PIN is refused without them (SET-031 pins that). Producing the
@@ -84,11 +84,11 @@
 //   watch-only), which means a multi-account bootstrap plus an account removal.
 // TODO(SET-068, SET-076, SET-077): need the `wallet-multi` bootstrap.
 // TODO(SET-078, SET-088, SET-089, SET-090, SET-091): need the `profile` /
-//   `net-fail` scenario fixtures (Phase 2).
+//   `net-fail` scenario fixtures.
 //
 // Cases this file deliberately does NOT claim: SET-012/013 also
 // ask that the opened URL changes. That needs a completed transaction to open
-// an explorer link from, i.e. a Phase-3 activity fixture; only the stored
+// an explorer link from, i.e. an activity fixture; only the stored
 // selection is asserted here.
 //
 // SECURITY: the reveal cases below assert word-by-word against the throwaway
@@ -965,6 +965,15 @@ void main() {
         matching: find.text('Reset app'),
       ),
     );
+    // The screen re-authenticates right before the wipe rather than trusting
+    // the Security & Privacy gate cleared above; with no biometric enrolled
+    // that is the PIN sheet again.
+    await pumpUntil(
+      tester,
+      find.text('Enter your PIN'),
+      label: 'PIN sheet before the wipe',
+    );
+    await enterPin(tester);
     await pumpUntil(
       tester,
       find.text('I already have a wallet'),

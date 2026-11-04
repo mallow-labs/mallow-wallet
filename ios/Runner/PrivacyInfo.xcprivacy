@@ -14,7 +14,10 @@
 	  file covers the Runner binary alone. A scan of the Runner target's first-party
 	  sources (AppDelegate, AirPlayPlugin, IosChromecastPlugin, ExternalDisplayHost,
 	  ExternalDisplaySceneDelegate, SecurityChannel, MnemonicVaultChannel,
-	  TimezoneChannel) found no direct required-reason API usage. The declarations
+	  TimezoneChannel, BrowserInsetsChannel, BrowserAppearanceChannel) found no
+	  direct required-reason API usage. The OpenInMallow share-sheet action is a
+	  separate binary; its one source, OpenBrowserViewController.m, was scanned
+	  too and has none either. The declarations
 	  below are therefore a deliberate superset covering what Flutter's embedding
 	  and the plugin surface attribute to the app binary. Over-declaring a reason
 	  code is not a rejection; under-declaring one is.
@@ -112,12 +115,14 @@
 
 		<!-- First-party product analytics: client → POST /v1/analytics → backend →
 		     Mixpanel. No Mixpanel SDK on device. User-disableable in
-		     Settings → Security & Privacy → Share usage analytics. -->
+		     Settings → Security & Privacy → Share usage analytics. Linked: the
+		     `Transaction Submitted` event names the signing wallet address, and
+		     every transaction event carries a signature that resolves to it. -->
 		<dict>
 			<key>NSPrivacyCollectedDataType</key>
 			<string>NSPrivacyCollectedDataTypeProductInteraction</string>
 			<key>NSPrivacyCollectedDataTypeLinked</key>
-			<false/>
+			<true/>
 			<key>NSPrivacyCollectedDataTypeTracking</key>
 			<false/>
 			<key>NSPrivacyCollectedDataTypePurposes</key>
@@ -141,7 +146,9 @@
 			</array>
 		</dict>
 
-		<!-- Wallet address as the account identifier. -->
+		<!-- Wallet address as the account identifier, and as the signer on the
+		     analytics `Transaction Submitted` event (counts active wallets;
+		     gated by the same analytics opt-out). -->
 		<dict>
 			<key>NSPrivacyCollectedDataType</key>
 			<string>NSPrivacyCollectedDataTypeUserID</string>
@@ -152,6 +159,7 @@
 			<key>NSPrivacyCollectedDataTypePurposes</key>
 			<array>
 				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+				<string>NSPrivacyCollectedDataTypePurposeAnalytics</string>
 			</array>
 		</dict>
 

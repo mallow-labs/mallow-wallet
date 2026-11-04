@@ -13,8 +13,7 @@ import 'token_repository.dart';
 import '../../../shared/utils/chain.dart';
 
 /// A session wallet paired with its balance of a specific token — the unit the
-/// send flow's source-wallet picker renders and filters
-/// (send-wallet-select spec).
+/// send flow's source-wallet picker renders and filters.
 class SendSourceCandidate {
   const SendSourceCandidate({
     required this.wallet,
@@ -262,7 +261,7 @@ class SessionPortfolioAggregator {
 
   /// The session's **signable** wallets on [chain] paired with their balance of
   /// [mint], in session order (deduped by address) — the candidate set for the
-  /// send flow's source-wallet picker (send-wallet-select spec).
+  /// send flow's source-wallet picker.
   ///
   /// Reads only the per-wallet balance **cache** by default so the send flow
   /// can decide whether to prompt without a blocking spinner; pass

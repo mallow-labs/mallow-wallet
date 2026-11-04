@@ -173,6 +173,62 @@ void main() {
     });
   });
 
+  test(
+    'account rent pre-balances use one confirmed metadata-only batch',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final requests = <Map<String, dynamic>>[];
+      server.listen((req) async {
+        final body =
+            jsonDecode(await utf8.decoder.bind(req).join())
+                as Map<String, dynamic>;
+        requests.add(body);
+        req.response.headers.contentType = ContentType.json;
+        req.response.write(
+          jsonEncode({
+            'jsonrpc': '2.0',
+            'id': body['id'],
+            'result': {
+              'context': {'slot': 1},
+              'value': [
+                null,
+                {
+                  'lamports': 1488440,
+                  'owner': TokenProgram.programId,
+                  'executable': false,
+                  'rentEpoch': 0,
+                  'data': ['', 'base64'],
+                },
+              ],
+            },
+          }),
+        );
+        await req.response.close();
+      });
+      Config.debugOverrides['RPC_PROXY_BASE_URL'] =
+          'http://127.0.0.1:${server.port}';
+      addTearDown(
+        () => Config.debugOverrides['RPC_PROXY_BASE_URL'] = 'https://rpc.test',
+      );
+      final rpc = SolanaRpcService(_DummyWalletManager(), TxLandedSlots());
+      expect(await rpc.getAccountLamportsForAddresses([]), isEmpty);
+      expect(
+        await rpc.getAccountLamportsForAddresses([_addr, _token2022Account]),
+        {_addr: 0, _token2022Account: 1488440},
+      );
+      expect(requests, hasLength(1));
+      expect(requests.single['method'], 'getMultipleAccounts');
+      final params = requests.single['params'] as List<dynamic>;
+      expect(params.first, [_addr, _token2022Account]);
+      expect(params.last, {
+        'commitment': 'confirmed',
+        'encoding': 'base64',
+        'dataSlice': {'offset': 0, 'length': 0},
+      });
+    },
+  );
+
   group('SolanaRpcService.simulateWithDelta', () {
     test('computes the signed post−pre delta on success', () async {
       final rpc = _StubRpcService(preBalance: 1_000_000_000);
@@ -401,6 +457,84 @@ void main() {
   });
 
   group('SolanaRpcService.transactionStatus', () {
+    test(
+      'purchase recovery searches history and uses finalized expiry height',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() => server.close(force: true));
+        final requests = <Map<String, dynamic>>[];
+        server.listen((request) async {
+          final body =
+              jsonDecode(await utf8.decoder.bind(request).join())
+                  as Map<String, dynamic>;
+          requests.add(body);
+          request.response.headers.contentType = ContentType.json;
+          request.response.write(
+            jsonEncode({
+              'jsonrpc': '2.0',
+              'id': body['id'],
+              'result': body['method'] == 'getBlockHeight'
+                  ? 123
+                  : {
+                      'value': [null],
+                    },
+            }),
+          );
+          await request.response.close();
+        });
+        Config.debugOverrides['RPC_PROXY_BASE_URL'] =
+            'http://127.0.0.1:${server.port}';
+        final rpc = SolanaRpcService(_DummyWalletManager(), TxLandedSlots());
+        expect(
+          await rpc.transactionStatusWithHistory('saved-signature'),
+          isNull,
+        );
+        expect((requests.first['params'] as List).last, {
+          'searchTransactionHistory': true,
+        });
+        expect(await rpc.finalizedBlockHeight(), 123);
+        expect((requests.last['params'] as List).last, {
+          'commitment': 'finalized',
+        });
+      },
+    );
+
+    test(
+      'malformed history replies cannot count as an absent transaction',
+      () async {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() => server.close(force: true));
+        Object? result;
+        server.listen((request) async {
+          final body =
+              jsonDecode(await utf8.decoder.bind(request).join())
+                  as Map<String, dynamic>;
+          request.response.headers.contentType = ContentType.json;
+          request.response.write(
+            jsonEncode({'jsonrpc': '2.0', 'id': body['id'], 'result': result}),
+          );
+          await request.response.close();
+        });
+        Config.debugOverrides['RPC_PROXY_BASE_URL'] =
+            'http://127.0.0.1:${server.port}';
+        final rpc = SolanaRpcService(_DummyWalletManager(), TxLandedSlots());
+        for (final invalid in <Object?>[
+          null,
+          <String, dynamic>{},
+          {'value': <Object?>[]},
+          {
+            'value': [123],
+          },
+        ]) {
+          result = invalid;
+          await expectLater(
+            rpc.transactionStatusWithHistory('sig'),
+            throwsFormatException,
+          );
+        }
+      },
+    );
+
     /// Serves one canned `getSignatureStatuses` value and points the service's
     /// RPC URL at it.
     Future<SolanaRpcService> serving(

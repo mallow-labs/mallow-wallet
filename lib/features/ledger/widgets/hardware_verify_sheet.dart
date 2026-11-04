@@ -24,7 +24,7 @@ enum _VerifyPhase { idle, signing, success, errored }
 /// Bottom sheet shown when a hardware wallet needs interactive verification —
 /// a 401 "Signature required", or an action that implies wallet identity.
 ///
-/// It serves both hardware wallets, and does a different job for each:
+/// It serves every hardware wallet, and does a different job for each:
 ///
 /// - **Ledger** — it *is* the verification. Scan → connect → ready comes from
 ///   [LedgerAuthService.sessionState]; the memo-sign + backend verify + JWT
@@ -35,6 +35,8 @@ enum _VerifyPhase { idle, signing, success, errored }
 ///   this sheet returns true. A prompt with no user action behind it reads as
 ///   a system-level security event, so the sheet exists to put a deliberate
 ///   tap in front of it.
+/// - **Keystone** — consent too, for the same reason. The QR exchange runs in
+///   its own sheet once the caller signs.
 ///
 /// [walletType] therefore picks the whole flow, not just the wording — but the
 /// wording matters too: a Seed Vault user told to switch on Bluetooth and open
@@ -49,7 +51,7 @@ class HardwareVerifySheet extends StatefulWidget {
 
   final String address;
 
-  /// [WalletType.ledger] or [WalletType.seedVault].
+  /// [WalletType.ledger], [WalletType.seedVault] or [WalletType.keystone].
   final WalletType walletType;
 
   final Completer<bool> completer;
@@ -59,7 +61,7 @@ class HardwareVerifySheet extends StatefulWidget {
 }
 
 class _HardwareVerifySheetState extends State<HardwareVerifySheet> {
-  /// Lazy: the Seed Vault arm never touches the Ledger session at all, and
+  /// Lazy: the consent arms never touch the Ledger session at all, and
   /// resolving it eagerly would drag BLE machinery into a sheet that only
   /// collects a tap.
   late final _auth = sl<LedgerAuthService>();
@@ -71,7 +73,22 @@ class _HardwareVerifySheetState extends State<HardwareVerifySheet> {
   _VerifyPhase _phase = _VerifyPhase.idle;
   String? _errorMessage;
 
-  bool get _isSeedVault => widget.walletType == WalletType.seedVault;
+  /// Whether this sheet only collects consent, leaving the signature to the
+  /// caller, rather than running the whole Ledger handshake itself.
+  ///
+  /// Exhaustive on purpose: as `walletType == seedVault` this compiled clean
+  /// when Keystone was added, and a Keystone user was sent into the Ledger
+  /// Bluetooth flow.
+  bool get _consentOnly => switch (widget.walletType) {
+    WalletType.seedVault || WalletType.keystone => true,
+    WalletType.ledger => false,
+    // Never shown for a wallet that signs locally; treated as Ledger, which is
+    // what an unresolvable address falls back to.
+    WalletType.hd ||
+    WalletType.importedKey ||
+    WalletType.viewOnly ||
+    WalletType.social => false,
+  };
 
   /// The Ledger app the user must open for this wallet, inferred from the
   /// address shape.
@@ -88,10 +105,10 @@ class _HardwareVerifySheetState extends State<HardwareVerifySheet> {
   @override
   void initState() {
     super.initState();
-    // Seed Vault has no transport to bring up: its approval Activity is
-    // launched by the caller once this sheet returns. Starting a BLE scan here
-    // would ask for Bluetooth the user never needs.
-    if (_isSeedVault) return;
+    // Seed Vault and Keystone have no transport to bring up: the caller signs
+    // once this sheet returns. Starting a BLE scan here would ask for
+    // Bluetooth the user never needs.
+    if (_consentOnly) return;
 
     _session = _auth.currentState;
     _sessionSub = _auth.sessionState.listen(_onSession);
@@ -105,7 +122,7 @@ class _HardwareVerifySheetState extends State<HardwareVerifySheet> {
   void dispose() {
     _sessionSub?.cancel();
     _signingSub?.cancel();
-    if (!_isSeedVault) {
+    if (!_consentOnly) {
       // Drop the in-memory device list so a re-opened sheet starts with a
       // fresh scan instead of showing devices from the previous session.
       // LedgerAuthService is a singleton, so without this the list survives.
@@ -207,18 +224,20 @@ class _HardwareVerifySheetState extends State<HardwareVerifySheet> {
       child: Padding(
         padding: EdgeInsets.only(bottom: sheetBottomInset(context)),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+          padding: const EdgeInsets.symmetric(horizontal: 24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               const SheetDragHandle(),
               const SizedBox(height: 8),
-              Text(
-                'Verify Wallet',
-                style: MallowTheme.uiBody.copyWith(
-                  color: context.mallowColors.textPrimary,
+              SizedBox(
+                width: double.infinity,
+                child: Text(
+                  'Verify Wallet',
+                  style: MallowTheme.editorialSection.copyWith(
+                    color: context.mallowColors.textPrimary,
+                  ),
                 ),
-                textAlign: TextAlign.left,
               ),
               const SizedBox(height: 8),
               _buildBody(context),
@@ -230,7 +249,7 @@ class _HardwareVerifySheetState extends State<HardwareVerifySheet> {
   }
 
   Widget _buildBody(BuildContext context) {
-    if (_isSeedVault) return _buildSeedVaultConsentView(context);
+    if (_consentOnly) return _buildConsentView(context);
     switch (_phase) {
       case _VerifyPhase.signing:
         return _buildSigningView(context);
@@ -243,25 +262,33 @@ class _HardwareVerifySheetState extends State<HardwareVerifySheet> {
     }
   }
 
-  /// Seed Vault's consent step: what is about to happen, and one tap to allow
-  /// it. Completing the request is all this does — the signature, and with it
-  /// the OS approval screen, is the caller's next move.
-  Widget _buildSeedVaultConsentView(BuildContext context) {
+  /// The consent step: what is about to happen, and one tap to allow it.
+  /// Completing the request is all this does — the signature, and with it the
+  /// OS approval screen or the QR exchange, is the caller's next move.
+  Widget _buildConsentView(BuildContext context) {
+    final isKeystone = widget.walletType == WalletType.keystone;
     return Column(
       mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          'Seed Vault will ask you to approve a signature that proves you own '
-          'this wallet. Nothing is sent to the Solana network.',
-          textAlign: TextAlign.center,
+          isKeystone
+              // A Keystone wallet can be Solana or Ethereum, so the copy names
+              // no chain.
+              ? 'Your Keystone will sign a message that proves you own this '
+                    'wallet. Nothing is sent to the network.'
+              : 'Seed Vault will ask you to approve a signature that proves '
+                    'you own this wallet. Nothing is sent to the Solana network.',
           style: MallowTheme.uiBodyRelaxed.copyWith(
             color: context.mallowColors.textSecondary,
           ),
         ),
         const SizedBox(height: 24),
         MallowButton(
-          label: 'Continue in Seed Vault',
-          onPressed: _consentToSeedVault,
+          label: isKeystone
+              ? 'Continue with Keystone'
+              : 'Continue in Seed Vault',
+          onPressed: _consent,
           isFullWidth: true,
         ),
         const SizedBox(height: 8),
@@ -269,7 +296,7 @@ class _HardwareVerifySheetState extends State<HardwareVerifySheet> {
     );
   }
 
-  void _consentToSeedVault() {
+  void _consent() {
     if (!widget.completer.isCompleted) {
       widget.completer.complete(true);
     }

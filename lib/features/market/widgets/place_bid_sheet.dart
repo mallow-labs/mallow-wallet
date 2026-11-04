@@ -7,9 +7,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:mallow_api/mallow_api.dart' show AuctionMetadata;
 
 import '../../../core/data/mallow_tokens.dart';
-import '../../../core/services/token_price_service.dart';
 import '../../../core/utils/price_formatter.dart';
-import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/utils/balance_check.dart';
 import '../../../shared/utils/price_format.dart';
@@ -20,6 +18,7 @@ import '../../../shared/widgets/mallow_pill_field.dart';
 import '../../../shared/widgets/mallow_sheet.dart';
 import '../../../shared/widgets/sheet_drag_handle.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
+import '../../../shared/widgets/usd_estimate.dart';
 import '../../portfolio/services/token_balance_bloc.dart';
 import '../models/market_price.dart';
 
@@ -102,9 +101,15 @@ class PlaceBidSheet extends StatefulWidget {
 
 class _PlaceBidSheetState extends State<PlaceBidSheet> {
   static const _usdDebounce = Duration(milliseconds: 300);
+  static const _preferredPreviewHeight = 74.0;
+  static const _minPreviewHeight = 48.0;
 
   final _amountController = TextEditingController();
   final _focusNode = FocusNode();
+  final _bodyScrollController = ScrollController();
+  double _previewHeight = _preferredPreviewHeight;
+  double _availableBodyHeight = 0;
+  bool _previewResizeScheduled = false;
 
   late final MallowToken _token;
 
@@ -140,7 +145,31 @@ class _PlaceBidSheetState extends State<PlaceBidSheet> {
     _usdDebounceTimer?.cancel();
     _amountController.dispose();
     _focusNode.dispose();
+    _bodyScrollController.dispose();
     super.dispose();
+  }
+
+  void _schedulePreviewResize() {
+    if (_previewResizeScheduled ||
+        widget.artworkImageUrl == null ||
+        widget.artworkImageUrl!.isEmpty) {
+      return;
+    }
+    _previewResizeScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _previewResizeScheduled = false;
+      if (!mounted || !_bodyScrollController.hasClients) return;
+      final position = _bodyScrollController.position;
+      if (!position.hasContentDimensions) return;
+      // Measure the rendered form, so wrapping text and auction details take
+      // space before the preview does. Restore its size when room returns.
+      final contentHeight =
+          position.viewportDimension + position.maxScrollExtent;
+      final height = (_previewHeight + _availableBodyHeight - contentHeight)
+          .clamp(_minPreviewHeight, _preferredPreviewHeight);
+      if ((height - _previewHeight).abs() < 0.01) return;
+      setState(() => _previewHeight = height);
+    });
   }
 
   void _onAmountChanged(String value) {
@@ -224,154 +253,191 @@ class _PlaceBidSheetState extends State<PlaceBidSheet> {
     final best = widget.currentHighestBid;
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
-      child: Container(
-        padding: const EdgeInsets.all(MallowTheme.spacing20),
-        decoration: BoxDecoration(
-          color: colors.bgSurface,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const SheetDragHandle(),
-            Text(
-              'Place Bid',
-              style: MallowTheme.editorialSubhead.copyWith(
-                color: colors.textPrimary,
+      child: BlocBuilder<TokenBalanceBloc, TokenBalanceState>(
+        bloc: widget.tokenBalanceBloc,
+        builder: (context, balanceState) {
+          final balance = _balanceDisplay(balanceState);
+          final affordable = _balanceResult(balanceState).sufficient;
+          final String label;
+          if (!affordable) {
+            // Terminal blocker — raising the bid can't fix it, so it
+            // outranks the "Bid too low" floor hint.
+            label = 'Insufficient funds';
+          } else if (_belowMinimum) {
+            label = 'Bid too low';
+          } else {
+            label = 'Next';
+          }
+          return Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: MallowTheme.spacing20,
+            ),
+            decoration: BoxDecoration(
+              color: colors.bgSurface,
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(20),
               ),
-              textAlign: TextAlign.left,
             ),
-            const SizedBox(height: MallowTheme.spacingLg),
-            ArtworkSubjectHeader(
-              title: widget.artworkTitle,
-              imageUrl: widget.artworkImageUrl,
-              username: widget.artistUsername,
-              imageHeight: 74,
-              nsfw: widget.nsfw,
-            ),
-            const SizedBox(height: MallowTheme.spacingLg),
-            if (widget.auction != null)
-              _AuctionInfoBox(auction: widget.auction!, token: _token),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              crossAxisAlignment: CrossAxisAlignment.baseline,
-              textBaseline: TextBaseline.alphabetic,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                const SheetDragHandle(),
                 Text(
-                  'Bid',
-                  style: MallowTheme.uiCaption.copyWith(
+                  'Place Bid',
+                  style: MallowTheme.editorialSubhead.copyWith(
                     color: colors.textPrimary,
                   ),
+                  textAlign: TextAlign.left,
                 ),
-                if (_minBidDisplay != null)
-                  // Tap to prefill the minimum — mirrors the webapp's clickable
-                  // "Min:" amount.
-                  TapTargetExpander(
-                    child: GestureDetector(
-                      onTap: _fillMinimum,
-                      child: Text(
-                        'Min: '
-                        '${stripTrailingZeros(_minBidDisplay!.toStringAsFixed(2))} '
-                        '${_token.symbol}',
-                        style: MallowTheme.uiCaption.copyWith(
-                          color: colors.textSecondary,
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: MallowTheme.spacingMd),
-            MallowPillField(
-              controller: _amountController,
-              focusNode: _focusNode,
-              hintText: 'Bid amount',
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
-              ),
-              inputFormatters: [
-                FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d*')),
-              ],
-              prefix: tokenImageWidget(
-                mint: _token.mint,
-                symbol: _token.symbol,
-                size: 16,
-                enlargeChainGlyph: true,
-              ),
-              suffix: _UsdSuffix(amount: _usdAmount, token: _token),
-              onChanged: _onAmountChanged,
-              onSubmitted: (_) => _onSubmit(),
-            ),
-            if (best != null) ...[
-              const SizedBox(height: MallowTheme.spacingMd),
-              Text(
-                'Current highest bid: '
-                '${_token.rawToDisplay(best.rawAmount.toInt())} '
-                '${_token.symbol}',
-                style: MallowTheme.uiCaption.copyWith(
-                  color: colors.textSecondary,
-                ),
-              ),
-            ],
-            BlocBuilder<TokenBalanceBloc, TokenBalanceState>(
-              bloc: widget.tokenBalanceBloc,
-              builder: (context, balanceState) {
-                final balance = _balanceDisplay(balanceState);
-                final affordable = _balanceResult(balanceState).sufficient;
-                final String label;
-                if (!affordable) {
-                  // Terminal blocker — raising the bid can't fix it, so it
-                  // outranks the "Bid too low" floor hint.
-                  label = 'Insufficient funds';
-                } else if (_belowMinimum) {
-                  label = 'Bid too low';
-                } else {
-                  label = 'Next';
-                }
-                return Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (balance != null) ...[
-                      const SizedBox(height: MallowTheme.spacingMd),
-                      Text.rich(
-                        TextSpan(
-                          children: [
-                            TextSpan(
-                              text: 'Balance: ',
-                              style: MallowTheme.uiCaption.copyWith(
-                                color: colors.textSecondary,
+                const SizedBox(height: MallowTheme.spacingLg),
+                // Keep Next visible when the keyboard leaves less room for
+                // the artwork and auction details.
+                Flexible(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      _availableBodyHeight = constraints.maxHeight;
+                      _schedulePreviewResize();
+                      return NotificationListener<ScrollMetricsNotification>(
+                        onNotification: (notification) {
+                          if (notification.depth == 0) _schedulePreviewResize();
+                          return false;
+                        },
+                        child: SingleChildScrollView(
+                          controller: _bodyScrollController,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              ArtworkSubjectHeader(
+                                title: widget.artworkTitle,
+                                imageUrl: widget.artworkImageUrl,
+                                username: widget.artistUsername,
+                                imageHeight: _previewHeight,
+                                nsfw: widget.nsfw,
                               ),
-                            ),
-                            TextSpan(
-                              text:
-                                  '${formatBalance(balance)} '
+                              const SizedBox(height: MallowTheme.spacingLg),
+                              if (widget.auction != null)
+                                _AuctionInfoBox(
+                                  auction: widget.auction!,
+                                  token: _token,
+                                ),
+                              Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                crossAxisAlignment: CrossAxisAlignment.baseline,
+                                textBaseline: TextBaseline.alphabetic,
+                                children: [
+                                  Text(
+                                    'Bid',
+                                    style: MallowTheme.uiCaption.copyWith(
+                                      color: colors.textPrimary,
+                                    ),
+                                  ),
+                                  if (_minBidDisplay != null)
+                                    // Tap to prefill the minimum — mirrors the webapp's clickable
+                                    // "Min:" amount.
+                                    TapTargetExpander(
+                                      child: GestureDetector(
+                                        onTap: _fillMinimum,
+                                        child: Text(
+                                          'Min: '
+                                          '${stripTrailingZeros(_minBidDisplay!.toStringAsFixed(2))} '
+                                          '${_token.symbol}',
+                                          style: MallowTheme.uiCaption.copyWith(
+                                            color: colors.textSecondary,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                              const SizedBox(height: MallowTheme.spacingMd),
+                              MallowPillField(
+                                controller: _amountController,
+                                focusNode: _focusNode,
+                                hintText: 'Bid amount',
+                                keyboardType:
+                                    const TextInputType.numberWithOptions(
+                                      decimal: true,
+                                    ),
+                                inputFormatters: [
+                                  FilteringTextInputFormatter.allow(
+                                    RegExp(r'^\d*\.?\d*'),
+                                  ),
+                                ],
+                                prefix: tokenImageWidget(
+                                  mint: _token.mint,
+                                  symbol: _token.symbol,
+                                  size: 16,
+                                  enlargeChainGlyph: true,
+                                ),
+                                suffix: UsdEstimate(
+                                  rawAmount: _usdAmount == null
+                                      ? null
+                                      : _token.displayToRaw(_usdAmount!),
+                                  mint: _token.mint,
+                                ),
+                                onChanged: _onAmountChanged,
+                                onSubmitted: (_) => _onSubmit(),
+                              ),
+                              if (best != null) ...[
+                                const SizedBox(height: MallowTheme.spacingMd),
+                                Text(
+                                  'Current highest bid: '
+                                  '${_token.rawToDisplay(best.rawAmount.toInt())} '
                                   '${_token.symbol}',
-                              style: MallowTheme.uiCaption.copyWith(
-                                color: colors.textPrimary,
-                              ),
-                            ),
-                          ],
+                                  style: MallowTheme.uiCaption.copyWith(
+                                    color: colors.textSecondary,
+                                  ),
+                                ),
+                              ],
+                              if (balance != null) ...[
+                                const SizedBox(height: MallowTheme.spacingMd),
+                                Text.rich(
+                                  TextSpan(
+                                    children: [
+                                      TextSpan(
+                                        text: 'Balance: ',
+                                        style: MallowTheme.uiCaption.copyWith(
+                                          color: colors.textSecondary,
+                                        ),
+                                      ),
+                                      TextSpan(
+                                        text:
+                                            '${formatBalance(balance)} '
+                                            '${_token.symbol}',
+                                        style: MallowTheme.uiCaption.copyWith(
+                                          color: colors.textPrimary,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
                         ),
-                      ),
-                    ],
-                    const SizedBox(height: MallowTheme.spacingLg),
-                    MallowButton(
-                      label: label,
-                      onPressed: _isValid && affordable && !widget.isSubmitting
-                          ? _onSubmit
-                          : null,
-                      isLoading: widget.isSubmitting,
-                      isFullWidth: true,
-                    ),
-                  ],
-                );
-              },
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: MallowTheme.spacingLg),
+                MallowButton(
+                  label: label,
+                  onPressed: _isValid && affordable && !widget.isSubmitting
+                      ? _onSubmit
+                      : null,
+                  isLoading: widget.isSubmitting,
+                  isFullWidth: true,
+                ),
+                SizedBox(
+                  height: sheetBottomInset(context, includeKeyboard: false),
+                ),
+              ],
             ),
-            SizedBox(height: sheetBottomInset(context, includeKeyboard: false)),
-          ],
-        ),
+          );
+        },
       ),
     );
   }
@@ -532,39 +598,6 @@ class _InfoRow extends StatelessWidget {
           ),
         ],
       ),
-    );
-  }
-}
-
-/// Live "~$X.XX" conversion shown at the trailing edge of the bid pill.
-/// Rebuilds when the debounced [amount] changes or when [TokenPriceService]
-/// refreshes its cached prices.
-class _UsdSuffix extends StatelessWidget {
-  const _UsdSuffix({required this.amount, required this.token});
-
-  final double? amount;
-  final MallowToken token;
-
-  @override
-  Widget build(BuildContext context) {
-    final amt = amount;
-    if (amt == null || amt <= 0) return const SizedBox.shrink();
-    final priceService = sl<TokenPriceService>();
-    return ValueListenableBuilder<Map<String, double>>(
-      valueListenable: priceService.prices,
-      builder: (context, _, _) {
-        final usd = priceService.usdValueOfRaw(
-          token.displayToRaw(amt),
-          token.mint,
-        );
-        if (usd == null) return const SizedBox.shrink();
-        return Text(
-          '~\$${usd.toStringAsFixed(2)}',
-          style: MallowTheme.uiCaption.copyWith(
-            color: context.mallowColors.textSecondary,
-          ),
-        );
-      },
     );
   }
 }

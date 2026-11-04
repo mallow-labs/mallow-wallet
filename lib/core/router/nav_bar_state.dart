@@ -18,7 +18,11 @@ import '../../shared/widgets/bottom_nav_bar.dart';
 /// overlay slides in sync with the drawer.
 ///
 /// [selectedTab] is written by the persistent nav bar and read by
-/// `TabNavigator` to switch tabs without recreating the widget.
+/// `TabNavigator` to switch tabs without recreating the widget. Every write
+/// notifies, even an unchanged one: a route can move `TabNavigator` to another
+/// tab without a tap (`/browser` on a cold-start share, `context.go` to a tab
+/// route), which leaves this holding the last tapped tab, and a tap back to
+/// that tab must still switch.
 ///
 /// [activeTab] is written by `TabNavigator` to tell the persistent nav
 /// bar which tab is currently displayed.
@@ -27,7 +31,9 @@ class NavBarState {
 
   static final offset = ValueNotifier<double>(0.0);
 
-  static final selectedTab = ValueNotifier<MallowNavTab>(MallowNavTab.home);
+  static final ValueNotifier<MallowNavTab> selectedTab = _TabSelection(
+    MallowNavTab.home,
+  );
 
   static final activeTab = ValueNotifier<MallowNavTab>(MallowNavTab.home);
 
@@ -62,6 +68,21 @@ class NavBarState {
       });
     } else {
       visible.value = value;
+    }
+  }
+}
+
+/// A [ValueNotifier] that notifies on every write, so it reports each tab
+/// selection rather than only a change. See [NavBarState.selectedTab].
+class _TabSelection extends ValueNotifier<MallowNavTab> {
+  _TabSelection(super.value);
+
+  @override
+  set value(MallowNavTab newValue) {
+    if (newValue != super.value) {
+      super.value = newValue;
+    } else {
+      notifyListeners();
     }
   }
 }

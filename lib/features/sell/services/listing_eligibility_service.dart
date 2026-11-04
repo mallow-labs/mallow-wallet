@@ -6,6 +6,7 @@ import '../../../core/observability/app_logger.dart';
 import '../../../di.dart';
 import '../../artwork/models/on_chain_asset.dart';
 import 'listing_eligibility.dart';
+import 'trade_eligibility.dart';
 
 const _tag = 'ListingEligibility';
 
@@ -15,9 +16,9 @@ const _tag = 'ListingEligibility';
 /// between the form and `VerifyToList`: the current user, `/v0/listingData`
 /// for the mint, and the on-chain asset (plus its collection, for Core).
 ///
-/// Every fetch is best-effort: a failure leaves the corresponding fact
-/// unproven, which can only make the gate stricter, never looser. Callers get
-/// `null` when the user may list.
+/// Every fetch is best-effort. Unknown or suspected v2 assets require a successful
+/// eligibility check; known non-v2 standards retain the approved-creator fallback.
+/// Callers get `null` when the user may list.
 Future<ListingBlockReason?> checkListingEligibility({
   String? mintAccount,
 }) async {
@@ -36,11 +37,12 @@ Future<ListingBlockReason?> checkListingEligibility({
   final listingData = results[0] as ListingData?;
   final asset = results[1] as DigitalAsset?;
 
-  // Core assets carry their creators on the collection, so the webapp's
-  // `isVerifiedCreator` falls back to it. Only fetched when it can matter.
+  // Core creator checks and v2 escrow eligibility require the collection.
   DigitalAsset? collectionAsset;
   final collectionKey = asset?.collectionKey;
-  if (asset?.tokenStandard == TokenStandard.core && collectionKey != null) {
+  if ((asset?.tokenStandard == TokenStandard.core ||
+          asset?.tokenStandard == TokenStandard.cnftV2) &&
+      collectionKey != null) {
     collectionAsset = await _guard(() => das.getAsset(collectionKey));
   }
 
@@ -52,6 +54,11 @@ Future<ListingBlockReason?> checkListingEligibility({
       creatorIsFlagged: preview?.creator?.isFlagged ?? false,
       hasVerifiedSale: listingData?.hasVerifiedSale ?? false,
       hasOnChainAsset: asset != null,
+      tradeEligibility: resolveTradeEligibility(
+        asset: asset,
+        collection: collectionAsset,
+        expectedTokenStandard: preview?.tokenStandard,
+      ),
       hasVerifiedCreator: computeHasVerifiedCreator(
         creator: preview?.creator,
         asset: asset,

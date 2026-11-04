@@ -21,9 +21,11 @@ import '../../../shared/widgets/art_menu_tab.dart';
 import '../../../shared/widgets/loading_indicator.dart';
 import '../../../shared/widgets/mallow_refresh_indicator.dart';
 import '../../../shared/widgets/mallow_sheet.dart';
+import '../../../shared/widgets/sheet_drag_handle.dart';
 import '../../../shared/widgets/sheet_menu_row.dart';
 import '../../../shared/widgets/state_viewer.dart';
 import '../../../shared/widgets/mallow_svg_icon.dart';
+import '../../../shared/widgets/pinned_top_bar.dart';
 import '../../../shared/widgets/tappable.dart';
 import '../../../shared/widgets/view_only_prompt.dart';
 import '../../artwork/widgets/artwork_context_menu_actions.dart';
@@ -210,6 +212,11 @@ class _LoadedProfileState extends State<_LoadedProfile> {
   /// fades to fully transparent over the last [_topFadeRange] pixels of
   /// scroll before pinning kicks in.
   static const double _topFadeRange = 20;
+
+  /// Where the in-flow filter/sort bar pins: below the safe area plus the
+  /// [PinnedTopBar] that fades in with the floating overlay.
+  double get _pinTop =>
+      MediaQuery.of(context).padding.top + PinnedTopBar.rowHeight;
   final GlobalKey _pinHeaderBoxKey = GlobalKey();
   double _topContentOpacity = 1;
 
@@ -242,8 +249,7 @@ class _LoadedProfileState extends State<_LoadedProfile> {
     if (ro is! RenderBox || !ro.attached) return;
 
     final dy = ro.localToGlobal(Offset.zero).dy;
-    final safeAreaTop = MediaQuery.of(context).padding.top;
-    final delta = dy - safeAreaTop;
+    final delta = dy - _pinTop;
     if (delta < 0) {
       _scrollController.jumpTo(_scrollController.offset + delta);
     }
@@ -271,7 +277,7 @@ class _LoadedProfileState extends State<_LoadedProfile> {
 
   /// Compute the opacity of profile content above the in-flow filter/sort
   /// bar. Triggers when the in-flow bar's top edge approaches the bottom of
-  /// the system safe area (notch). The same value (inverted) drives the
+  /// the floating top bar ([_pinTop]). The same value (inverted) drives the
   /// floating overlay's opacity — see [build].
   void _updateTopFade() {
     if (!mounted) return;
@@ -280,8 +286,7 @@ class _LoadedProfileState extends State<_LoadedProfile> {
     final ro = ctx.findRenderObject();
     if (ro is! RenderBox || !ro.attached) return;
     final dy = ro.localToGlobal(Offset.zero).dy;
-    final safeAreaTop = MediaQuery.of(context).padding.top;
-    final fade = ((dy - safeAreaTop) / _topFadeRange).clamp(0.0, 1.0);
+    final fade = ((dy - _pinTop) / _topFadeRange).clamp(0.0, 1.0);
     if ((fade - _topContentOpacity).abs() > 0.005) {
       setState(() => _topContentOpacity = fade);
     }
@@ -374,20 +379,7 @@ class _LoadedProfileState extends State<_LoadedProfile> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: Container(
-                    width: 60,
-                    height: 3,
-                    decoration: BoxDecoration(
-                      color: colors.divider,
-                      borderRadius: BorderRadius.circular(
-                        MallowTheme.radiusFull,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
+                const SheetDragHandle(),
                 // Own-profile management. Everything below the divider is
                 // available on any profile.
                 if (_isOwnProfile) ...[
@@ -786,8 +778,8 @@ class _LoadedProfileState extends State<_LoadedProfile> {
           ),
         ),
 
-        // Floating filter/sort bar with safe-area inset that fades in as
-        // the in-flow bar approaches the notch. Slides 20px into place
+        // Floating top bar + filter/sort bar that fades in as the in-flow
+        // bar reaches the top bar's bottom edge. Slides 20px into place
         // during the fade so chips stay aligned with the in-flow bar's
         // chips during the cross-fade.
         Positioned(
@@ -798,15 +790,25 @@ class _LoadedProfileState extends State<_LoadedProfile> {
             ignoring: _topContentOpacity > 0.5,
             child: Opacity(
               opacity: 1 - _topContentOpacity,
-              child: _FilterSortBar(
-                visibleTabs: _visibleTabs,
-                activeTab: state.activeTab,
-                activeSort: state.activeSort,
-                sortLabel: _sortLabel,
-                viewModeIconAsset: _viewModeIcon,
-                onFilterTap: _showFiltersSheet,
-                filterCount: _filterCount,
-                topInset: safeAreaTop,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  PinnedTopBar(
+                    topInset: safeAreaTop,
+                    title: _profileLabel,
+                    onBack: () => context.pop(),
+                    onMenuTap: _showOptionsSheet,
+                  ),
+                  _FilterSortBar(
+                    visibleTabs: _visibleTabs,
+                    activeTab: state.activeTab,
+                    activeSort: state.activeSort,
+                    sortLabel: _sortLabel,
+                    viewModeIconAsset: _viewModeIcon,
+                    onFilterTap: _showFiltersSheet,
+                    filterCount: _filterCount,
+                  ),
+                ],
               ),
             ),
           ),

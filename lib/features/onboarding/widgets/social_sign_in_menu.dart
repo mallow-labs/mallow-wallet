@@ -8,6 +8,7 @@ import 'package:mallow_wallet/core/services/wallet_repository.dart'
 import 'package:mallow_wallet/shared/theme/mallow_theme.dart';
 import 'package:mallow_wallet/shared/widgets/app_snack_bar.dart';
 import 'package:mallow_wallet/shared/widgets/mallow_button.dart';
+import 'package:mallow_wallet/shared/widgets/sheet_drag_handle.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 /// Shared bottom-sheet scaffold for the create / import wallet menus: the
@@ -182,16 +183,7 @@ class _SocialSignInMenuState extends State<SocialSignInMenu> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Drag handle
-                  Container(
-                    margin: const EdgeInsets.only(top: 7, bottom: 20),
-                    width: 60,
-                    height: 3,
-                    decoration: BoxDecoration(
-                      color: context.mallowColors.surfaceMuted,
-                      borderRadius: BorderRadius.circular(69),
-                    ),
-                  ),
+                  const SheetDragHandle(bottomSpacing: 20),
                   Align(alignment: Alignment.centerLeft, child: widget.title),
                   const SizedBox(height: 24),
                   // Apple leads on iOS (platform-native expectation); Google

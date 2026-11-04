@@ -90,6 +90,7 @@ extension _ArtworkDetailLoaders on _ArtworkDetailViewState {
       final perms = results[0]! as ArtworkPermissions;
       final canSign = results[1]! as bool;
       final preserveOptimistic =
+          artwork.tokenStandard != 'cnft-v2' &&
           _optimisticPermissionPins.contains(artwork.mintAccount) &&
           !perms.canList;
       if (!preserveOptimistic) {
@@ -312,7 +313,9 @@ extension _ArtworkDetailLoaders on _ArtworkDetailViewState {
   /// that extends `endsAt` reschedules against the later deadline. Safe to call
   /// from build().
   void _scheduleAuctionEndCheck(ArtworkDetails artwork) {
-    final endsAt = artwork.listingType == ListingType.auction
+    final endsAt =
+        artwork.listingType == ListingType.auction &&
+            artwork.auctionMetadata?.refunded != true
         ? artwork.auctionMetadata?.endsAt
         : null;
     // No future deadline to watch (not an auction, on-bid with no clock yet, or
@@ -425,7 +428,7 @@ extension _ArtworkDetailLoaders on _ArtworkDetailViewState {
     required String signature,
   }) async {
     // The Offer PDA is keyed by its **maker**, which — with the session-wide
-    // own-offer lookup (A1b) — need not be the active signer. Prefer the
+    // own-offer lookup — need not be the active signer. Prefer the
     // resolved maker; fall back to the active address for a just-made offer
     // whose buyer is by definition the wallet that signed it.
     final buyer = _userOwnOfferBuyer ?? sl<AuthService>().currentAddress;
@@ -473,7 +476,7 @@ extension _ArtworkDetailLoaders on _ArtworkDetailViewState {
 
   /// Every address that could have placed "my" offer: the active signer
   /// unioned with the current session's wallets. The own-offer lookup is
-  /// session-wide (A1b) so an offer placed from a non-active session wallet
+  /// session-wide so an offer placed from a non-active session wallet
   /// still surfaces the Cancel affordance — `_onCancelOffer` then re-points
   /// the signer to that maker before dispatching.
   Set<String> _offerBuyerAddresses() => <String>{
@@ -533,6 +536,24 @@ extension _ArtworkDetailLoaders on _ArtworkDetailViewState {
   /// otherwise the listing currency.
   String? _pricingMint(ArtworkDetails artwork) =>
       artwork.auctionMetadata?.bidMint ?? artwork.currency;
+
+  /// Whether the session can sign the Solana transactions behind this
+  /// screen's marketplace CTAs. See [ArtworkImportWalletAction].
+  ///
+  /// An empty session reads as [ArtworkSolanaSigner.available]: in Profile mode
+  /// the wallets are empty until the profile is restored, and the import CTA
+  /// must not flash in that window. The session listener re-resolves once it
+  /// fills, and `guardSolanaSigner` still gates the tap.
+  ArtworkSolanaSigner _solanaSigner() {
+    final session = sl<SessionManager>();
+    if (session.sessionWallets.isEmpty) return ArtworkSolanaSigner.available;
+    if (session.sessionWalletForChain(Chain.solana) != null) {
+      return ArtworkSolanaSigner.available;
+    }
+    return session.sessionWalletsForChain(Chain.solana).isEmpty
+        ? ArtworkSolanaSigner.missing
+        : ArtworkSolanaSigner.watchOnly;
+  }
 
   /// Resolve the listing/bid currency's symbol + decimals for a mint the
   /// static registry doesn't key.

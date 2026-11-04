@@ -94,7 +94,7 @@ void main() {
 
     // Before a price is entered the rows exist but carry no amount — same
     // treatment as the creation review step, so the layout doesn't jump.
-    expect(find.text('Proceeds'), findsOneWidget);
+    expect(find.text('Estimated proceeds'), findsOneWidget);
     expect(find.text('—'), findsWidgets);
 
     await tester.enterText(find.byType(TextField).first, '10');
@@ -111,11 +111,11 @@ void main() {
     await tester.pumpWidget(buildSheet(resolver: () async => null));
     await tester.pumpAndSettle();
 
-    expect(find.text('Proceeds'), findsNothing);
+    expect(find.text('Estimated proceeds'), findsNothing);
 
     await tester.enterText(find.byType(TextField).first, '2');
     await tester.pumpAndSettle();
-    expect(find.text('Proceeds'), findsNothing);
+    expect(find.text('Estimated proceeds'), findsNothing);
     expect(find.widgetWithText(TextField, '2'), findsOneWidget);
   });
 }

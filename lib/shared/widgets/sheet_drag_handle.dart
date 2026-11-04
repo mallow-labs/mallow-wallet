@@ -4,18 +4,16 @@ import '../theme/mallow_theme.dart';
 
 /// The 60×3 rounded handle pill rendered at the top of every modal sheet.
 ///
-/// Defaults to `colors.textTertiary` and the standard 7-top / 12-bottom
-/// margin used by the confirmation sheets and [FullScreenSheet]. Pass
-/// [color] to override (some sheets use `surfaceMuted` or `divider`).
+/// Colour (`colors.textTertiary`) and the 7 px gap above it are fixed so the
+/// handle reads the same on every sheet. Place it as the first child of the
+/// sheet surface, with no top padding above it — padding there pushes the
+/// handle down and breaks that gap. [bottomSpacing] sets the space between the
+/// handle and the sheet's content.
 class SheetDragHandle extends StatelessWidget {
-  const SheetDragHandle({
-    super.key,
-    this.color,
-    this.margin = const EdgeInsets.only(top: 7, bottom: 12),
-  });
+  const SheetDragHandle({super.key, this.bottomSpacing = 12});
 
-  final Color? color;
-  final EdgeInsets margin;
+  /// Gap between the handle and the content below it.
+  final double bottomSpacing;
 
   @override
   Widget build(BuildContext context) {
@@ -23,9 +21,9 @@ class SheetDragHandle extends StatelessWidget {
       child: Container(
         width: 60,
         height: 3,
-        margin: margin,
+        margin: EdgeInsets.only(top: 7, bottom: bottomSpacing),
         decoration: BoxDecoration(
-          color: color ?? context.mallowColors.textTertiary,
+          color: context.mallowColors.textTertiary,
           borderRadius: BorderRadius.circular(MallowTheme.radiusFull),
         ),
       ),

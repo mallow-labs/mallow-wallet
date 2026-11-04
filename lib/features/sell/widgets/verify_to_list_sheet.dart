@@ -6,6 +6,7 @@ import '../../../shared/widgets/mallow_button.dart';
 import '../../../shared/widgets/mallow_sheet.dart';
 import '../../../shared/widgets/sheet_drag_handle.dart';
 import '../services/listing_eligibility.dart';
+import '../services/trade_eligibility.dart';
 
 /// The mallow creator application form — `applyUrl` in
 /// `Constants`.
@@ -33,8 +34,9 @@ Future<VerifyToListAction?> showVerifyToListSheet(
 
 /// What the sheet was dismissed with. `null` (plain dismissal) means the user
 /// backed out; [editProfile] asks the caller to open the profile editor once
-/// the listing flow itself has been unwound.
-enum VerifyToListAction { editProfile }
+/// the listing flow itself has been unwound. [retry] repeats the eligibility
+/// lookup while keeping the chooser open.
+enum VerifyToListAction { editProfile, retry }
 
 class VerifyToListSheet extends StatelessWidget {
   const VerifyToListSheet({required this.reason, super.key});
@@ -83,7 +85,9 @@ class VerifyToListSheet extends StatelessWidget {
                   ),
                   const SizedBox(height: MallowTheme.spacingMd),
                   Text(
-                    'Sorry, this item cannot be listed.',
+                    reason == ListingBlockReason.unverifiedAsset
+                        ? 'Could not verify this artwork.'
+                        : 'Sorry, this item cannot be listed.',
                     textAlign: TextAlign.center,
                     style: MallowTheme.uiBody.copyWith(
                       color: colors.textPrimary,
@@ -108,9 +112,13 @@ class VerifyToListSheet extends StatelessWidget {
     );
   }
 
-  /// `VerifyToList` — four mutually exclusive branches, verbatim.
+  /// Creator verification reasons and the asset transfer-restriction gate.
   static String _body(ListingBlockReason reason) {
     switch (reason) {
+      case ListingBlockReason.ineligibleAsset:
+        return TradeEligibility.restricted.message!;
+      case ListingBlockReason.unverifiedAsset:
+        return TradeEligibility.unverified.message!;
       case ListingBlockReason.flagged:
         return 'The creator of this artwork has been flagged for suspicious '
             'activity. Please let us know in our discord if you think a '
@@ -128,9 +136,20 @@ class VerifyToListSheet extends StatelessWidget {
   }
 
   /// `VerifyToList` — the application form for a non-approved
-  /// creator, edit-profile for an incomplete profile, nothing otherwise.
+  /// creator, edit-profile for an incomplete profile, retry for an unresolved
+  /// asset, and nothing for confirmed restrictions.
   static List<Widget> _cta(BuildContext context, ListingBlockReason reason) {
     switch (reason) {
+      case ListingBlockReason.unverifiedAsset:
+        return [
+          const SizedBox(height: MallowTheme.spacing20),
+          MallowButton(
+            label: 'Try again',
+            isFullWidth: true,
+            onPressed: () =>
+                Navigator.of(context).pop(VerifyToListAction.retry),
+          ),
+        ];
       case ListingBlockReason.notApprovedCreator:
         return [
           const SizedBox(height: MallowTheme.spacing20),
@@ -158,6 +177,7 @@ class VerifyToListSheet extends StatelessWidget {
                 Navigator.of(context).pop(VerifyToListAction.editProfile),
           ),
         ];
+      case ListingBlockReason.ineligibleAsset:
       case ListingBlockReason.flagged:
       case ListingBlockReason.twitterNotVerified:
         return const [];

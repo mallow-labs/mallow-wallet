@@ -95,6 +95,9 @@ const String kExternalSigningLabel = 'Awaiting approval…';
 /// Subtitle shown while a Ledger user approves on the hardware wallet.
 const String kLedgerSigningSublabel = 'Approve the transaction on your Ledger';
 
+/// Subtitle shown while a Keystone user runs the QR exchange.
+const String kKeystoneSigningSublabel = 'Scan the code with your Keystone';
+
 /// Fallback subtitle for social and any future external wallet signers.
 const String kExternalSigningSublabel =
     'Approve the transaction in your wallet';

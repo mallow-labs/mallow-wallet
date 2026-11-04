@@ -208,6 +208,16 @@ class _SeedPhraseGridState extends State<SeedPhraseGrid>
                   contentPadding: EdgeInsets.zero,
                 ),
                 style: MallowTheme.uiBody,
+                // Recovery words must not feed the keyboard: no suggestions
+                // or autocorrect, no personalised learning (Android's
+                // incognito mode), and no autofill participation. Paste and
+                // the space key keep working.
+                autocorrect: false,
+                enableSuggestions: false,
+                enableIMEPersonalizedLearning: false,
+                smartDashesType: SmartDashesType.disabled,
+                smartQuotesType: SmartQuotesType.disabled,
+                autofillHints: null,
                 textInputAction: _getNextWordIndex(index) != null
                     ? TextInputAction.next
                     : TextInputAction.done,

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:go_router/go_router.dart';
 
@@ -24,6 +25,11 @@ import 'transfer_artwork_flow.dart';
 /// card / mosaic cell) and runs the default handling for the returned action:
 /// cast, add-to-curation, download, view, transfer and burn.
 ///
+/// Fires a medium haptic as the menu opens, confirming the long-press was
+/// recognised — the same weight the app's other long-press actions use. The
+/// haptic lives here rather than in [showArtworkContextMenu] because that
+/// sheet also opens from plain taps on a kebab button, which stay silent.
+///
 /// This is the generic surface-agnostic handler. Screens that need extra
 /// behaviour (curation removal, screen-local list mutation on uncheck, sync
 /// token, etc.) keep their own `_showArtworkContextMenu` and only share the
@@ -44,6 +50,7 @@ Future<void> showAndHandleArtworkContextMenu(
   /// rather than mislabeled. See [showArtworkContextMenu].
   bool showHide = true,
 }) async {
+  unawaited(HapticFeedback.mediumImpact());
   final action = await showArtworkContextMenu(
     context,
     artwork: artwork,

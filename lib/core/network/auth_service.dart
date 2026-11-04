@@ -440,10 +440,11 @@ class AuthService extends ChangeNotifier {
 
     // Ledger proves ownership by signing a memo *transaction* over BLE — a
     // shape only [LedgerAuthService], inside the verify sheet, produces, and
-    // one the ordinary handshake below cannot. Seed Vault signs the challenge
-    // verbatim, so it falls through to that handshake and its OS approval
-    // screen appears there: this method only ever runs from a user action, so
-    // an approval is what the user just asked for.
+    // one the ordinary handshake below cannot. Seed Vault and Keystone sign
+    // the challenge verbatim, so they fall through to that handshake and the
+    // OS approval screen or the QR exchange appears there: this method only
+    // ever runs from a user action, so an approval is what the user just
+    // asked for.
     if (await _walletManager.isHardwareWallet(address) &&
         await hardwareVerifyDeviceFor(address) == WalletType.ledger) {
       AppLogger.debug(
@@ -461,23 +462,31 @@ class AuthService extends ChangeNotifier {
       return; // JWT already cached by HardwareVerifySheet
     }
 
-    // Step 1: Request auth token
-    final tokenResponse = await _api.getAuthToken(
-      AuthTokenRequest(address: cookieAddress),
+    // Step 1: Request the complete SIWS message for Solana, or a legacy nonce.
+    final isSolana = Chain.fromAddress(address) == Chain.solana;
+    final challengeResponse = await _api.getAuthToken(
+      AuthTokenRequest(
+        address: cookieAddress,
+        format: isSolana ? 'siws' : null,
+      ),
     );
-    final token = tokenResponse.result;
+    final challenge = challengeResponse.result;
 
     // Step 2: Sign the chain-specific login challenge
     final signature = await _walletManager.signLoginChallenge(
       walletId,
-      message: _loginMessagePrefix,
-      token: token,
+      message: isSolana ? challenge : _loginMessagePrefix,
+      token: isSolana ? null : challenge,
     );
 
     // Step 3: Verify with backend via raw Dio to capture Set-Cookie header
     final response = await _dio.post<Map<String, dynamic>>(
       '${Config.apiBaseUrl}/v0/authToken/verify',
-      data: _verifyBody(cookieAddress, signature),
+      data: _verifyBody(
+        cookieAddress,
+        signature,
+        message: isSolana ? challenge : null,
+      ),
     );
 
     // Step 4: Extract and cache the wallet-sig JWT from Set-Cookie
@@ -492,8 +501,7 @@ class AuthService extends ChangeNotifier {
     await _adoptPrivilegedUser(response.data, cookieAddress);
   }
 
-  /// The login challenge message prefix the backend reconstructs and verifies
-  /// (signed content is `<prefix>\n\ntoken:<token>`).
+  /// Legacy Ethereum and Tezos challenge prefix.
   static const _loginMessagePrefix = 'mallow Login';
 
   /// Backend cookie/lookup form of an address: Ethereum (`0x…`) is
@@ -509,10 +517,12 @@ class AuthService extends ChangeNotifier {
   /// rebuild and verify the Micheline payload.
   Map<String, dynamic> _verifyBody(
     String address,
-    LoginChallengeSignature signature,
-  ) => {
+    LoginChallengeSignature signature, {
+    String? message,
+  }) => {
     'address': address,
-    'message': _loginMessagePrefix,
+    'message': message ?? _loginMessagePrefix,
+    if (signature.chain == Chain.solana) 'format': 'siws',
     'signature': signature.signature,
     if (signature.chain != Chain.solana) 'chain': signature.chain.toDbString(),
     if (signature.publicKey != null) 'publicKey': signature.publicKey,
@@ -980,16 +990,17 @@ class AuthService extends ChangeNotifier {
   /// [_verifySignatureIfPossible] is what makes a background attempt non-fatal.
   Future<void> _signAndCacheWalletSig(String address) async {
     final cookieAddress = _cookieAddress(address);
+    final isSolana = Chain.fromAddress(address) == Chain.solana;
 
-    // Step 1: Request auth token
-    AppLogger.debug(
-      _tag,
-      'Requesting auth token for signature verification...',
+    // Step 1: Request the chain-specific challenge
+    AppLogger.debug(_tag, 'Requesting challenge for signature verification...');
+    final challengeResponse = await _api.getAuthToken(
+      AuthTokenRequest(
+        address: cookieAddress,
+        format: isSolana ? 'siws' : null,
+      ),
     );
-    final tokenResponse = await _api.getAuthToken(
-      AuthTokenRequest(address: cookieAddress),
-    );
-    final token = tokenResponse.result;
+    final challenge = challengeResponse.result;
 
     // Step 2: Sign the chain-specific login challenge with the wallet matching
     // this address (not the active wallet, which may differ after
@@ -997,14 +1008,18 @@ class AuthService extends ChangeNotifier {
     // social wallets sign locally from their stored key.
     final signature = await _walletManager.signLoginChallengeForAddress(
       address,
-      message: _loginMessagePrefix,
-      token: token,
+      message: isSolana ? challenge : _loginMessagePrefix,
+      token: isSolana ? null : challenge,
     );
 
     // Step 3: Verify with backend via raw Dio to capture Set-Cookie header
     final response = await _dio.post<Map<String, dynamic>>(
       '${Config.apiBaseUrl}/v0/authToken/verify',
-      data: _verifyBody(cookieAddress, signature),
+      data: _verifyBody(
+        cookieAddress,
+        signature,
+        message: isSolana ? challenge : null,
+      ),
     );
 
     // Step 4: Extract and cache the wallet-sig JWT from Set-Cookie
@@ -1337,11 +1352,26 @@ class _SignatureRetryInterceptor extends Interceptor {
           return handler.next(err);
         }
         // The Ledger sheet performs the whole handshake itself and has already
-        // cached the JWT. Seed Vault's sheet only collects consent, so the
-        // signature — and with it the OS approval screen — happens here, now
-        // that the user has asked for it.
-        if (device == WalletType.seedVault) {
-          await _authService._signAndCacheWalletSig(address);
+        // cached the JWT. Seed Vault's and Keystone's sheets only collect
+        // consent, so the signature — and with it the OS approval screen or
+        // the QR exchange — happens here, now that the user has asked for it.
+        //
+        // Exhaustive on purpose: written as `device == seedVault` this site
+        // compiled clean when Keystone was added, and a Keystone user would
+        // have consented and then never been asked to sign.
+        switch (device) {
+          case WalletType.seedVault:
+          case WalletType.keystone:
+            await _authService._signAndCacheWalletSig(address);
+          case WalletType.ledger:
+            break;
+          case WalletType.hd:
+          case WalletType.importedKey:
+          case WalletType.viewOnly:
+          case WalletType.social:
+            // Unreachable: [hardwareVerifyDeviceFor] answers only hardware
+            // types.
+            break;
         }
       } else {
         // Existing silent signing flow for HD / importedKey / social wallets

@@ -200,7 +200,7 @@ void main() {
     });
 
     test('the swap key keeps its legacy name so nobody is reset', () async {
-      // Renaming it (as the Tier-C diff first did) silently reset every user
+      // Renaming it (as an earlier change once did) silently reset every user
       // with a custom swap fee back to Auto.
       SharedPreferences.setMockInitialValues({
         'pref_swap_priority_fee_lamports': 123456,

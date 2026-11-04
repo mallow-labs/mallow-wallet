@@ -13,6 +13,7 @@ void main() {
       'nftPreview': <String, dynamic>{
         'mintAccount': '9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin',
         'name': 'Artwork',
+        'tokenStandard': 'cnft-v2',
         'isFlagged': true,
         'creator': <String, dynamic>{
           'addresses': ['9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin'],
@@ -24,6 +25,7 @@ void main() {
     });
 
     expect(data.hasVerifiedSale, isTrue);
+    expect(data.nftPreview!.tokenStandard, 'cnft-v2');
     expect(data.nftPreview!.isFlagged, isTrue);
     expect(data.nftPreview!.creator!.isFlagged, isTrue);
     expect(data.nftPreview!.creator!.roles, ['primaryLister']);

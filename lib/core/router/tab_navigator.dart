@@ -5,6 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../di.dart';
+import '../config/remote_config_service.dart';
+import '../../features/browser/services/browser_session.dart';
+import '../../features/browser/screens/browser_start_screen.dart';
 import '../../features/home/screens/home_screen.dart';
 import '../../features/portfolio/screens/tokens_tab_content.dart';
 import '../../features/home/widgets/account_menu_drawer.dart';
@@ -22,12 +25,12 @@ import 'nav_bar_state.dart';
 
 /// Main tab navigator with horizontal slide transitions and account menu drawer.
 ///
-/// The drawer wraps all three tabs so it can be opened from any screen
+/// The drawer wraps all four tabs so it can be opened from any screen
 /// via edge swipe or [MenuDrawerController.of(context).toggle()].
 class TabNavigator extends StatefulWidget {
   const TabNavigator({super.key, this.initialTab = 0});
 
-  /// Initial tab index (0=home, 1=portfolio, 2=tokens)
+  /// Initial tab index (0=home, 1=portfolio, 2=tokens, 3=browser)
   final int initialTab;
 
   @override
@@ -77,9 +80,21 @@ class _TabNavigatorState extends State<TabNavigator>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _currentIndex = widget.initialTab;
+    _currentIndex =
+        widget.initialTab == 3 &&
+            !sl<RemoteConfigService>().config.value.browserEnabled
+        ? 0
+        : widget.initialTab;
 
-    _screens = const [HomeScreen(), YourArtScreen(), TokensTabContent()];
+    sl<RemoteConfigService>().config.addListener(_browserAvailabilityChanged);
+    _closeDisabledBrowser();
+
+    _screens = const [
+      HomeScreen(),
+      YourArtScreen(),
+      TokensTabContent(),
+      BrowserStartScreen(),
+    ];
 
     // Tab slide/fade
     _tabController = AnimationController(
@@ -119,6 +134,19 @@ class _TabNavigatorState extends State<TabNavigator>
     }
   }
 
+  Future<void> _closeDisabledBrowser() async {
+    if (sl<RemoteConfigService>().config.value.browserEnabled) return;
+    final session = BrowserSession.instance;
+    await session.load();
+    session.clear(keepBookmarks: true);
+  }
+
+  void _browserAvailabilityChanged() {
+    if (sl<RemoteConfigService>().config.value.browserEnabled) return;
+    _closeDisabledBrowser();
+    if (_currentIndex == 3) NavBarState.selectedTab.value = MallowNavTab.home;
+  }
+
   void _syncNavBarOffset() {
     NavBarState.offset.value = _drawerAnimation.value * _menuWidth;
   }
@@ -126,15 +154,20 @@ class _TabNavigatorState extends State<TabNavigator>
   static MallowNavTab _indexToTab(int index) => switch (index) {
     1 => MallowNavTab.portfolio,
     2 => MallowNavTab.tokens,
+    3 => MallowNavTab.browser,
     _ => MallowNavTab.home,
   };
 
   void _onNavBarTabSelected() {
     final tab = NavBarState.selectedTab.value;
+    if (tab == MallowNavTab.browser &&
+        !sl<RemoteConfigService>().config.value.browserEnabled)
+      return;
     final newIndex = switch (tab) {
       MallowNavTab.home => 0,
       MallowNavTab.portfolio => 1,
       MallowNavTab.tokens => 2,
+      MallowNavTab.browser => 3,
     };
 
     // Keep the highlight in lockstep with the selection unconditionally —
@@ -167,10 +200,15 @@ class _TabNavigatorState extends State<TabNavigator>
     // `context.go(AppRoutes.home)` updates `widget.initialTab` without
     // re-running initState. Honor the new route's tab so the displayed
     // content follows the URL instead of retaining the previous tab.
-    if (widget.initialTab != oldWidget.initialTab &&
-        widget.initialTab != _currentIndex) {
+    final requestedIndex =
+        widget.initialTab == 3 &&
+            !sl<RemoteConfigService>().config.value.browserEnabled
+        ? 0
+        : widget.initialTab;
+    if (requestedIndex != oldWidget.initialTab &&
+        requestedIndex != _currentIndex) {
       setState(() {
-        _currentIndex = widget.initialTab;
+        _currentIndex = requestedIndex;
         // See _onNavBarTabSelected: preserve a mid-fade presentation value
         // rather than blinking back to a blank frame on rapid route changes.
         if (!_tabController.isAnimating) _tabController.value = 0.0;
@@ -220,8 +258,16 @@ class _TabNavigatorState extends State<TabNavigator>
     NavBarState.releaseShow();
   }
 
+  /// Also fires from `subscribe`, whether or not this route is on top. A cold
+  /// start straight into a child route (a shared website opening
+  /// `/browser/open`) builds this route *under* the child in one frame, and no
+  /// `didPushNext` follows, so showing the bar here would paint it over the
+  /// child. `didPopNext` shows it once the child is popped.
   @override
-  void didPush() => _showNavBar();
+  void didPush() {
+    if (_subscribedRoute?.isCurrent == false) return;
+    _showNavBar();
+  }
 
   @override
   void didPopNext() => _showNavBar();
@@ -246,6 +292,9 @@ class _TabNavigatorState extends State<TabNavigator>
 
   @override
   void dispose() {
+    sl<RemoteConfigService>().config.removeListener(
+      _browserAvailabilityChanged,
+    );
     WidgetsBinding.instance.removeObserver(this);
     navBarRouteObserver.unsubscribe(this);
     _hideNavBar();

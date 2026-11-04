@@ -27,6 +27,7 @@ import '../../auction/data/rewards_repository.dart';
 import '../../portfolio/services/portfolio_bloc.dart';
 import '../../portfolio/services/portfolio_refresh_signal.dart';
 import '../../sale/services/direct_proceeds.dart';
+import '../../sell/services/trade_eligibility.dart';
 import '../../sale/services/marketplace_config_service.dart';
 import '../../sale/services/proceeds_calculator.dart';
 import '../data/fixed_price_repository.dart';
@@ -86,6 +87,8 @@ sealed class FixedPriceEvent with _$FixedPriceEvent {
   const factory FixedPriceEvent.selectArtwork(PortfolioArtwork artwork) =
       FixedPriceSelectArtwork;
 
+  const factory FixedPriceEvent.retryEligibility() = FixedPriceRetryEligibility;
+
   // --- Pricing step ---
   const factory FixedPriceEvent.setPrice(int rawAmount) = FixedPriceSetPrice;
   const factory FixedPriceEvent.setCurrencyMint(String? mint) =
@@ -130,6 +133,7 @@ class FixedPriceState extends Equatable {
     this.isSecondaryMarket = false,
     this.showVerifiedSellerOptions = false,
     this.selectedArtwork,
+    this.listingEligibilityError,
     this.updateAuthority,
     this.price = 0,
     this.currencyMint,
@@ -168,6 +172,12 @@ class FixedPriceState extends Equatable {
   final bool showVerifiedSellerOptions;
 
   final PortfolioArtwork? selectedArtwork;
+
+  /// Non-null while verification is pending, incomplete, or confirms restrictions.
+  final String? listingEligibilityError;
+
+  bool get isCheckingEligibility =>
+      listingEligibilityError == verifyingArtworkEligibility;
 
   /// On-chain update authority for the selected mint, populated from the
   /// DAS asset lookup. Used as the review-step fallback label when the
@@ -219,6 +229,7 @@ class FixedPriceState extends Equatable {
     bool? isSecondaryMarket,
     bool? showVerifiedSellerOptions,
     Object? selectedArtwork = _sentinel,
+    Object? listingEligibilityError = _sentinel,
     Object? updateAuthority = _sentinel,
     int? price,
     Object? currencyMint = _sentinel,
@@ -242,6 +253,9 @@ class FixedPriceState extends Equatable {
     isSecondaryMarket: isSecondaryMarket ?? this.isSecondaryMarket,
     showVerifiedSellerOptions:
         showVerifiedSellerOptions ?? this.showVerifiedSellerOptions,
+    listingEligibilityError: identical(listingEligibilityError, _sentinel)
+        ? this.listingEligibilityError
+        : listingEligibilityError as String?,
     selectedArtwork: identical(selectedArtwork, _sentinel)
         ? this.selectedArtwork
         : selectedArtwork as PortfolioArtwork?,
@@ -276,6 +290,7 @@ class FixedPriceState extends Equatable {
     isSecondaryMarket,
     showVerifiedSellerOptions,
     selectedArtwork,
+    listingEligibilityError,
     updateAuthority,
     price,
     currencyMint,
@@ -319,12 +334,14 @@ class FixedPriceState extends Equatable {
     return (idx + 2) / (visible.length + 2);
   }
 
-  bool get canGoNext => switch (step) {
-    FixedPriceStep.selectArtwork => selectedArtwork != null,
-    FixedPriceStep.pricing => _pricingValid,
-    FixedPriceStep.additionalOptions => _additionalValid,
-    FixedPriceStep.review => true,
-  };
+  bool get canGoNext =>
+      listingEligibilityError == null &&
+      (switch (step) {
+        FixedPriceStep.selectArtwork => selectedArtwork != null,
+        FixedPriceStep.pricing => _pricingValid,
+        FixedPriceStep.additionalOptions => _additionalValid,
+        FixedPriceStep.review => true,
+      });
 
   /// True when the selected artwork is a master edition that the seller
   /// can mint copies from (LimitedEdition or OpenEdition supply types).
@@ -491,12 +508,22 @@ class FixedPriceBloc extends Bloc<FixedPriceEvent, FixedPriceState> {
       (e, emit) => emit(state.copyWith(askForShippingAddress: e.value)),
     );
 
+    on<FixedPriceRetryEligibility>((event, emit) async {
+      final mint = _listingMint;
+      if (mint == null || state.isCheckingEligibility) return;
+      emit(
+        state.copyWith(listingEligibilityError: verifyingArtworkEligibility),
+      );
+      await _hydrateForMint(mint: mint, pubkey: state.userPubkey, emit: emit);
+    });
     on<FixedPriceRequestList>(_onRequestList);
     on<FixedPriceIndexedAck>(_onIndexedAck);
     on<FixedPriceDismissError>(
       (e, emit) => emit(state.copyWith(flow: const TxFlowIdle())),
     );
     on<FixedPriceReset>((e, emit) {
+      _listingMint = null;
+      _hydrationGeneration++;
       _txTracker.clear();
       emit(const FixedPriceState());
     });
@@ -512,6 +539,9 @@ class FixedPriceBloc extends Bloc<FixedPriceEvent, FixedPriceState> {
   final TxLandedSlots _txLandedSlots;
   final MarketplaceActionFlow _flow;
   final FeeConfig _feeConfig;
+
+  String? _listingMint;
+  int _hydrationGeneration = 0;
 
   final _txTracker = StaleTxTracker<List<String>>();
 
@@ -536,6 +566,7 @@ class FixedPriceBloc extends Bloc<FixedPriceEvent, FixedPriceState> {
     final mint = event.mintAccount ?? event.artwork?.mintAccount;
     if (mint == null) return;
 
+    emit(state.copyWith(listingEligibilityError: verifyingArtworkEligibility));
     await _hydrateForMint(mint: mint, pubkey: pubkey, emit: emit);
   }
 
@@ -547,38 +578,45 @@ class FixedPriceBloc extends Bloc<FixedPriceEvent, FixedPriceState> {
     FixedPriceSelectArtwork event,
     Emitter<FixedPriceState> emit,
   ) async {
-    emit(state.copyWith(selectedArtwork: event.artwork));
+    emit(
+      state.copyWith(
+        selectedArtwork: event.artwork,
+        listingEligibilityError: verifyingArtworkEligibility,
+        flow: const TxFlowIdle(),
+      ),
+    );
     await _hydrateForMint(
       mint: event.artwork.mintAccount,
       pubkey: state.userPubkey,
       emit: emit,
-      guardSelection: true,
     );
   }
 
   /// Shared royalty/fee/secondary-market resolution for both the `started`
-  /// and select-artwork paths. When [guardSelection] is set, a newer picker
-  /// selection that landed while the network round-trip was in flight cancels
-  /// this stale emit.
+  /// and select-artwork paths. A newer lookup that starts while the network
+  /// round-trip is in flight cancels this stale emit.
   Future<void> _hydrateForMint({
     required String mint,
     required String pubkey,
     required Emitter<FixedPriceState> emit,
-    bool guardSelection = false,
   }) async {
+    _listingMint = mint;
+    final generation = ++_hydrationGeneration;
     final ctx = await resolveListingContext(
       mint: mint,
       sellerPubkey: pubkey,
+      expectedTokenStandard: state.selectedArtwork?.tokenStandard,
       dasApi: _dasApi,
       artworkRepo: _artworkRepo,
       marketplaceConfig: _marketplaceConfig,
     );
 
     // Drop a stale hydration whose selection has since been replaced.
-    if (guardSelection && state.selectedArtwork?.mintAccount != mint) return;
+    if (generation != _hydrationGeneration) return;
 
     emit(
       state.copyWith(
+        listingEligibilityError: ctx.tradeEligibility.message,
         isSecondaryMarket: ctx.isSecondaryMarket,
         showVerifiedSellerOptions: ctx.isVerifiedSeller,
         royaltyShares: ctx.royaltyShares,
@@ -611,7 +649,8 @@ class FixedPriceBloc extends Bloc<FixedPriceEvent, FixedPriceState> {
     FixedPriceRequestList event,
     Emitter<FixedPriceState> emit,
   ) async {
-    if (state.selectedArtwork == null) return;
+    if (state.selectedArtwork == null || state.listingEligibilityError != null)
+      return;
     if (state.pricingError != null) {
       // Form validation problem, not a tx failure — classify as
       // `validation` and surface the raw message without the

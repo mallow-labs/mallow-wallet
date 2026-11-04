@@ -16,7 +16,7 @@
 /// an init failure to react to rather than a live element `onError` event.
 ///
 /// The list used to be produced by a shared resolver service; that service is
-/// removed (2026-09) (original-serving spec, decision 4), so the local
+/// removed (2026-09), so the local
 /// transform list — its old degraded-mode fallback — is the only path left.
 ///
 /// [AssetUrl.videoSourceCandidates] is what players actually call: it puts the
@@ -125,8 +125,8 @@ class AssetUrl {
   static bool _isPlayable(String url) =>
       url.isNotEmpty && !url.contains('shdw-drive');
 
-  /// Ordered video source URLs for [url]: the `/original/` URL always leads
-  /// (original-serving spec), then the direct gateway ladder.
+  /// Ordered video source URLs for [url]: the `/original/` URL always leads,
+  /// then the direct gateway ladder.
   ///
   /// The images service serves the mint-time bytes from R2 when it has them —
   /// much faster than the public gateways — and 307s to the best live gateway

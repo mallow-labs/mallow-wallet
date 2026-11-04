@@ -54,9 +54,13 @@ String? sendDisabledMessage(RemoteConfig config, TokenBalance token) {
 /// wallet's holdings, with a search filter. Tapping a row advances the flow —
 /// there is no confirm button on this step.
 class SendTokenSelectStep extends StatefulWidget {
-  const SendTokenSelectStep({required this.onSelected, super.key});
+  const SendTokenSelectStep({required this.onSelected, this.chain, super.key});
 
   final ValueChanged<TokenBalance> onSelected;
+
+  /// Lists only this chain's tokens, for a send whose recipient is already
+  /// known. Null lists every chain.
+  final Chain? chain;
 
   @override
   State<SendTokenSelectStep> createState() => _SendTokenSelectStepState();
@@ -142,7 +146,10 @@ class _SendTokenSelectStepState extends State<SendTokenSelectStep> {
     final query = _query.toLowerCase();
     // Only show tokens the send flow can actually transact (see
     // [isSendableToken]) — this is the chain filter on the picker.
-    final sendable = tokens.where(isSendableToken);
+    final chain = widget.chain;
+    final sendable = tokens.where(
+      (t) => isSendableToken(t) && (chain == null || t.chain == chain),
+    );
     final filtered = query.isEmpty
         ? sendable.toList()
         : sendable
@@ -156,7 +163,11 @@ class _SendTokenSelectStepState extends State<SendTokenSelectStep> {
     if (filtered.isEmpty) {
       return Center(
         child: Text(
-          query.isEmpty ? 'No tokens to send' : 'No tokens found',
+          query.isNotEmpty
+              ? 'No tokens found'
+              : chain == null
+              ? 'No tokens to send'
+              : 'No ${chain.label} tokens to send',
           style: MallowTheme.uiBody.copyWith(
             color: context.mallowColors.textSecondary,
           ),

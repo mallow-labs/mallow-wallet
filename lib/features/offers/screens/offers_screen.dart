@@ -7,6 +7,7 @@ import 'package:mallow_api/mallow_api.dart' as api;
 import '../../../core/config/remote_config.dart';
 import '../../../core/config/store_build.dart';
 import '../../../core/router/app_router.dart';
+import '../../../core/session/session_manager.dart';
 import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/utils/artwork_display.dart';
@@ -26,6 +27,11 @@ import '../../market/widgets/market_action_flow_sheet.dart';
 import '../../market/widgets/market_pipeline_sheet_view.dart';
 import '../../portfolio/services/token_balance_bloc.dart';
 import '../services/offers_inbox_bloc.dart';
+import '../data/offers_inbox_repository.dart';
+import '../models/bid_refund_deposit.dart';
+import '../widgets/bid_refund_deposits_sheet.dart';
+import '../models/bid_refund_balance.dart';
+import '../widgets/bid_refund_card.dart';
 import '../widgets/offers_artwork_group.dart';
 import '../widgets/offers_auction_bid_card.dart';
 import '../widgets/offers_blocked_disclosure.dart';
@@ -191,6 +197,148 @@ class _OffersViewState extends State<_OffersView> {
     if (!completed) await restoreSigner(previousSigner);
   }
 
+  Future<void> _onWithdrawBidRefund(
+    BidRefundBalance balance,
+    String? destination,
+  ) async {
+    final amount = MarketPrice(
+      rawAmount: double.parse(balance.refund.amount),
+      currencyMint: balance.refund.mint,
+    );
+    await _runBidRefundAction(
+      signer: balance.bidder,
+      watchOnlyMessage: 'Import this bidder wallet to withdraw its refund.',
+      amount: amount,
+      event: MarketEvent.withdrawBidRefund(
+        amount: amount,
+        destination: destination,
+      ),
+      actionType: 'withdraw-bid-refund',
+      title: 'Bid refund',
+      account: balance.refund.mint,
+    );
+  }
+
+  Future<void> _onRecoverDeposits() async {
+    if (_switchingSigner) return;
+    if (await guardFlowDisabled(
+          context,
+          FlowKey.solana(AppFlow.auctionRefundWithdraw),
+        ) ||
+        !mounted)
+      return;
+    final owners = sl<SessionManager>().sessionWallets
+        .where((wallet) => wallet.chainEnum == Chain.solana)
+        .map((wallet) => wallet.address)
+        .toSet();
+    final deposit = await showMallowSheet<BidRefundDeposit>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => BidRefundDepositsSheet(
+        loadDeposits: () =>
+            sl<OffersInboxRepository>().getBidRefundDeposits(owners),
+      ),
+    );
+    if (deposit == null || !mounted) return;
+    final isRelease = deposit.needsRelease;
+    final amount = isRelease
+        ? MarketPrice(
+            rawAmount: double.parse(deposit.amount),
+            currencyMint: deposit.isSol ? null : deposit.mint,
+          )
+        : MarketPrice.zero();
+    final completed = await _runBidRefundAction(
+      signer: deposit.rentPayer,
+      watchOnlyMessage: 'Import this wallet to recover the deposit it paid.',
+      amount: amount,
+      event: isRelease
+          ? (deposit.isSol
+                ? MarketEvent.releaseSolBidRefund(
+                    bidder: deposit.bidder,
+                    amount: amount,
+                  )
+                : MarketEvent.releaseBidRefund(
+                    bidder: deposit.bidder,
+                    amount: amount,
+                    destination: deposit.destination,
+                  ))
+          : MarketEvent.recoverBidRefundDeposit(claim: deposit.claim),
+      actionType: isRelease
+          ? (deposit.isSol ? 'release-sol-bid-refund' : 'release-bid-refund')
+          : 'recover-bid-refund-deposit',
+      title: 'Bid refund deposit',
+      account: isRelease ? deposit.bidder : deposit.claim,
+    );
+    if (isRelease && completed && mounted) await _onRecoverDeposits();
+  }
+
+  Future<bool> _runBidRefundAction({
+    required String signer,
+    required String watchOnlyMessage,
+    required MarketPrice amount,
+    required MarketEvent event,
+    required String actionType,
+    required String title,
+    required String account,
+  }) async {
+    if (_switchingSigner) return false;
+    if (await guardFlowDisabled(
+          context,
+          FlowKey.solana(AppFlow.auctionRefundWithdraw),
+        ) ||
+        !mounted)
+      return false;
+    final previousSigner = activeSignerSnapshot();
+    setState(() => _switchingSigner = true);
+    var selected = false;
+    try {
+      selected = await ensureSigner(
+        context,
+        signer,
+        watchOnlyMessage: watchOnlyMessage,
+      );
+    } finally {
+      if (mounted) setState(() => _switchingSigner = false);
+    }
+    if (!selected || !mounted) return false;
+    if (await guardViewOnly(context) || !mounted) {
+      await restoreSigner(previousSigner);
+      return false;
+    }
+    final bloc = context.read<MarketBloc>();
+    bloc.add(event);
+    await showMallowSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => BlocProvider.value(
+        value: bloc,
+        child: MarketActionFlowSheet(
+          tokenBalanceBloc: context.read<TokenBalanceBloc>(),
+          artworkTitle: title,
+          preview: MarketActionPreview(
+            actionType: actionType,
+            mintAccount: account,
+            totalCost: amount,
+          ),
+          pipelineBuilder: (_) =>
+              MarketPipelineSheetView(actionType: actionType, title: title),
+        ),
+      ),
+    );
+    final state = bloc.state;
+    final completed = state is TxFlowSuccess<MarketPrepData, MarketSuccessData>;
+    if (!completed) await restoreSigner(previousSigner);
+    if (!mounted) return completed;
+    if (completed) {
+      context.read<TokenBalanceBloc>().add(const TokenBalanceEvent.load());
+    } else if (state is TxFlowFailure<MarketPrepData, MarketSuccessData> &&
+        !state.failure.isFlowDisabled) {
+      AppSnackBar.show(context, state.failure.message);
+    }
+    bloc.add(const MarketEvent.reset());
+    return completed;
+  }
+
   /// Re-point the global signer to the item's `viewerAddress` — the wallet
   /// that holds the art (received) or placed the offer (placed) — so
   /// [MarketBloc] builds the tx as the right wallet. Returns false when the
@@ -311,7 +459,17 @@ class _OffersViewState extends State<_OffersView> {
       // re-prompts the signer against a closed PDA. Gate on the flip — the
       // same invalidate-after-checkTx rule the artwork screen uses.
       if (state.result.indexed == null) return;
-      context.read<OffersInboxBloc>().add(const OffersInboxEvent.refresh());
+      // Sponsor actions reread deposits on discovery; the offers feed is unchanged.
+      if (state.result.actionType == 'recover-bid-refund-deposit' ||
+          state.result.actionType == 'release-sol-bid-refund' ||
+          state.result.actionType == 'release-bid-refund') {
+        return;
+      }
+      context.read<OffersInboxBloc>().add(
+        OffersInboxEvent.refresh(
+          refreshRefunds: state.result.actionType == 'withdraw-bid-refund',
+        ),
+      );
     } else if (state is TxFlowFailure<MarketPrepData, MarketSuccessData> &&
         state.failure.isFlowDisabled) {
       // Kill switch. Presented here rather than in the post-sheet check
@@ -369,6 +527,17 @@ class _OffersViewState extends State<_OffersView> {
                   onTabSelected: (i) => setState(() => _tabIndex = i),
                 ),
               ),
+              if (_tabIndex == 1)
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: MallowTheme.spacing20,
+                  ),
+                  child: TextButton(
+                    key: const ValueKey('recover-bid-refund-deposits'),
+                    onPressed: _switchingSigner ? null : _onRecoverDeposits,
+                    child: const Text('Recover bid refund deposits'),
+                  ),
+                ),
               Expanded(
                 child: Stack(
                   children: [
@@ -476,6 +645,41 @@ class _OffersViewState extends State<_OffersView> {
             ),
             sliver: SliverMainAxisGroup(
               slivers: [
+                if (state.inboxError != null)
+                  SliverToBoxAdapter(
+                    child: Text(
+                      state.inboxError!,
+                      style: MallowTheme.uiBody.copyWith(color: colors.error),
+                    ),
+                  ),
+                if (_tabIndex == 1 &&
+                    (state.bidRefunds.isNotEmpty ||
+                        state.bidRefundError != null))
+                  SliverToBoxAdapter(
+                    child: Column(
+                      children: [
+                        if (state.bidRefundError != null) ...[
+                          Text(
+                            'Bid refunds could not be loaded.',
+                            style: MallowTheme.uiBody.copyWith(
+                              color: colors.error,
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: _onRefresh,
+                            child: const Text('Retry'),
+                          ),
+                        ],
+                        for (final balance in state.bidRefunds)
+                          BidRefundCard(
+                            key: ValueKey(balance.refund.claim),
+                            balance: balance,
+                            onWithdraw: (destination) =>
+                                _onWithdrawBidRefund(balance, destination),
+                          ),
+                      ],
+                    ),
+                  ),
                 // Disclosure sits above both the populated list and the empty
                 // state: "every offer I have is from someone I blocked" is
                 // exactly the case where the count must not disappear with
@@ -495,6 +699,8 @@ class _OffersViewState extends State<_OffersView> {
                           // empty message.
                           child: (state.hasMore || state.isLoadingMore)
                               ? _centeredSpinner(colors)
+                              : state.inboxError != null
+                              ? const SizedBox.shrink()
                               : Text(
                                   emptyLabel,
                                   style: MallowTheme.uiBody.copyWith(
@@ -604,7 +810,7 @@ class _OffersViewState extends State<_OffersView> {
     final bloc = context.read<OffersInboxBloc>();
     await context.push(AppRoutes.artworkDetailPath(item.asset));
     if (!mounted) return;
-    bloc.add(const OffersInboxEvent.refresh());
+    bloc.add(const OffersInboxEvent.refresh(refreshRefunds: false));
   }
 
   Widget _sortControl(BuildContext context, api.OffersInboxSort sort) {
