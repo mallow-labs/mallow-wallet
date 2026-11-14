@@ -13,6 +13,7 @@ import '../../../core/result/result.dart';
 import '../../../di.dart';
 import '../../artwork/services/artwork_edited_signal.dart';
 import '../../artwork/services/artwork_removal_signal.dart';
+import '../../moderation/services/moderation_filter.dart';
 import '../../portfolio/data/portfolio_repository.dart';
 import '../../portfolio/services/portfolio_bloc.dart';
 import '../data/home_feed_repository.dart';
@@ -205,11 +206,23 @@ sealed class HomeState with _$HomeState {
 /// fetches fresh data in background.
 @injectable
 class HomeBloc extends Bloc<HomeEvent, HomeState> {
-  HomeBloc(this._repository, this._portfolioRepository)
-    : super(const HomeState.initial()) {
+  HomeBloc(
+    this._repository,
+    this._portfolioRepository, {
+    // Tests pass their own. Kept out of the generated construction, which
+    // listens to the app's block list and reports.
+    @ignoreParam Listenable? moderationChanges,
+  }) : _moderationChanges =
+           moderationChanges ?? ModerationFilter.current().changes,
+       super(const HomeState.initial()) {
     on<HomeLoad>(_onLoad);
     on<HomeRefresh>(_onRefresh);
     on<HomeArtworkRemoved>(_onArtworkRemoved);
+
+    // The repository filters every section as it maps it. This covers the
+    // sections already on screen when the viewer blocks an account or reports
+    // something from a route pushed on top of Home, which is always mounted.
+    _moderationChanges.addListener(_onModerationChanged);
 
     // The spotlight carousel and featured tiles are long-pressable into a
     // transfer/burn — drop the item on the spot when it leaves the wallet.
@@ -243,14 +256,46 @@ class HomeBloc extends Bloc<HomeEvent, HomeState> {
 
   final HomeFeedRepository _repository;
   final PortfolioRepository _portfolioRepository;
+  final Listenable _moderationChanges;
 
   StreamSubscription<String>? _removalSignalSub;
   StreamSubscription<String>? _editedSignalSub;
+
+  /// Set when the block list or the reports changed while a revalidation was
+  /// in flight. That run may already have mapped some sections against the
+  /// old lists, so [_revalidate] loads once more when it finishes.
+  bool _moderationPending = false;
+
+  /// Set for the [HomeLoad] that [_remap] adds, so that load keeps the
+  /// sections on screen where a first load would show the skeleton.
+  bool _remapping = false;
+
+  /// Has the sections mapped again, against the block list and reports as
+  /// they are now. [HomeLoad] does exactly that: it paints the cached
+  /// responses through the repository's mappers, which filter, and then
+  /// revalidates. The card is gone with the cached paint, before any request
+  /// answers.
+  void _onModerationChanged() {
+    if (isClosed) return;
+    final current = state;
+    if (current is! HomeLoaded) return;
+    if (current.isRefreshing) {
+      _moderationPending = true;
+      return;
+    }
+    _remap();
+  }
+
+  void _remap() {
+    _remapping = true;
+    add(const HomeEvent.load());
+  }
 
   @override
   Future<void> close() {
     _removalSignalSub?.cancel();
     _editedSignalSub?.cancel();
+    _moderationChanges.removeListener(_onModerationChanged);
     return super.close();
   }
 
@@ -481,6 +526,12 @@ class HomeBloc extends Bloc<HomeEvent, HomeState> {
     if (current is HomeLoaded && current.isRefreshing) {
       emit(current.copyWith(isRefreshing: false));
     }
+
+    // 5. A block or a report landed while this ran: map everything again.
+    if (_moderationPending) {
+      _moderationPending = false;
+      if (!isClosed) _remap();
+    }
   }
 
   Future<void> _onLoad(HomeLoad event, Emitter<HomeState> emit) async {
@@ -494,9 +545,17 @@ class HomeBloc extends Bloc<HomeEvent, HomeState> {
     });
 
     CachedHomeSections? baseline;
+    final current = state;
+    final remapping = _remapping;
+    _remapping = false;
     if (baselineResult case ResultSuccess(:final value) when value != null) {
       baseline = value.$1;
       emit(_mapCachedToLoaded(baseline, value.$2, isRefreshing: true));
+    } else if (remapping && current is HomeLoaded) {
+      // Asked to map again with no cache to paint from: keep what is on
+      // screen instead of dropping back to the skeleton. With no baseline,
+      // the revalidation below maps and emits every section.
+      emit(current.copyWith(isRefreshing: true));
     } else {
       emit(const HomeState.loading());
     }

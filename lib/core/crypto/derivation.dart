@@ -891,7 +891,7 @@ class MultiChainDerivation {
   }
 
   // ---------------------------------------------------------------------------
-  // Social (Web3Auth) key material — hex in, chain address / stored key out
+  // Social wallet key material — hex in, chain address out
   // ---------------------------------------------------------------------------
 
   /// Hex-string validator for the social key inputs below.
@@ -917,31 +917,8 @@ class MultiChainDerivation {
     return hexToBytes(body);
   }
 
-  /// Solana address for a 64-byte Ed25519 keypair hex — the form
-  /// `Web3AuthFlutter.getEd25519PrivKey()` returns: 32-byte seed ‖ 32-byte
-  /// public key.
-  ///
-  /// The address is the trailing public half, base58-encoded. Seed-first byte
-  /// order is the one place a silent wrong-key bug can hide (a signature would
-  /// still be valid, just for a different address), so it is pinned by test
-  /// against [Ed25519HDKeyPair.fromPrivateKeyBytes] over the leading half.
-  static String solanaAddressFromEd25519KeyHex(String hex) {
-    final bytes = _decodeKeyHex(hex, 64, 'Ed25519 keypair');
-    return base58.base58encode(bytes.sublist(32));
-  }
-
-  /// Secure-storage form of a 64-byte Ed25519 keypair hex for a Solana wallet
-  /// row: base58 of all 64 bytes.
-  ///
-  /// This is byte-for-byte the encoding imported Solana keys use
-  /// (`PrivateKeyParser`), so `WalletManager._loadImportedSolanaSecretKey` —
-  /// `base58decode(stored).sublist(0, 32)` — recovers the seed and social rows
-  /// sign through the existing imported-key path.
-  static String solanaStoredKeyFromEd25519KeyHex(String hex) =>
-      base58.base58encode(_decodeKeyHex(hex, 64, 'Ed25519 keypair'));
-
   /// EIP-55 Ethereum address for a 32-byte secp256k1 private key hex — the form
-  /// `Web3AuthFlutter.getPrivKey()` returns.
+  /// a social wallet's Ethereum key is stored in.
   ///
   /// Same derivation as the imported-key path
   /// ([ethereumAddressFromPrivateKey]); only the hex decode is added.
@@ -952,10 +929,9 @@ class MultiChainDerivation {
 
   /// `tz1` address for a 32-byte Ed25519 seed given as hex.
   ///
-  /// Web3Auth's Tezos convention feeds the `getPrivKey()` bytes in as an
-  /// Ed25519 seed, so this is [tezosAddressFromSeed] with a hex decode in
-  /// front — the same keypair [signTezosOperationWithSeed] builds from the
-  /// stored key, which is what makes the stored seed sign for this address.
+  /// This is [tezosAddressFromSeed] with a hex decode in front — the same
+  /// keypair [signTezosOperationWithSeed] builds from the stored key, which is
+  /// what makes the stored seed sign for this address.
   static Future<String> tezosAddressFromSeedHex(String hex) =>
       tezosAddressFromSeed(_decodeKeyHex(hex, 32, 'Ed25519 seed'));
 

@@ -175,7 +175,7 @@ class AnalyticsService {
 
   /// Emit `Logged In`, at most once per [loginThrottle].
   ///
-  /// `/v0/login` runs on every cold start, wallet switch and session refresh,
+  /// `/v2/session` runs on every cold start, wallet switch and session refresh,
   /// so the raw call is a plumbing signal, not a user action — tracking it
   /// unthrottled produced runs of identical events. The last-sent stamp is
   /// persisted, so a force-quit-and-relaunch inside the window stays silent.

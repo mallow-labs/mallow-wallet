@@ -1,0 +1,32 @@
+<!-- Permissions the dApp Store build drops.
+
+     The dApp Store flavour sets minSdk 31 (see build.gradle.kts), so every
+     permission below is one no install of this build can ever use. Each is
+     capped at API 30 or lower, or exists only for devices that old. Store review
+     reads the manifest without the caps, and an unused location or storage
+     permission there reads as overreach, so they are removed outright rather
+     than left inert.
+
+     - ACCESS_FINE_LOCATION (max 30): BLE scanning on Android 11 and below. On 12+
+       Ledger scanning runs under BLUETOOTH_SCAN with neverForLocation.
+     - BLUETOOTH, BLUETOOTH_ADMIN (max 30, from universal_ble): the pre-12
+       Bluetooth pair, replaced by BLUETOOTH_SCAN and BLUETOOTH_CONNECT.
+     - WRITE_EXTERNAL_STORAGE (max 29): save-to-Photos on Android 10 and below.
+       It also implies READ_EXTERNAL_STORAGE in the store's permission listing.
+     - USE_FINGERPRINT (from androidx.biometric): the API 23-27 fingerprint
+       path, replaced by USE_BIOMETRIC.
+
+     The play flavour keeps them all, because it still installs on API 26. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+        tools:node="remove" />
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        tools:node="remove" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+        tools:node="remove" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        tools:node="remove" />
+    <uses-permission android:name="android.permission.USE_FINGERPRINT"
+        tools:node="remove" />
+</manifest>

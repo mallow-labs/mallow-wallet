@@ -84,6 +84,7 @@ class BrowserRepository {
         origin: uri.origin,
         title: title is String ? title : '',
         iconUrl: _storableIcon(_icon(item['iconUrl'])),
+        typed: item['typed'] == true,
       );
       sites.remove(site.origin);
       sites[site.origin] = site;
@@ -125,6 +126,7 @@ class BrowserRepository {
             if (site.title.isNotEmpty) 'title': site.title,
             if (_storableIcon(site.iconUrl) case final icon?)
               'iconUrl': icon.toString(),
+            if (site.typed) 'typed': true,
           },
       ],
     }),

@@ -15,10 +15,6 @@ import 'package:mallow_wallet/shared/utils/explorer_utils.dart';
 /// `Config.environment`, asserted individually rather than through `isDevnet`,
 /// because the failure mode being guarded is one of them being rewired to its
 /// own switch and quietly staying on devnet.
-///
-/// 🛑 `web3AuthNetwork` is the one that cannot be corrected after the fact: it
-/// is part of the social key derivation, so a build on the wrong network hands
-/// the user a different address for the same social account.
 void main() {
   tearDown(Config.debugOverrides.clear);
 
@@ -48,10 +44,6 @@ void main() {
       // but it is at least on the network everything else now assumes.
       expect(Config.rpcProxyBaseUrl, 'https://api.mainnet-beta.solana.com');
       expect(Config.rpcProxyBaseUrl, isNot(contains('devnet')));
-    });
-
-    test('Web3Auth resolves the mainnet key-derivation network', () {
-      expect(Config.web3AuthNetwork, 'sapphire_mainnet');
     });
 
     test('the rewards store reads the production prefix', () {
@@ -85,7 +77,6 @@ void main() {
       expect(Config.environment, Environment.development);
       expect(Config.isDevnet, isTrue);
       expect(Config.solanaRpcUrl, contains('network=devnet'));
-      expect(Config.web3AuthNetwork, 'sapphire_devnet');
       expect(Config.storeCdnBaseUrl, 'https://cdn.example.com/store/dev');
       expect(
         buildExplorerUrl('sigABC123', 'solscan'),
@@ -98,7 +89,6 @@ void main() {
 
       expect(Config.environment, Environment.staging);
       expect(Config.isDevnet, isTrue);
-      expect(Config.web3AuthNetwork, 'sapphire_devnet');
     });
   });
 }

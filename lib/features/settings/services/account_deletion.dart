@@ -2,7 +2,9 @@ import 'package:dio/dio.dart' show DioException;
 import 'package:flutter/foundation.dart';
 import 'package:mallow_api/mallow_api.dart' as api;
 
+import '../../../core/models/account.dart';
 import '../../../core/network/auth_service.dart';
+import '../../../core/services/wallet_repository.dart';
 import '../../../core/security/secure_storage.dart';
 import '../../../core/session/session_manager.dart';
 import '../../../di.dart';
@@ -15,7 +17,7 @@ enum AccountDeletionOutcome { deleted, failed }
 /// would remove — null when the signed-in address never set one.
 ///
 /// `signedIn` is the whole predicate; the username only names the doc in the
-/// copy. Every `/v0/login` upserts a `users` document for the address, so an
+/// copy. Every `/v2/session` upserts a `users` document for the address, so an
 /// authenticated address **always** has a server record — the linked addresses,
 /// the sign-in history and the push-notification registrations keyed off them —
 /// whether or not a username was ever chosen. The route looks that doc up by
@@ -60,6 +62,14 @@ enum AccountDeletionOutcome { deleted, failed }
 /// while it still exists server-side — the exact flow App Review exercises.
 /// The user has to sign in again and retry. Every other failure likewise
 /// leaves the profile intact and returns [AccountDeletionOutcome.failed].
+///
+/// A Google or Apple wallet's social vault — its encrypted backup — is NOT
+/// part of the profile and is never deleted here, whatever the wallet the
+/// session is signed in with. The vault is the only thing that brings such a
+/// wallet back on a new device; deleting it because a profile was deleted
+/// would trade a username for a wallet. It has its own action, Delete wallet
+/// backup on the Sign-in keys screen, and the Delete profile screen says so
+/// ([profileHasWalletBackup]).
 Future<AccountDeletionOutcome> deleteMallowAccount() async {
   try {
     await sl<api.MallowApiV2Client>().deleteUser();
@@ -77,6 +87,22 @@ Future<AccountDeletionOutcome> deleteMallowAccount() async {
   return AccountDeletionOutcome.deleted;
 }
 
+/// Whether the signed-in address is a Google or Apple wallet with a social
+/// vault: an encrypted backup mallow keeps after the profile is deleted. The
+/// Delete profile screen states that, and where the backup is deleted, so the
+/// deletion path it describes is complete.
+Future<bool> profileHasWalletBackup() async {
+  final address = sl<AuthService>().currentAddress;
+  if (address == null) return false;
+  final wallets = await sl<WalletRepository>().getAllWallets();
+  return wallets.any(
+    (w) =>
+        w.walletType == WalletType.social &&
+        w.socialVaultId != null &&
+        w.address.toLowerCase() == address.toLowerCase(),
+  );
+}
+
 /// Drop the Profile identity and clear the session, leaving the user on their
 /// active Account.
 Future<void> _dropToAccountSession() async {
@@ -87,7 +113,7 @@ Future<void> _dropToAccountSession() async {
     // re-persists the login mode, and fires `onWalletChanged`, which is what
     // makes the session-backed headers (settings row, drawer) repaint without
     // the deleted username. It re-points the active wallet, so the app-level
-    // wallet-change listener kicks off a `/v0/login` — harmless, because the
+    // wallet-change listener kicks off a `/v2/session` — harmless, because the
     // `logout()` below bumps `AuthService`'s session generation and that login
     // tears its own session back down when it lands.
     await session.switchToAccount(accountId);

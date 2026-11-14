@@ -7,6 +7,7 @@ import 'package:solana/solana.dart';
 
 import '../config/environment.dart';
 import '../observability/app_logger.dart';
+import 'ed25519_curve.dart';
 
 /// Outcome of the offline half of SNS resolution — everything that can be
 /// decided from the four fetched accounts alone.
@@ -66,7 +67,14 @@ class SnsAccountKeys {
   ];
 }
 
-/// Resolves `.sol` SNS (Solana Name Service) domains to Solana addresses.
+/// Resolves SNS (Solana Name Service) domains to Solana addresses.
+///
+/// SNS names are `.sns`. They were `.sol` until SNS handed that suffix to a
+/// separate registry; holders at the hand-over got the matching new `.sol`, but
+/// the two are independent from then on. `.sol` input is still read from the
+/// SNS registry — the same label as `.sns` — and [isLegacySolDomain] lets the
+/// UI say so, because the new registry's `alice.sol` can belong to someone
+/// other than the owner of `alice.sns`.
 ///
 /// Reads the registry straight off mainnet through the mallow RPC proxy —
 /// there is no third-party resolution API in the path. (The Bonfida
@@ -92,10 +100,10 @@ class SnsAccountKeys {
 class SnsResolver {
   const SnsResolver._();
 
-  /// SPL Name Service — owns every `.sol` registry account.
+  /// SPL Name Service — owns every `.sns` registry account.
   static const _nameProgramId = 'namesLPneVptA9Z5rqUDD9tMTWEJwofgaYwp8cawRkX';
 
-  /// The `.sol` TLD account, parent of every second-level domain.
+  /// The SNS TLD account, parent of every second-level domain.
   static const _rootDomainAccount =
       '58PwtjSDuFHuUkYjH9BYnnQKHfwo9reZhC2zMJv9JPkx';
 
@@ -123,7 +131,7 @@ class SnsResolver {
 
   static final List<int> _zero32 = List<int>.filled(32, 0);
 
-  /// `.sol` domains only exist on mainnet, so resolution is pinned there even
+  /// SNS domains only exist on mainnet, so resolution is pinned there even
   /// on devnet builds — the same reasoning as `SolanaRpcService.mainnet`.
   static final String _rpcUrl = Config.solanaMainnetRpcUrl;
 
@@ -135,13 +143,33 @@ class SnsResolver {
     customHeaders: Config.clientIdHeadersFor(Uri.parse(_rpcUrl)),
   );
 
-  /// Check if an input looks like a .sol domain.
-  static bool isSolDomain(String input) {
+  static const _snsSuffix = '.sns';
+  static const _legacySolSuffix = '.sol';
+
+  /// Check if an input looks like an SNS domain: `.sns`, or a legacy `.sol`.
+  static bool isSnsDomain(String input) =>
+      _hasSuffix(input, _snsSuffix) || isLegacySolDomain(input);
+
+  /// Check if an input is a `.sol` name, which resolves as its `.sns` twin.
+  static bool isLegacySolDomain(String input) =>
+      _hasSuffix(input, _legacySolSuffix);
+
+  /// The `.sns` name a legacy `.sol` [input] is read as: `alice.sol` →
+  /// `alice.sns`.
+  static String snsNameFor(String input) {
     final trimmed = input.trim().toLowerCase();
-    return trimmed.endsWith('.sol') && trimmed.length > 4;
+    return isLegacySolDomain(trimmed)
+        ? '${trimmed.substring(0, trimmed.length - _legacySolSuffix.length)}'
+              '$_snsSuffix'
+        : trimmed;
   }
 
-  /// Resolve a .sol domain to a Solana address.
+  static bool _hasSuffix(String input, String suffix) {
+    final trimmed = input.trim().toLowerCase();
+    return trimmed.endsWith(suffix) && trimmed.length > suffix.length;
+  }
+
+  /// Resolve a `.sns` (or legacy `.sol`) domain to a Solana address.
   ///
   /// Returns the address, or null if the domain does not exist or cannot be
   /// resolved safely.
@@ -182,8 +210,9 @@ class SnsResolver {
   @visibleForTesting
   static Future<SnsAccountKeys?> deriveAccountKeys(String domain) async {
     final trimmed = domain.trim().toLowerCase();
-    final name = trimmed.endsWith('.sol')
-        ? trimmed.substring(0, trimmed.length - 4)
+    final name =
+        trimmed.endsWith(_snsSuffix) || trimmed.endsWith(_legacySolSuffix)
+        ? trimmed.substring(0, trimmed.length - _snsSuffix.length)
         : trimmed;
 
     final labels = name.split('.');
@@ -262,8 +291,9 @@ class SnsResolver {
       }
     }
 
-    // 4. Registry owner — only if it can actually sign for the funds.
-    if (!_isOnCurve(owner)) return const SnsUnresolvable();
+    // 4. Registry owner — only if it can actually sign for the funds. Sending
+    // to a PDA is unrecoverable.
+    if (!isOnEd25519Curve(owner)) return const SnsUnresolvable();
     return SnsResolvedAddress(Ed25519HDPublicKey(owner).toBase58());
   }
 
@@ -349,53 +379,6 @@ class SnsResolver {
     for (var i = 0; i < a.length; i++) {
       if (a[i] != b[i]) return false;
     }
-    return true;
-  }
-
-  static final BigInt _fieldP = (BigInt.one << 255) - BigInt.from(19);
-  static final BigInt _curveD =
-      (BigInt.from(-121665) * BigInt.from(121666).modInverse(_fieldP)) %
-      _fieldP;
-
-  /// Whether [bytes] decodes to a point on the ed25519 curve — i.e. whether it
-  /// is a public key someone can hold the private key for, as opposed to a
-  /// program-derived address. Sending to a PDA is unrecoverable, so this gates
-  /// step 4 of [resolveFromAccounts].
-  static bool _isOnCurve(List<int> bytes) {
-    if (bytes.length != 32) return false;
-
-    var y = BigInt.zero;
-    for (var i = bytes.length - 1; i >= 0; i--) {
-      y = (y << 8) | BigInt.from(bytes[i]);
-    }
-    final sign = (y >> 255) & BigInt.one;
-    y &= (BigInt.one << 255) - BigInt.one;
-    if (y >= _fieldP) return false;
-
-    // Recover x from the curve equation: x² = (y² - 1) / (d·y² + 1).
-    final y2 = (y * y) % _fieldP;
-    final u = (y2 - BigInt.one) % _fieldP;
-    final v = (_curveD * y2 + BigInt.one) % _fieldP;
-    final uv3 = (u * v.modPow(BigInt.from(3), _fieldP)) % _fieldP;
-    final uv7 = (u * v.modPow(BigInt.from(7), _fieldP)) % _fieldP;
-    var x =
-        (uv3 *
-            uv7.modPow((_fieldP - BigInt.from(5)) ~/ BigInt.from(8), _fieldP)) %
-        _fieldP;
-
-    final vxx = (v * x % _fieldP * x) % _fieldP;
-    if ((vxx - u) % _fieldP != BigInt.zero) {
-      if ((vxx + u) % _fieldP != BigInt.zero) return false;
-      // x is off by a factor of sqrt(-1).
-      x =
-          (x *
-              BigInt.two.modPow(
-                (_fieldP - BigInt.one) ~/ BigInt.from(4),
-                _fieldP,
-              )) %
-          _fieldP;
-    }
-    if (x == BigInt.zero && sign == BigInt.one) return false;
     return true;
   }
 }

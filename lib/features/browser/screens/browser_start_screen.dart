@@ -20,9 +20,11 @@ import '../../cast/widgets/now_casting_bar.dart';
 import '../models/browser_models.dart';
 import '../services/browser_services.dart';
 import '../services/browser_session.dart';
+import '../services/browser_suggestions.dart';
 import '../services/dapp_permission_service.dart';
 import '../widgets/bookmark_sheets.dart';
 import '../widgets/browser_address_bar.dart';
+import '../widgets/browser_suggestion_list.dart';
 import '../widgets/browser_tab_switcher.dart';
 import '../widgets/browser_undo_toast.dart';
 import '../widgets/start_bookmark_grid.dart';
@@ -80,6 +82,7 @@ class _BrowserStartScreenState extends State<BrowserStartScreen> {
   void initState() {
     super.initState();
     _session.load();
+    unawaited(browserSites.start());
     _walletRepository?.walletsRevision.addListener(_refreshWalletChains);
     _refreshWalletChains();
     if (widget.inBrowser) return;
@@ -161,9 +164,13 @@ class _BrowserStartScreenState extends State<BrowserStartScreen> {
     if (name != _connectedWallet) setState(() => _connectedWallet = name);
   }
 
-  void _open(String value) {
+  /// Opens [value]. [typed] when the user typed it or picked it from the
+  /// suggestions: an address, as opposed to a search, is then remembered for
+  /// them once it loads.
+  void _open(String value, {bool typed = false}) {
     try {
       final uri = browserInputUri(value, engine: browserSearchEngine.value);
+      if (typed && browserAddressUri(value) != null) _session.noteTyped(uri);
       if (widget.onOpen != null) {
         widget.onOpen!(uri);
         return;
@@ -345,7 +352,28 @@ class _BrowserStartScreenState extends State<BrowserStartScreen> {
     onChanged: (_) {
       if (_inputError != null) setState(() => _inputError = null);
     },
-    onSubmitted: _open,
+    onSubmitted: (value) => _open(value, typed: true),
+  );
+
+  /// Suggestions for the field's text, while the field has focus.
+  Widget _suggestions() => ListenableBuilder(
+    listenable: Listenable.merge([_address, _focus, browserSites]),
+    builder: (context, _) {
+      final suggestions = _focus.hasFocus
+          ? _session.suggestions(_address.text)
+          : const <BrowserSuggestion>[];
+      if (suggestions.isEmpty) return const SizedBox.shrink();
+      return Padding(
+        padding: const EdgeInsets.only(top: MallowTheme.spacingSm),
+        child: BrowserSuggestionList(
+          suggestions: suggestions,
+          onOpen: (suggestion) {
+            _focus.unfocus();
+            _open(suggestion.url.toString(), typed: true);
+          },
+        ),
+      );
+    },
   );
 
   @override
@@ -416,6 +444,7 @@ class _BrowserStartScreenState extends State<BrowserStartScreen> {
               const SizedBox(height: 18),
               _searchField(colors),
             ],
+            _suggestions(),
             if (_session.error case final error?) ...[
               const SizedBox(height: MallowTheme.spacingMd),
               _Notice(message: error),

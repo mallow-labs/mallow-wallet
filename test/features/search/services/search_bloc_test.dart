@@ -23,6 +23,18 @@ PortfolioArtwork _artwork(int i) => PortfolioArtwork(
   artistName: 'artist',
 );
 
+/// One drilldown fetch as the repository answers it. As on the wire, a page
+/// of 40 has a successor unless [hasMore] says otherwise.
+ArtworkResultsPage _page(
+  List<PortfolioArtwork> artworks, {
+  int page = 0,
+  bool? hasMore,
+}) => ArtworkResultsPage(
+  artworks: artworks,
+  page: page,
+  hasMore: hasMore ?? artworks.length >= 40,
+);
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -276,9 +288,9 @@ void main() {
   group('SearchBloc artwork drilldown', () {
     /// Fetches held open so a test can choose the order two racing drilldown
     /// fetches resolve in.
-    late Completer<Result<List<PortfolioArtwork>, AppFailure>> pendingFilterX;
-    late Completer<Result<List<PortfolioArtwork>, AppFailure>> pendingFilterY;
-    late Completer<Result<List<PortfolioArtwork>, AppFailure>> pendingPage;
+    late Completer<Result<ArtworkResultsPage, AppFailure>> pendingFilterX;
+    late Completer<Result<ArtworkResultsPage, AppFailure>> pendingFilterY;
+    late Completer<Result<ArtworkResultsPage, AppFailure>> pendingPage;
 
     /// Opens a drilldown and waits for its first page to land before the test
     /// acts again. The open reads the shared view-mode pref asynchronously, so
@@ -299,7 +311,7 @@ void main() {
           filter: any(named: 'filter'),
           sort: any(named: 'sort'),
         ),
-      ).thenAnswer((_) async => ResultSuccess(artworks));
+      ).thenAnswer((_) async => ResultSuccess(_page(artworks)));
     }
 
     // The two drilldown families are served by different endpoints with
@@ -416,7 +428,9 @@ void main() {
             filter: any(named: 'filter'),
             sort: any(named: 'sort'),
           ),
-        ).thenAnswer((_) async => ResultSuccess(List.generate(40, _artwork)));
+        ).thenAnswer(
+          (_) async => ResultSuccess(_page(List.generate(40, _artwork))),
+        );
         when(
           () => repo.fetchArtworkResults(
             SearchFilterType.auction,
@@ -547,7 +561,7 @@ void main() {
           if (filter == filterX) return pendingFilterX.future;
           if (filter == filterY) return pendingFilterY.future;
           // The drilldown's own opening page — unfiltered, resolves at once.
-          return Future.value(ResultSuccess([_artwork(0)]));
+          return Future.value(ResultSuccess(_page([_artwork(0)])));
         });
       },
       build: buildBloc,
@@ -558,10 +572,10 @@ void main() {
         bloc.add(const SearchEvent.setDrilldownFilter(filterY));
         await pumpEventQueue();
         // Y is what the user is looking at, and its fetch answers first...
-        pendingFilterY.complete(ResultSuccess([_artwork(2)]));
+        pendingFilterY.complete(ResultSuccess(_page([_artwork(2)])));
         await pumpEventQueue();
         // ...then the superseded X answers. It must be dropped.
-        pendingFilterX.complete(ResultSuccess([_artwork(1)]));
+        pendingFilterX.complete(ResultSuccess(_page([_artwork(1)])));
         await pumpEventQueue();
       },
       skip: 2, // filterLoading + the drilldown's opening page
@@ -618,10 +632,12 @@ void main() {
               invocation.namedArguments[#filter] as api.ExploreFilter?;
           if (page == 1) return pendingPage.future;
           if (filter == filterX) {
-            return Future.value(ResultSuccess([_artwork(9)]));
+            return Future.value(ResultSuccess(_page([_artwork(9)])));
           }
           // A full opening page, so the list reports more to load.
-          return Future.value(ResultSuccess(List.generate(40, _artwork)));
+          return Future.value(
+            ResultSuccess(_page(List.generate(40, _artwork))),
+          );
         });
       },
       build: buildBloc,
@@ -631,7 +647,7 @@ void main() {
         await pumpEventQueue();
         bloc.add(const SearchEvent.setDrilldownFilter(filterX));
         await pumpEventQueue();
-        pendingPage.complete(ResultSuccess([_artwork(40)]));
+        pendingPage.complete(ResultSuccess(_page([_artwork(40)], page: 1)));
         await pumpEventQueue();
       },
       skip: 2, // filterLoading + the drilldown's opening page
@@ -679,7 +695,7 @@ void main() {
             final filter =
                 invocation.namedArguments[#filter] as api.ExploreFilter?;
             if (filter == filterX) return pendingFilterX.future;
-            return Future.value(ResultSuccess([_artwork(0)]));
+            return Future.value(ResultSuccess(_page([_artwork(0)])));
           });
         },
         build: buildBloc,
@@ -689,7 +705,7 @@ void main() {
           await pumpEventQueue();
           bloc.add(exitEvent);
           await pumpEventQueue();
-          pendingFilterX.complete(ResultSuccess([_artwork(1)]));
+          pendingFilterX.complete(ResultSuccess(_page([_artwork(1)])));
           await pumpEventQueue();
         },
         skip: 2, // filterLoading + the drilldown's opening page

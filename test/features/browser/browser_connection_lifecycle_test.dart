@@ -237,6 +237,44 @@ void main() {
     });
   }
 
+  testWidgets('a frame may load its own empty or inline document', (
+    tester,
+  ) async {
+    when(() => session.activeAccount).thenReturn(multiChainAccount);
+    when(() => session.sessionWallets).thenReturn(multiChainAccount.wallets);
+    when(
+      () => repository.getAccountViews(),
+    ).thenAnswer((_) async => [multiChainAccount]);
+    await mount(tester);
+    Future<NavigationActionPolicy?> navigate(
+      String url, {
+      required bool mainFrame,
+    }) async => _lastParams!.shouldOverrideUrlLoading!(
+      controller,
+      NavigationAction(
+        request: URLRequest(url: WebUri(url)),
+        isForMainFrame: mainFrame,
+      ),
+    );
+    for (final url in ['about:blank', 'about:srcdoc']) {
+      expect(
+        await navigate(url, mainFrame: false),
+        NavigationActionPolicy.ALLOW,
+      );
+      expect(
+        await navigate(url, mainFrame: true),
+        NavigationActionPolicy.CANCEL,
+      );
+    }
+    for (final url in ['data:text/html,hi', 'http://example.net']) {
+      expect(
+        await navigate(url, mainFrame: false),
+        NavigationActionPolicy.CANCEL,
+      );
+    }
+    await tester.pumpAndSettle();
+  });
+
   testWidgets('missing chain switches accounts and retains the open tabs', (
     tester,
   ) async {

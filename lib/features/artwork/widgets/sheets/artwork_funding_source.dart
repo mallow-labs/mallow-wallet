@@ -26,7 +26,7 @@ import '../../../../shared/utils/chain.dart';
 ///
 /// This is the one funding flow on the `AuthService.currentAddress` side of
 /// the fault line: its dispatches reach `MarketplaceActionFlow.prepare`, which
-/// reads the address of the last `/v0/login` rather than the DB selection. That
+/// reads the address of the last `/v2/session` rather than the DB selection. That
 /// is only safe because `SessionManager.selectSourceWallet` awaits the login —
 /// mid-switch the address is null. Hence [builder] is handed
 /// a `switching` flag so the CTA disables itself for the duration; tapping Buy
@@ -93,7 +93,7 @@ class _ArtworkFundingSourceState extends State<ArtworkFundingSource> {
   }
 
   /// "Switch" tapped — hand off to the shared picker, which commits the signer
-  /// switch (and awaits its `/v0/login`) itself, surfaces its own error and
+  /// switch (and awaits its `/v2/session`) itself, surfaces its own error and
   /// stays open on failure, and returns null when cancelled or failed.
   Future<void> _onSwitch() async {
     if (_switching) return;

@@ -475,7 +475,7 @@ Eight rules, in order of how expensive it is to get them wrong:
    - Never leave an app path that throws asynchronously running under a wait.
      The known ones in this sandbox are `[core/no-app]` from anything touching
      `FirebaseMessaging.instance` (turn the push preference off before opening
-     Settings) and a failing `/v0/login` racing an unlock (let the login
+     Settings) and a failing `/v2/session` racing an unlock (let the login
      finish first).
    - If a case genuinely has to tolerate a known leak, drain it inside the
      pump loop with `tester.takeException()` and RETHROW anything you did not

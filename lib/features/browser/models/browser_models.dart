@@ -20,6 +20,14 @@ Uri browserInputUri(
 }) {
   final value = input.trim();
   if (value.isEmpty) throw const FormatException('Enter a website or search');
+  return browserAddressUri(value) ?? engine.search(value);
+}
+
+/// The website [input] names, or null when it is a search (or empty). Throws
+/// like [browserInputUri] on an explicit scheme the browser will not open.
+Uri? browserAddressUri(String input) {
+  final value = input.trim();
+  if (value.isEmpty) return null;
   final explicit = Uri.tryParse(value);
   if (explicit?.hasScheme == true) {
     if (!isBrowserUrl(explicit!)) {
@@ -33,7 +41,7 @@ Uri browserInputUri(
     final uri = Uri.tryParse('https://$value');
     if (uri != null && isBrowserUrl(uri)) return uri;
   }
-  return engine.search(value);
+  return null;
 }
 
 bool isBrowserUrl(Uri uri) =>
@@ -79,12 +87,21 @@ class BrowserTab {
 /// after the page reports them. Keyed by origin, and decoration only, like
 /// the tab's own title and icon.
 class BrowserSiteInfo {
-  BrowserSiteInfo({required this.origin, String title = '', Uri? iconUrl})
-    : title = browserSiteTitle(title),
-      iconUrl = browserIconUri(iconUrl);
+  BrowserSiteInfo({
+    required this.origin,
+    String title = '',
+    Uri? iconUrl,
+    this.typed = false,
+  }) : title = browserSiteTitle(title),
+       iconUrl = browserIconUri(iconUrl);
   final String origin;
   final String title;
   final Uri? iconUrl;
+
+  /// The user reached this site by typing its address (or picking it from
+  /// the address bar's suggestions) and it loaded, so the address bar offers
+  /// it again. A site only ever followed to by a link is not offered.
+  final bool typed;
 }
 
 /// The longest page title kept for a site.

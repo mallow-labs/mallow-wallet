@@ -37,6 +37,8 @@ The Dart packages under `packages/` are written to stand alone and may be useful
 | `jupiter_aggregator` | Typed client for Jupiter's Ultra, classic swap, and price APIs |
 | `mallow_api` | Generated client for the backend, from the vendored `openapi/openapi.yaml` |
 
+`packages/passkeys_android` is the exception: a vendored copy of a third-party Flutter plugin with two small changes, one of them a security fix, not a package of ours. Its `README.md` says what changed and why.
+
 `flutter test` does not descend into `packages/` — each has its own suite, run separately. See [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Naming Conventions

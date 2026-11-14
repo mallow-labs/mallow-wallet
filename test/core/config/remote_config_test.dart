@@ -4,14 +4,21 @@ import 'package:mallow_wallet/core/config/remote_config.dart';
 
 import 'package:mallow_wallet/shared/utils/chain.dart';
 
-api.MobileConfigResponse _wire(List<Map<String, String>> disabled) {
-  return api.MobileConfigResponse.fromJson({
+/// The `result` object of `GET /v2/config/mobile`, as JSON.
+Map<String, dynamic> _wire(List<Map<String, String>> disabled) {
+  return {
     'minimumVersion': '0.11.0',
     'updateRequired': false,
     'updateMessage': null,
     'disabledFlows': disabled,
-  });
+  };
 }
+
+Map<String, String> _cell(String chain, String flow, String message) => {
+  'chain': chain,
+  'flow': flow,
+  'message': message,
+};
 
 void main() {
   group('AppFlow', () {
@@ -20,10 +27,9 @@ void main() {
       // into Mongo and the client looks them up. A cell present on one side
       // only is a kill switch that silently does nothing, so pin both
       // directions rather than trusting the two lists to be hand-synced.
-      final contract = api.MobileFlow.values
-          .map((v) => v.value)
-          .whereType<String>()
-          .toSet();
+      final contract = {
+        ...api.MobileFlow.values.map((v) => v.value).whereType<String>(),
+      };
 
       final clientWires = AppFlow.values.map((f) => f.wire).toSet();
       expect(clientWires, contract);
@@ -82,17 +88,15 @@ void main() {
 
   group('RemoteConfig.fromWire', () {
     test('browser availability is independent from signing flow switches', () {
-      final config = RemoteConfig.fromWire(
-        api.MobileConfigResponse.fromJson({
-          'minimumVersion': null,
-          'updateRequired': false,
-          'updateMessage': null,
-          'disabledFlows': [
-            {'chain': 'solana', 'flow': 'browser-message', 'message': 'Paused'},
-          ],
-          'browserEnabled': false,
-        }),
-      );
+      final config = RemoteConfig.fromWire({
+        'minimumVersion': null,
+        'updateRequired': false,
+        'updateMessage': null,
+        'disabledFlows': [
+          {'chain': 'solana', 'flow': 'browser-message', 'message': 'Paused'},
+        ],
+        'browserEnabled': false,
+      });
       expect(config.browserEnabled, isFalse);
       expect(
         config.disabledMessage(Chain.solana, AppFlow.browserMessage),
@@ -145,6 +149,52 @@ void main() {
         isTrue,
       );
     });
+
+    // The generated flow enum is a copy of the contract as it was vendored. It
+    // reads any string it does not list as one valueless "unknown" member, so
+    // a cell matched through it is dropped whenever this build's cells and
+    // that list disagree — and the operator's kill then stops nothing. The
+    // cells are matched on the strings the server sent instead.
+    test('a cell is matched on its raw wire strings', () {
+      final cells = [_cell('ethereum', 'native-send', 'ETH paused')];
+      final config = RemoteConfig.fromWire(_wire(cells));
+
+      expect(
+        config.disabledMessage(Chain.ethereum, AppFlow.nativeSend),
+        'ETH paused',
+      );
+    });
+
+    test('every cell this build gates survives the parse', () {
+      // Whatever the generated enum lists today: one payload naming every
+      // (chain, flow) this build implements must come back with all of them.
+      final cells = [
+        for (final flow in AppFlow.values)
+          for (final chain in flow.chains)
+            _cell(chain.toDbString(), flow.wire, 'off'),
+      ];
+
+      final config = RemoteConfig.fromWire(_wire(cells));
+
+      expect(config.disabledMessages, hasLength(cells.length));
+      for (final flow in AppFlow.values) {
+        for (final chain in flow.chains) {
+          expect(config.isFlowAvailable(chain, flow), isFalse);
+        }
+      }
+    });
+
+    test(
+      'a malformed payload throws instead of reading as "nothing killed"',
+      () {
+        // The service keeps its last-known-good config on a throw. Returning a
+        // permissive config here would un-kill every flow on one bad response.
+        expect(
+          () => RemoteConfig.fromWire({'disabledFlows': <Object?>[]}),
+          throwsA(anything),
+        );
+      },
+    );
 
     test('drops entries naming a chain or flow this build does not know', () {
       // A newer server may kill a cell this build has never heard of. It must

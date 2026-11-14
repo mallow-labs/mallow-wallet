@@ -20,6 +20,7 @@ import 'package:mallow_wallet/features/browser/services/browser_session.dart';
 import 'package:mallow_wallet/features/browser/services/browser_signing_service.dart';
 import 'package:mallow_wallet/features/browser/services/solana_dapp_adapter.dart';
 import 'package:mallow_wallet/shared/theme/mallow_theme.dart';
+import 'package:mallow_wallet/shared/widgets/hold_to_approve_button.dart';
 import 'package:mallow_wallet/shared/widgets/simulation_review_sheet.dart';
 import 'package:mallow_wallet/shared/widgets/transaction_pipeline_sheet.dart';
 
@@ -244,10 +245,22 @@ void main() {
     );
   });
 
-  testWidgets('a batch over the simulation limit is not simulated but can be '
-      'signed', (tester) async {
+  testWidgets('a batch over the simulation limit is not simulated; it can be '
+      'signed, with a hold and never from the placeholder', (tester) async {
     const count = kMaxSimulatedSolanaBatch + 1;
     final result = await start(tester, count);
+    // Nothing to wait for, so nothing to approve ahead of.
+    expect(find.byKey(const Key('approve-signing-early')), findsNothing);
+    verifyNever(
+      () => adapter.describeTransaction(
+        transaction: any(named: 'transaction'),
+        walletId: any(named: 'walletId'),
+        address: any(named: 'address'),
+        origin: any(named: 'origin'),
+        chain: any(named: 'chain'),
+      ),
+    );
+    expect(find.text('Review carefully'), findsOneWidget);
     expect(find.text('Review $count transactions'), findsOneWidget);
     expect(find.text('Simulation unavailable'), findsOneWidget);
     expect(
@@ -264,7 +277,23 @@ void main() {
       ),
     );
 
-    await tester.tap(find.byKey(const Key('approve-signing')));
+    final approve = find.byKey(const Key('approve-signing'));
+    expect(find.byType(HoldToApproveButton), findsOneWidget);
+    await tester.ensureVisible(approve);
+    await tester.tap(approve);
+    await tester.pump(const Duration(seconds: 2));
+    verifyNever(
+      () => adapter.signPrepared(
+        any(),
+        ensureActive: any(named: 'ensureActive'),
+        cancelled: any(named: 'cancelled'),
+        approvedAt: any(named: 'approvedAt'),
+      ),
+    );
+    final hold = await tester.startGesture(tester.getCenter(approve));
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 1300));
+    await hold.up();
     await _settle(tester);
     final value = await result as Map<String, Object?>;
     expect(value['transactions'], hasLength(count));

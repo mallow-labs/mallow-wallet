@@ -25,6 +25,7 @@ DigitalAsset _asset({
   List<OnChainCreator> royaltiesPluginCreators = const [],
   int? sellerFeeBasisPoints,
   List<OnChainCreator> tokenMetadataCreators = const [],
+  List<String> verifiedCreators = const [],
 }) => DigitalAsset(
   id: 'mint',
   tokenStandard: standard,
@@ -42,6 +43,7 @@ DigitalAsset _asset({
   royaltiesPluginCreators: royaltiesPluginCreators,
   sellerFeeBasisPoints: sellerFeeBasisPoints,
   tokenMetadataCreators: tokenMetadataCreators,
+  verifiedCreators: verifiedCreators,
 );
 
 void main() {
@@ -181,7 +183,22 @@ void main() {
   });
 
   group('isSecondaryMarketOf - Core', () {
-    test('no collection: owner == updateAuthority → primary', () {
+    test('no collection: signed owner == updateAuthority → primary', () {
+      expect(
+        isSecondaryMarketOf(
+          _asset(
+            standard: TokenStandard.core,
+            owner: _updateAuth,
+            updateAuthority: _updateAuth,
+            verifiedCreators: const [_updateAuth],
+          ),
+        ),
+        isFalse,
+      );
+    });
+
+    // The program charges this the secondary fee.
+    test('an authority that owns it but never signed → secondary', () {
       expect(
         isSecondaryMarketOf(
           _asset(
@@ -190,8 +207,37 @@ void main() {
             updateAuthority: _updateAuth,
           ),
         ),
-        isFalse,
+        isTrue,
       );
+    });
+
+    test('reads the signature from the DAS plugin, verified only', () {
+      DigitalAsset parsed(bool verified) => DigitalAsset.fromJson({
+        'id': 'mint',
+        'interface': 'MplCoreAsset',
+        'mutable': true,
+        'ownership': {'owner': _updateAuth, 'frozen': false},
+        'authorities': [
+          {
+            'address': _updateAuth,
+            'scopes': ['full'],
+          },
+        ],
+        'plugins': {
+          'verified_creators': {
+            'data': {
+              'signatures': [
+                {'address': _updateAuth, 'verified': verified},
+              ],
+            },
+          },
+        },
+      });
+
+      expect(parsed(true).verifiedCreators, [_updateAuth]);
+      expect(parsed(false).verifiedCreators, isEmpty);
+      expect(isSecondaryMarketOf(parsed(true)), isFalse);
+      expect(isSecondaryMarketOf(parsed(false)), isTrue);
     });
 
     test('no collection: owner != updateAuthority → secondary', () {
@@ -215,8 +261,24 @@ void main() {
       // Owner is the collection UA → still the creator's hands → primary.
       expect(
         isSecondaryMarketOf(
-          _asset(standard: TokenStandard.core, owner: _updateAuth),
+          _asset(
+            standard: TokenStandard.core,
+            owner: _updateAuth,
+            verifiedCreators: const [_updateAuth],
+          ),
           collection: collection,
+        ),
+        isFalse,
+      );
+      // The signature can sit on the collection instead.
+      expect(
+        isSecondaryMarketOf(
+          _asset(standard: TokenStandard.core, owner: _updateAuth),
+          collection: _asset(
+            standard: TokenStandard.coreCollection,
+            updateAuthority: _updateAuth,
+            verifiedCreators: const [_updateAuth],
+          ),
         ),
         isFalse,
       );
@@ -228,6 +290,92 @@ void main() {
           collection: collection,
         ),
         isTrue,
+      );
+    });
+  });
+
+  // The program reads a grouped asset's update authority from its collection
+  // and counts a creator signature on the collection too. Without the
+  // collection the asset alone cannot answer, and a guess shows the wrong fee.
+  group('isSecondaryMarketOf - Core asset in a collection', () {
+    const collectionKey = 'collection1111111111111111111111111111111';
+
+    DigitalAsset collection({List<String> verifiedCreators = const []}) =>
+        DigitalAsset(
+          id: collectionKey,
+          tokenStandard: TokenStandard.coreCollection,
+          isMutable: true,
+          frozen: false,
+          supply: 0,
+          freezeDelegateFrozen: false,
+          permanentFreezeDelegateFrozen: false,
+          hasMasterEditionPlugin: false,
+          updateAuthority: _updateAuth,
+          verifiedCreators: verifiedCreators,
+        );
+
+    // Held by its creator, whose only signature is on the collection.
+    final asset = _asset(
+      standard: TokenStandard.core,
+      owner: _updateAuth,
+      updateAuthority: _updateAuth,
+      collectionKey: collectionKey,
+    );
+
+    test('collection read, its authority signed and owns it → primary', () {
+      expect(
+        isSecondaryMarketOf(
+          asset,
+          collection: collection(verifiedCreators: const [_updateAuth]),
+        ),
+        isFalse,
+      );
+    });
+
+    test('collection read, a collector owns it → secondary', () {
+      expect(
+        isSecondaryMarketOf(
+          _asset(
+            standard: TokenStandard.core,
+            owner: _owner,
+            collectionKey: collectionKey,
+          ),
+          collection: collection(verifiedCreators: const [_updateAuth]),
+        ),
+        isTrue,
+      );
+    });
+
+    test('collection read, nobody signed → secondary', () {
+      expect(isSecondaryMarketOf(asset, collection: collection()), isTrue);
+    });
+
+    test('collection not read → unknown, whatever the asset says', () {
+      expect(isSecondaryMarketOf(asset), isNull);
+      // Even an asset that carries its own signature: the authority that has
+      // to match it is the collection's, which was not read.
+      expect(
+        isSecondaryMarketOf(
+          _asset(
+            standard: TokenStandard.core,
+            owner: _updateAuth,
+            updateAuthority: _updateAuth,
+            collectionKey: collectionKey,
+            verifiedCreators: const [_updateAuth],
+          ),
+        ),
+        isNull,
+      );
+      expect(
+        isSecondaryMarketOf(
+          _asset(
+            standard: TokenStandard.core,
+            owner: _owner,
+            updateAuthority: _updateAuth,
+            collectionKey: collectionKey,
+          ),
+        ),
+        isNull,
       );
     });
   });

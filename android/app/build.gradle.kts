@@ -50,11 +50,13 @@ val keystoreProperties = Properties().apply {
 
 // The dApp Store artifact is signed with its OWN key, never the Play upload
 // key. Solana Mobile's publishing docs require it: "You cannot use the same
-// signing key for both Google Play and the dApp Store." Play App Signing means
-// our upload key is already not the certificate Play distributes, so reusing it
-// would arguably satisfy the intent — but the rule is written against the key
-// you hold, and a rejected review costs a multi-day round trip. Two keys, no
-// argument.
+// signing key for both Google Play and the dApp Store."
+//
+// That key is not ours to choose. The listing was created by the earlier TWA
+// build, and the store rejects any update whose certificate differs from the
+// one already on the record — so this must be the legacy TWA keystore. Check
+// its SHA-256 against the listing's before publishing: a freshly generated key
+// builds fine, uploads fine, and is rejected at review.
 //
 // Losing this keystore means the dApp Store listing can never be updated again:
 // the store matches the App NFT to the package name AND the signing cert.
@@ -81,8 +83,10 @@ android {
 
     defaultConfig {
         applicationId = "com.mallow.wallet.android"
-        // web3auth_flutter (social sign-in) requires API 26 (Android 8.0);
-        // Flutter's default floor is 24.
+        // API 26 (Android 8.0); Flutter's default floor is 24. It was raised
+        // for a sign-in SDK the app no longer contains. Lowering it again
+        // would re-admit Android 7 devices that nothing has been tested on
+        // since, so that is a product decision, not a cleanup.
         minSdk = 26
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
@@ -159,8 +163,13 @@ android {
         create("dappstore") {
             dimension = "store"
             applicationId = "art.mallow.twa"
-            // Its OWN key, never the Play upload key — see the keystore comment
-            // at the top of this file.
+            // Android 12+. Every Solana Mobile device runs it, and it lets
+            // src/dappstore/AndroidManifest.xml drop the legacy Bluetooth,
+            // location and storage permissions that store review flags as
+            // unnecessary.
+            minSdk = 31
+            // The legacy TWA key the listing is pinned to, never the Play upload
+            // key — see the keystore comment at the top of this file.
             signingConfig = if (dappstoreKeystorePropertiesFile.exists())
                 signingConfigs.getByName("dappstore")
             else
@@ -206,5 +215,9 @@ dependencies {
     // between them. The AAR contributes its own <queries> block and the
     // ACCESS_SEED_VAULT uses-permission through manifest merging.
     implementation("com.solanamobile:seedvault-wallet-sdk:0.4.0")
+    // Block Store: the Android platform slot of the social vault
+    // (SocialVaultSlotChannel). End-to-end encrypted cloud backup of a small
+    // per-app blob, restored on the user's next device.
+    implementation("com.google.android.gms:play-services-auth-blockstore:16.4.0")
     testImplementation("junit:junit:4.13.2")
 }

@@ -6,6 +6,8 @@ import 'package:crypto/crypto.dart';
 import '../../../core/models/account.dart' show WalletType;
 
 import '../models/dapp_request.dart';
+import '../models/solana_offchain_message.dart';
+import '../models/solana_sign_in.dart';
 import 'dapp_permission_service.dart';
 import 'ethereum_dapp_adapter.dart';
 import 'tezos_dapp_adapter.dart';
@@ -38,7 +40,10 @@ class DappRequestCoordinator {
     this.cachedTezosPublicKey,
     this.beaconTransport,
     this.requestTimeout = const Duration(minutes: 3),
-  }) : isRequestCurrent = isRequestCurrent ?? isContextCurrent;
+    this.onActivity,
+    DateTime Function()? now,
+  }) : isRequestCurrent = isRequestCurrent ?? isContextCurrent,
+       now = now ?? DateTime.now;
   final DappPermissionService permissions;
   final DappWallet? Function() currentWallet;
 
@@ -69,6 +74,13 @@ class DappRequestCoordinator {
   /// signature the user has just approved.
   final bool Function(DappFrameContext) isRequestCurrent;
   final Duration requestTimeout;
+
+  /// Called with a request's namespace (`solana`, `eip155`, `tezos`) when a
+  /// site makes a request the wallet serves, before it is handled.
+  final void Function(String namespace)? onActivity;
+
+  /// The clock a sign-in's validity times are checked against.
+  final DateTime Function() now;
   Future<void> _tail = Future.value();
   final Map<String, Completer<void>> _pending = {};
   final Set<String> _seen = {};
@@ -139,6 +151,8 @@ class DappRequestCoordinator {
     'signAllTransactions',
     'signAndSendTransaction',
     'signMessage',
+    'signOffchainMessage',
+    'signIn',
   };
 
   static const _ethereumMethods = {
@@ -223,6 +237,13 @@ class DappRequestCoordinator {
               .contains(method)) {
         throw const DappException(-32601, 'Unsupported method');
       }
+      onActivity?.call(
+        tezos
+            ? 'tezos'
+            : ethereum
+            ? 'eip155'
+            : 'solana',
+      );
       if (jsonEncode(message).length > 400000) {
         throw const DappException(-32602, 'Request is too large');
       }
@@ -360,6 +381,44 @@ class DappRequestCoordinator {
     }
   }
 
+  /// The version 1 off-chain message a `signOffchainMessage` request asks
+  /// for: the site's text and its required signers (base64, 32 bytes each),
+  /// which must include the connected [address].
+  Uint8List _offchainMessage(Map<String, dynamic> params, String address) {
+    final content = params['message'];
+    final signers = params['requiredSigners'];
+    if (content is! String ||
+        content.length > kMaxSolanaOffchainContent ||
+        signers is! List ||
+        signers.isEmpty ||
+        signers.length > 255) {
+      throw const DappException(-32602, 'Invalid off-chain message');
+    }
+    final keys = <Uint8List>[];
+    for (final signer in signers) {
+      if (signer is! String || signer.length > 44) {
+        throw const DappException(-32602, 'Invalid required signer');
+      }
+      keys.add(base64Decode(signer));
+    }
+    final SolanaOffchainMessage message;
+    try {
+      message = SolanaOffchainMessage.build(
+        content: content,
+        requiredSigners: keys,
+      );
+    } on FormatException catch (error) {
+      throw DappException(-32602, error.message);
+    }
+    if (!message.signers.contains(address)) {
+      throw const DappException(
+        -32602,
+        'The required signers must include the connected account',
+      );
+    }
+    return message.bytes;
+  }
+
   bool _sameChains(List<String>? first, List<String> second) =>
       first != null &&
       first.length == second.length &&
@@ -392,14 +451,21 @@ class DappRequestCoordinator {
     final origin = context.canonicalOrigin;
     var granted = await permissions.isGranted(origin, wallet.address);
     ensureActive();
-    if (method == 'connect') {
+    // A sign-in connects too. Before the user has approved the connection
+    // the site may learn nothing about the wallet, so only what holds for
+    // any wallet is checked here: a malformed request fails the same way
+    // whichever account is active. Whether the request names this account,
+    // and whether this wallet can sign it, is answered only once connected.
+    final signingIn = method == 'signIn';
+    if (signingIn) _writeSignIn(params, context, _anyAddress);
+    if (method == 'connect' || signingIn) {
       // A saved grant names an origin whose identity this document's
       // certificate does not prove, so connecting asks again every time.
       if (!granted || context.certificateException) {
-        if (params['silent'] == true) {
+        if (!signingIn && params['silent'] == true) {
           return {'accounts': <Object?>[]};
         }
-        if (params['onlyIfTrusted'] == true) {
+        if (!signingIn && params['onlyIfTrusted'] == true) {
           throw const DappException(4100, 'Connection approval required');
         }
         if (!await approveConnection(
@@ -422,17 +488,13 @@ class DappRequestCoordinator {
         granted = true;
         _rememberCertificateConnection(context, 'solana', wallet);
       }
-      return {
-        'publicKey': wallet.address,
-        'chains': wallet.chains,
-        'canSign': wallet.canSign,
-        'canSignMessages': wallet.canSignMessages,
-      };
+      if (!signingIn) return _solanaConnection(wallet);
     }
     if (!granted) {
       throw const DappException(4100, 'Connect before requesting a signature');
     }
     _requireCertificateConnection(context, 'solana', wallet);
+    final signIn = signingIn ? _signInRequest(params, context, wallet) : null;
     // A view-only wallet's transactions continue to a review it can read but
     // not approve; a message has no simulation to show.
     if (method == 'signMessage' && !wallet.canSignMessages) {
@@ -440,6 +502,14 @@ class DappRequestCoordinator {
         4200,
         wallet.canSign
             ? 'This wallet supports transaction signing, but not message signing'
+            : 'This wallet is view-only',
+      );
+    }
+    if (method == 'signOffchainMessage' && !wallet.canSignOffchainMessages) {
+      throw DappException(
+        4200,
+        wallet.canSign
+            ? 'This wallet does not support off-chain message signing'
             : 'This wallet is view-only',
       );
     }
@@ -456,7 +526,10 @@ class DappRequestCoordinator {
       throw const DappException(4901, 'Unsupported Solana network');
     }
     final List<dynamic> encoded;
-    if (method == 'signAllTransactions') {
+    if (method == 'signOffchainMessage' || signIn != null) {
+      // The wallet builds these bytes itself; nothing encoded to decode.
+      encoded = const [];
+    } else if (method == 'signAllTransactions') {
       if (params['transactions'] is! List) {
         throw const DappException(-32602, 'Transactions must be an array');
       }
@@ -483,6 +556,10 @@ class DappRequestCoordinator {
       }
       payloads.add(bytes);
     }
+    if (method == 'signOffchainMessage') {
+      payloads.add(_offchainMessage(params, wallet.address));
+    }
+    if (signIn != null) payloads.add(signIn.bytes);
     final options = <String, Object?>{};
     final suppliedOptions = params['options'];
     if (suppliedOptions != null) {
@@ -520,6 +597,7 @@ class DappRequestCoordinator {
         options[entry.key as String] = value;
       }
     }
+    if (signIn != null) options['offchainMessage'] = signIn.offchainMessage;
     final digest = sha256
         .convert(
           utf8.encode(
@@ -540,7 +618,7 @@ class DappRequestCoordinator {
       throw const DappException(4100, 'Connection revoked');
     }
     ensureActive();
-    return execute(
+    final result = await execute(
       DappSigningRequest(
         id: id,
         method: method,
@@ -554,6 +632,79 @@ class DappRequestCoordinator {
         cancelled: cancelled,
       ),
     );
+    // A sign-in answers with the account it connected, as connect does.
+    return signIn == null ? result : {...result, ..._solanaConnection(wallet)};
+  }
+
+  Map<String, Object?> _solanaConnection(DappWallet wallet) => {
+    'publicKey': wallet.address,
+    'chains': wallet.chains,
+    'canSign': wallet.canSign,
+    'canSignMessages': wallet.canSignMessages,
+    'canSignOffchainMessages': wallet.canSignOffchainMessages,
+  };
+
+  /// A well-formed address standing in for the wallet's while a sign-in is
+  /// checked before the site is connected. Fixed, so that check cannot
+  /// depend on the active account.
+  static const _anyAddress = '11111111111111111111111111111111';
+
+  /// Writes the message a `signIn` request asks [address] to sign. What it
+  /// refuses depends on the request, the page and the clock alone: a field
+  /// the sign-in card could not show, an unsupported version, or a validity
+  /// window that is closed.
+  SolanaSignInRequest _writeSignIn(
+    Map<String, dynamic> params,
+    DappFrameContext context,
+    String address,
+  ) {
+    final requested = params['address'];
+    if (requested != null && requested is! String) {
+      throw const DappException(-32602, 'Invalid sign-in address');
+    }
+    try {
+      return SolanaSignInRequest.parse(
+        params,
+        authority: context.origin.authority,
+        address: address,
+        now: now(),
+      );
+    } on FormatException catch (error) {
+      throw DappException(-32602, error.message);
+    }
+  }
+
+  /// The message a `signIn` request asks [wallet] to sign, refused when the
+  /// request names another account or asks for a form the wallet cannot
+  /// sign: a Ledger signs in only through an off-chain message. Both answers
+  /// describe the wallet, so this runs only for a connected site.
+  SolanaSignInRequest _signInRequest(
+    Map<String, dynamic> params,
+    DappFrameContext context,
+    DappWallet wallet,
+  ) {
+    final requested = params['address'];
+    if (requested != null && requested != wallet.address) {
+      throw const DappException(
+        4100,
+        'Requested account does not match the active wallet',
+      );
+    }
+    final request = _writeSignIn(params, context, wallet.address);
+    final capable = request.offchainMessage
+        ? wallet.canSignOffchainMessages
+        : wallet.canSignMessages;
+    if (!capable) {
+      throw DappException(
+        4200,
+        !wallet.canSign
+            ? 'This wallet is view-only'
+            : wallet.canSignOffchainMessages
+            ? 'This wallet can sign in only with an off-chain message'
+            : 'This wallet does not support sign-in',
+      );
+    }
+    return request;
   }
 
   Future<Map<String, Object?>> _silentEthereum(

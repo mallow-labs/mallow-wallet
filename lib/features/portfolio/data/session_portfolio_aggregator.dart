@@ -186,20 +186,23 @@ class SessionPortfolioAggregator {
     ];
   }
 
-  /// Solana addresses the **header/tokens-tab portfolio** should aggregate when
-  /// a Profile is active; otherwise null, signalling the single active-signer
-  /// path.
+  /// Solana addresses the **header/tokens-tab portfolio** aggregates: every
+  /// Solana wallet in the session, in either mode. Null only when the session
+  /// holds no Solana wallet (or isn't loaded yet), signalling the
+  /// active-signer path.
   ///
-  /// Scoped to Profile sessions on purpose: the reported header-vs-drawer
-  /// mismatch is the Profile row's per-profile aggregate diverging from the
-  /// single-signer header. Account sessions keep the single active wallet.
+  /// Account sessions aggregate too. A seed account holds two or three Solana
+  /// wallets when legacy or root paths are imported, and the drawer's account
+  /// row sums all of them; reading only the active signer showed $0 in the
+  /// header beside a funded account row, and the tokens tab then followed
+  /// whichever wallet the browser last selected. Ethereum and Tezos already
+  /// aggregate across the session ([resolveChainScope]); Solana now matches.
   ///
-  /// A profile linking a *single* Solana wallet returns that one address rather
+  /// A session with a *single* Solana wallet returns that one address rather
   /// than null. Falling through to the active-signer path there read whatever
   /// wallet was globally selected — which a Profile session does not guarantee
   /// to be one of its linked wallets ([SessionManager.scopedToSession]).
-  List<String>? profilePortfolioAddresses() {
-    if (!_session.isProfileMode) return null;
+  List<String>? portfolioSolanaAddresses() {
     final addresses = sessionSolanaAddresses();
     return addresses.isNotEmpty ? addresses : null;
   }

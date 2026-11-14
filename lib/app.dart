@@ -2,13 +2,11 @@ import 'dart:async';
 import 'dart:io' show Platform;
 import 'dart:ui';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
-import 'package:web3auth_flutter/web3auth_flutter.dart';
 
 import 'core/analytics/analytics_events.dart';
 import 'core/analytics/analytics_service.dart';
@@ -27,10 +25,13 @@ import 'core/security/app_lock_bloc.dart';
 import 'core/services/deep_link_handler_registry.dart';
 import 'core/services/deep_link_service.dart';
 import 'core/services/keystone_sign_service.dart';
+import 'core/services/ledger_service.dart';
 import 'core/services/preferences_service.dart';
 import 'core/services/program_label_service.dart';
 import 'core/services/signer_prompt_tracker.dart';
 import 'core/services/social_auth_service.dart';
+import 'core/social_vault/apple_web_sign_in.dart';
+import 'core/social_vault/social_vault_service.dart';
 import 'core/services/token_price_service.dart';
 import 'core/services/twitter_connect_notifier.dart';
 import 'core/services/wallet_repository.dart';
@@ -40,6 +41,9 @@ import 'features/browser/services/browser_lock.dart';
 import 'features/cast/models/cast_queue.dart';
 import 'features/cast/services/cast_awake_guard.dart';
 import 'features/cast/services/cast_bloc.dart';
+import 'features/onboarding/widgets/social_vault_prompts.dart';
+import 'features/social_vault/services/social_sign_in_routing.dart';
+import 'features/social_vault/widgets/legacy_social_notice.dart';
 import 'features/cast/services/cast_service.dart';
 import 'features/cast/widgets/airplay_mirroring_prompt_sheet.dart';
 import 'features/cast/widgets/cast_configuration_sheet.dart';
@@ -60,6 +64,7 @@ import 'shared/widgets/mallow_scroll_behavior.dart';
 import 'shared/widgets/mallow_sheet.dart';
 import 'shared/widgets/mallow_button.dart';
 import 'shared/widgets/mallow_svg_icon.dart';
+import 'shared/widgets/permission_disclosure.dart';
 import 'shared/widgets/system_status_banner.dart';
 
 /// The root widget of the mallow wallet app.
@@ -96,20 +101,29 @@ class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
   DateTime? _backgroundedAt;
   static const _backgroundLockThreshold = Duration(seconds: 60);
 
-  // How long a resume waits before it treats a still-pending social sign-in as
-  // an abandoned OAuth tab. Long enough for a successful redirect's session
-  // authorization to land, short enough that a real back-out unwinds promptly.
-  static const _customTabCloseGrace = Duration(seconds: 3);
-
   // Privacy blur overlay: shown whenever the app isn't fully resumed so
   // the OS app-switcher snapshot captures a blurred frame.
   bool _isObscured = false;
+
+  bool _legacySocialNoticeChecked = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _appLockBloc = sl<AppLockBloc>();
+    // Explain Bluetooth before Android's "Nearby devices" dialog. Every
+    // Ledger entry point (import, connect, verify) reaches that dialog through
+    // LedgerService, which has no navigator of its own.
+    LedgerService.beforePermissionRequest = () async {
+      if (!Platform.isAndroid) return true;
+      final navContext = AppRoutes.rootNavigatorKey.currentContext;
+      if (navContext == null) return true;
+      return showPermissionDisclosure(
+        navContext,
+        PermissionDisclosure.bluetooth,
+      );
+    };
     // Force-clear the privacy blur on unlock transitions. The OS biometric
     // prompt drives the app to `inactive` (which sets _isObscured=true);
     // on some devices `resumed` is never re-delivered after the prompt
@@ -117,6 +131,24 @@ class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
     _lockStateSubscription = _appLockBloc.stream.listen((state) {
       if (state is AppLockStateUnlocked && _isObscured && mounted) {
         setState(() => _isObscured = false);
+      }
+      // The one-time notice for a Google or Apple wallet from the older
+      // sign-in. After an unlock, so it never sits on top of the lock screen;
+      // checked once per launch, shown once per wallet.
+      if (state is AppLockStateUnlocked &&
+          _isInitialized &&
+          !_legacySocialNoticeChecked) {
+        _legacySocialNoticeChecked = true;
+        unawaited(maybeShowLegacySocialNotice());
+      }
+      // Check that the phone backup carrying each Google or Apple wallet's
+      // device key is still end-to-end encrypted (Android; every time), then
+      // ask the backend about the wallet's backup: gone, under a new key,
+      // scheduled for deletion, or opened by a sign-in key this device has
+      // not seen. After an unlock, so a warning never sits on top of the lock
+      // screen. The backend reads are throttled per vault and silent offline.
+      if (state is AppLockStateUnlocked && _isInitialized) {
+        unawaited(sl<SocialAuthService>().checkVaults());
       }
       // Here, not in the browser screen: a minimised browser is unmounted,
       // and its tab screenshots must still not outlive a lock.
@@ -175,14 +207,36 @@ class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
       case AppLifecycleState.hidden:
         _backgroundedAt ??= DateTime.now();
         _castAwakeGuard.setForegrounded(false);
+        // Sign in with Apple's web flow (Android) is up in a browser tab.
+        sl<AppleWebSignIn>().appPaused();
       case AppLifecycleState.resumed:
         _castAwakeGuard.setForegrounded(true);
-        unawaited(_notifyWeb3AuthCustomTabClosed());
+        // Back from that tab. Its answer arrives as an App Link with this
+        // resume; with none, the user closed the tab, and the sign-in must
+        // not wait on it.
+        sl<AppleWebSignIn>().appResumed();
         final pausedAt = _backgroundedAt;
         _backgroundedAt = null;
-        if (pausedAt != null &&
-            DateTime.now().difference(pausedAt) >= _backgroundLockThreshold) {
+        // Already locked, the event only re-checks a running PIN cooldown. That
+        // check cannot wait on the elapsed time: a clock moved back while away
+        // is the case it is for, and it makes the time away read as negative.
+        final locking =
+            pausedAt != null &&
+            (DateTime.now().difference(pausedAt) >= _backgroundLockThreshold ||
+                _appLockBloc.state is AppLockStateLocked);
+        if (locking) {
           _appLockBloc.add(const AppLockEvent.lock());
+          // The check below waits for the unlock, because it can show a
+          // warning. This half of it shows nothing and must not wait: a
+          // phone whose screen lock was removed has its sign-in keys pulled
+          // out of the phone's backup whether or not the app gets unlocked.
+          unawaited(sl<SocialVaultService>().checkPlatformBackup());
+        } else if (_isInitialized &&
+            _appLockBloc.state is AppLockStateUnlocked) {
+          // Back in the foreground and still unlocked: the same check an
+          // unlock runs (see the lock-state listener). When the app locks
+          // instead, the unlock that follows runs it.
+          unawaited(sl<SocialAuthService>().checkVaults());
         }
         _refreshSessionIfNeeded();
         // Refresh the analytics session boundary and drain any offline queue.
@@ -204,41 +258,6 @@ class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
         _castAwakeGuard.setForegrounded(false);
       case AppLifecycleState.detached:
         break;
-    }
-  }
-
-  /// Tells the Web3Auth SDK its Android custom tab is gone, so an OAuth tab the
-  /// user backed out of fails the pending login instead of wedging it. Chrome
-  /// custom tabs expose no close callback, so the resume is the only signal;
-  /// nothing to do on iOS.
-  ///
-  /// The SDK reads this call as "the user closed the tab" and fails whatever
-  /// login is in flight (`setResultUrl(null)` → `UserCancelledException`), so
-  /// it only fires while a sign-in round-trip is pending — and only if it is
-  /// *still* pending after a settle window. Both guards matter:
-  ///
-  /// - The SDK's tab-closed flag is set for *any* custom-tab teardown, the
-  ///   successful ones included, so an ungated resume can trip a stale flag
-  ///   and cancel work that has nothing to do with a browser hop.
-  /// - The success redirect resumes the app and only *then* authorizes the
-  ///   session over the network, so the login the user just completed is still
-  ///   pending during the resume that carried it — cancelling there drops the
-  ///   user back on the welcome screen with no wallet and no error.
-  ///
-  /// Plugin failures are swallowed: widget tests pump lifecycle events with no
-  /// platform side registered, and a throw here would fail them.
-  Future<void> _notifyWeb3AuthCustomTabClosed() async {
-    if (kIsWeb || !Platform.isAndroid) return;
-    final pending = sl<SocialAuthService>().requestPending;
-    if (!pending.value) return;
-    await Future<void>.delayed(_customTabCloseGrace);
-    if (!pending.value) return;
-    try {
-      await Web3AuthFlutter.setCustomTabsClosed();
-    } on MissingPluginException {
-      // Native channel not wired (e.g. widget tests).
-    } on PlatformException {
-      // No login pending, or the native call failed — nothing to recover.
     }
   }
 
@@ -307,6 +326,12 @@ class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
     // the app, so the result can land *after* the sheet (and its screen) have
     // been disposed by the resume rebuild — which used to silently drop the
     // result and create no account. This listener survives that teardown.
+    sl<SocialAuthService>().prompts = const AppSocialVaultPrompts();
+    // A boot that needs no unlock gets no unlock event, so the check the
+    // lock-state listener runs is started here for it.
+    if (_appLockBloc.state is AppLockStateUnlocked) {
+      unawaited(sl<SocialAuthService>().checkVaults());
+    }
     _socialSignInSubscription = sl<SocialAuthService>().onSignInComplete.listen(
       (result) => _onSocialSignInComplete(result, router, authStateNotifier),
     );
@@ -322,6 +347,7 @@ class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
       router: router,
       twitterConnectNotifier: sl<TwitterConnectNotifier>(),
       handlerRegistry: sl<DeepLinkHandlerRegistry>(),
+      appleWebSignIn: sl<AppleWebSignIn>(),
     );
     unawaited(_deepLinkService!.start());
 
@@ -362,11 +388,18 @@ class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
   /// During onboarding (no wallet finished setup yet) this continues to
   /// biometric setup. Post-onboarding it makes the wallet active and returns
   /// home with the accounts drawer flagged to open.
+  ///
+  /// Either way the screen the sign-in started from is replaced, and anything
+  /// pushed on top of it goes with it. The notices that follow a sign-in
+  /// therefore wait for [SocialSignInRouting]: it is told here, before the
+  /// first await, that a navigation is coming, and again once that navigation
+  /// has been issued — or has failed, so a notice is never left waiting.
   Future<void> _onSocialSignInComplete(
     SocialAuthResult result,
     GoRouter router,
     AuthStateNotifier authStateNotifier,
   ) async {
+    final routed = SocialSignInRouting.instance.begin();
     final walletManager = sl<WalletManager>();
     final isOnboarding = !authStateNotifier.hasCompletedOnboarding;
     try {
@@ -393,6 +426,8 @@ class _MallowAppState extends State<MallowApp> with WidgetsBindingObserver {
       }
     } catch (e, st) {
       debugPrint('[SocialImport] social sign-in routing failed: $e\n$st');
+    } finally {
+      routed();
     }
   }
 

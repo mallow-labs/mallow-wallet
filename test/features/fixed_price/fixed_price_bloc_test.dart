@@ -44,6 +44,23 @@ class _AllowAllAuthGate implements TransactionAuthGate {
   }) async => TransactionAuthOutcome.allowed;
 }
 
+/// Records what the gate is asked to value, then refuses: nothing past the gate
+/// matters to the tests that use it.
+class _RecordingAuthGate implements TransactionAuthGate {
+  final values = <double?>[];
+
+  @override
+  bool requiresAuth(double? usdValue) => true;
+  @override
+  Future<TransactionAuthOutcome> authorize({
+    required double? usdValue,
+    required FlowKey flow,
+  }) async {
+    values.add(usdValue);
+    return TransactionAuthOutcome.cancelled;
+  }
+}
+
 @GenerateMocks([
   MallowApiClient,
   WalletManager,
@@ -117,14 +134,14 @@ void main() {
     );
   });
 
-  FixedPriceBloc buildBloc() {
+  FixedPriceBloc buildBloc({TransactionAuthGate? authGate}) {
     // A real pipeline over mocked RPC primitives so signSendConfirm runs
     // end-to-end; the flow wraps that same pipeline (the single signing path
     // the bloc now routes through via MarketplaceActionFlow).
     final pipeline = TransactionPipeline(
       mockWalletManager,
       mockRpcService,
-      _AllowAllAuthGate(),
+      authGate ?? _AllowAllAuthGate(),
       mockApi,
       mockLedgerService,
     );
@@ -343,6 +360,20 @@ void main() {
           isA<TxFlowSuccess<void, FixedPriceSuccessData>>(),
         ),
       ],
+    );
+
+    final recordingGate = _RecordingAuthGate();
+    blocTest<FixedPriceBloc, FixedPriceState>(
+      'values a listing as unknown for step-up auth, whatever its price',
+      setUp: stubSignAndBroadcast,
+      build: () => buildBloc(authGate: recordingGate),
+      seed: () => FixedPriceState(
+        userPubkey: testWalletAddress,
+        selectedArtwork: testArtwork,
+        price: 10000000,
+      ),
+      act: (bloc) => bloc.add(const FixedPriceEvent.requestList()),
+      verify: (_) => expect(recordingGate.values, [null]),
     );
 
     blocTest<FixedPriceBloc, FixedPriceState>(

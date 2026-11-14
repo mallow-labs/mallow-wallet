@@ -29,9 +29,12 @@ void main() {
   late Completer<void> cancelled;
   late BuildContext host;
 
-  DappSigningRequest request() => DappSigningRequest(
+  DappSigningRequest request({
+    String method = 'signMessage',
+    String message = 'hello',
+  }) => DappSigningRequest(
     id: '1',
-    method: 'signMessage',
+    method: method,
     context: DappFrameContext(
       tabId: 't',
       generation: 1,
@@ -45,7 +48,7 @@ void main() {
       canSign: true,
     ),
     chain: 'solana:mainnet',
-    payloads: [Uint8List.fromList(utf8.encode('hello'))],
+    payloads: [Uint8List.fromList(utf8.encode(message))],
     payloadDigest: 'digest',
     cancelled: cancelled.future,
     options: const {},
@@ -56,7 +59,11 @@ void main() {
     },
   );
 
-  Future<Future<Map<String, Object?>>> start(WidgetTester tester) async {
+  Future<Future<Map<String, Object?>>> start(
+    WidgetTester tester, {
+    String method = 'signMessage',
+    String message = 'hello',
+  }) async {
     cancelled = Completer<void>();
     await tester.pumpWidget(
       MaterialApp(
@@ -75,7 +82,13 @@ void main() {
       prices: _Prices(),
       session: BrowserSession(BrowserRepository(_Storage())),
     );
-    final result = service.execute(host, request());
+    final result = service.execute(
+      host,
+      request(method: method, message: message),
+    );
+    // A request refused before any sheet fails while the pumps below run,
+    // ahead of the caller's own handler.
+    unawaited(result.then<void>((_) {}, onError: (Object _) {}));
     await tester.pumpAndSettle();
     await tester.pump(const Duration(milliseconds: 200));
     return result;
@@ -122,5 +135,31 @@ void main() {
     expect(await result, isA<DappException>());
     expect(find.byType(MessageSigningReview), findsNothing);
     expect(find.text('newer route'), findsOneWidget);
+  });
+
+  testWidgets('a sign-in that is not a sign-in message is never shown', (
+    tester,
+  ) async {
+    final result = outcome(await start(tester, method: 'signIn'));
+    expect(find.byType(MessageSigningReview), findsNothing);
+    final error = await result;
+    expect(error, isA<DappException>());
+    expect((error! as DappException).code, -32602);
+  });
+
+  testWidgets('a sign-in gets the sign-in card', (tester) async {
+    final result = outcome(
+      await start(
+        tester,
+        method: 'signIn',
+        message:
+            'site.example wants you to sign in with your Solana account:\n'
+            '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU',
+      ),
+    );
+    expect(find.text('Sign in to site.example'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('reject-signing')));
+    await tester.pumpAndSettle();
+    expect(await result, isA<DappException>());
   });
 }

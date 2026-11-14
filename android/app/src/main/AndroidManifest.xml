@@ -81,8 +81,10 @@
                 <!-- MUST KEEP — not a Reown leftover. This is the live X
                      (Twitter) connect callback: the backend
                      /v2/twitter/callback redirects here with
-                     ?twitter=success|error|error_user_exists and
-                     DeepLinkService publishes it via TwitterConnectNotifier.
+                     ?twitter=confirm&token=… (TwitterConnectNotifier then
+                     finishes the link on the signed /v2/twitter/complete) or
+                     ?twitter=error|error_user_exists, which DeepLinkService
+                     publishes via TwitterConnectNotifier.
                      Deleting it breaks X connect on Android silently, and no
                      test catches it (deep_link_service_test injects the URI
                      directly). Social sign-in no longer uses this path. -->
@@ -92,13 +94,35 @@
                 <data android:pathPrefix="/u/" />
                 <data android:pathPrefix="/a/" />
             </intent-filter>
-            <!-- Custom-scheme surface: the Web3Auth OAuth redirect
-                 (mallowwallet://auth, consumed by the SDK and dropped by
-                 DeepLinkService), the browser handoff
+            <!-- The return of Sign in with Apple's web flow. Android has no
+                 native Apple sign-in, so the app opens Apple's page in a
+                 Custom Tab; Apple form-posts the result to the backend, which
+                 redirects to this page of the site with the result in the URL
+                 fragment. It carries an ID token, so it must reach this app
+                 and no other: a verified App Link is delivered only to a
+                 package whose signing certificate the site's assetlinks.json
+                 lists. There is deliberately no custom-scheme form of it (any
+                 app can claim a scheme), and the path is exact. Each product
+                 flavour is its own package and needs its own statement there.
+                 DeepLinkService hands the link to the waiting sign-in before
+                 anything can log or route it. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="https"
+                    android:host="mallow.art"
+                    android:path="/auth/apple" />
+            </intent-filter>
+            <!-- Custom-scheme surface: the browser handoff
                  (mallowwallet://browser/open), the WalletConnect wrapper
-                 (mallowwallet://wc) and the unverified-link fallback, kept
-                 for environments where App Links verification is
-                 unavailable. None of them can sign. -->
+                 (mallowwallet://wc), the X connect callback's fallback form
+                 (mallowwallet://auth/callback?twitter=…, which the website's
+                 /auth/callback page links to when the app link opened in the
+                 browser) and the unverified-link fallback, kept for
+                 environments where App Links verification is unavailable.
+                 None of them can sign, and no sign-in redirect uses it. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />

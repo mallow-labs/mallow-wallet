@@ -10,6 +10,7 @@ import '../../../core/session/session_manager.dart';
 import '../../../shared/utils/address_utils.dart';
 import '../../../shared/utils/artwork_display.dart';
 import '../../../shared/utils/user_display.dart';
+import '../../moderation/services/moderation_filter.dart';
 import '../../portfolio/services/portfolio_bloc.dart';
 import '../services/home_bloc.dart';
 
@@ -36,14 +37,28 @@ class CachedHomeSections {
 /// 1. Emit cached data immediately for instant display
 /// 2. Fetch fresh data from API in background
 /// 3. Cache fresh data to Drift DB
+///
+/// The `map…` functions drop blocked accounts' content and content the viewer
+/// reported ([ModerationFilter]) as they turn the API shapes into the home
+/// models. The cache keeps the raw responses, so a cached paint is filtered
+/// by the same functions, against the block list as it is now.
 @lazySingleton
 class HomeFeedRepository {
-  HomeFeedRepository(this._api, this._apiV2, this._database, this._session);
+  HomeFeedRepository(
+    this._api,
+    this._apiV2,
+    this._database,
+    this._session, {
+    // Tests pass a filter over fake stores. Kept out of the generated
+    // construction, which uses the app's.
+    @ignoreParam ModerationFilter Function()? moderation,
+  }) : _moderation = moderation ?? ModerationFilter.current;
 
   final api.MallowApiClient _api;
   final api.MallowApiV2Client _apiV2;
   final MallowDatabase _database;
   final SessionManager _session;
+  final ModerationFilter Function() _moderation;
 
   static const _staleTtl = Duration(minutes: 5);
 
@@ -201,33 +216,46 @@ class HomeFeedRepository {
   List<Curation> mapPopularCurations(
     api.HomePopularCurationsResponse response,
   ) {
-    return response.curations.where((c) => c.previewImageUrls.isNotEmpty).map((
-      c,
-    ) {
-      final owner = c.owner;
-      final ownerLabel = (owner?.username?.isNotEmpty ?? false)
-          ? owner!.username!
-          : truncateAddress(owner?.address ?? '');
-      return Curation(
-        // Server adds id/slug; older cached payloads pre-dating the field
-        // addition fall back to name so the card still renders (the detail
-        // fetch will 404 in that case until the cache refreshes).
-        id: c.id.isNotEmpty ? c.id : c.name,
-        name: c.name,
-        curatorName: ownerLabel,
-        curatorAddress: owner?.address ?? '',
-        imageUrls: c.previewImageUrls,
-      );
-    }).toList();
+    final moderation = _moderation();
+    return response.curations
+        .where((c) => c.previewImageUrls.isNotEmpty)
+        .where(
+          (c) => !moderation.hidesCuration(
+            id: c.id,
+            slug: c.slug,
+            owner: c.owner?.address,
+          ),
+        )
+        .map((c) {
+          final owner = c.owner;
+          final ownerLabel = (owner?.username?.isNotEmpty ?? false)
+              ? owner!.username!
+              : truncateAddress(owner?.address ?? '');
+          return Curation(
+            // Server adds id/slug; older cached payloads pre-dating the field
+            // addition fall back to name so the card still renders (the detail
+            // fetch will 404 in that case until the cache refreshes).
+            id: c.id.isNotEmpty ? c.id : c.name,
+            name: c.name,
+            curatorName: ownerLabel,
+            curatorAddress: owner?.address ?? '',
+            imageUrls: c.previewImageUrls,
+          );
+        })
+        .toList();
   }
 
   /// Extract up to 30 trending NFTs from the home feed for use as spotlight
   /// fallback when the user owns no artworks.
   List<SpotlightArtwork> mapTrendingForSpotlight(api.HomeFeedResponse feed) {
+    final moderation = _moderation();
     final artworks = <SpotlightArtwork>[];
     for (final item in [...feed.featured, ...feed.smores]) {
       final nft = item.nftPreview;
-      if (nft != null && nft.imageUrl != null && nft.imageUrl!.isNotEmpty) {
+      if (nft != null &&
+          nft.imageUrl != null &&
+          nft.imageUrl!.isNotEmpty &&
+          !moderation.hidesPreview(nft)) {
         artworks.add(
           SpotlightArtwork(
             mintAccount: nft.mintAccount,
@@ -253,7 +281,14 @@ class HomeFeedRepository {
 
   /// Map API creators to UI [ArtistPreview] list.
   List<ArtistPreview> mapCreators(List<api.User> creators) {
+    final moderation = _moderation();
     return creators
+        .where(
+          (user) => !moderation.hidesAnyAddress([
+            user.primaryAddress,
+            ...user.addresses,
+          ]),
+        )
         .map(
           (user) => ArtistPreview(
             address: user.primaryAddress ?? '',
@@ -268,12 +303,14 @@ class HomeFeedRepository {
 
   /// Map featured NFTs with buy-now listings to [FeaturedListing] list.
   List<FeaturedListing> mapFeaturedListings(api.HomeFeedResponse feed) {
+    final moderation = _moderation();
     final listings = <FeaturedListing>[];
     for (final item in feed.featured) {
       final nft = item.nftPreview;
       if (nft == null || nft.imageUrl == null || nft.imageUrl!.isEmpty) {
         continue;
       }
+      if (moderation.hidesPreview(nft)) continue;
       // Price priority: buyNow → auction (currentBid or reserve) → lastSale
       // Matches the reference web client useListingState priority chain.
       // Prices are raw on-chain amounts (lamports for SOL); PriceFormatter
@@ -323,60 +360,77 @@ class HomeFeedRepository {
   List<RecommendedCategory> mapRecommendedCategories(
     api.HomeRecommendedResponse response,
   ) {
-    return response.curations.map((curation) {
-      final imageUrls = curation.artworks
-          .map((item) => item.imageUrl)
-          .whereType<String>()
-          .where((url) => url.isNotEmpty)
-          .toList();
-      final artworks = curation.artworks
-          .where(
-            (item) =>
-                item.mintAccount != null &&
-                item.imageUrl != null &&
-                item.imageUrl!.isNotEmpty,
-          )
-          .map(
-            (item) => PortfolioArtwork(
-              mintAccount: item.mintAccount!,
-              title: item.name ?? '',
-              imageUrl: item.imageUrl!,
-              playbackId: item.nftPreview?.playbackId,
-              clipPlaybackId: item.nftPreview?.clipPlaybackId,
-              // Rendered by CurationScreen's cards, which prefer the creator
-              // username and fall back to the creator address.
-              artistName: formatUsernameOrAddress(
-                username: item.nftPreview?.creator?.username,
-                address: item.nftPreview?.creator?.effectiveAddress,
-              ),
-              artistUsername: item.nftPreview?.creator?.username,
-              collectionName: item.nftPreview?.collectionName,
-              aspectRatio: item.nftPreview?.aspectRatio ?? 1.0,
-              lastPrice: item.nftPreview?.lastSale?.price,
-              listingType: item.nftPreview?.listingType,
-              supply: item.nftPreview?.supply,
-              maxSupply: item.nftPreview?.maxSupply,
-              editionNumber: item.nftPreview?.editionNumber,
-              parentEdition: item.nftPreview?.parentEdition,
-              auctionMetadata: item.nftPreview?.auctionMetadata,
-              buyNowMetadata: item.nftPreview?.buyNowMetadata,
-              updateAuth: item.nftPreview?.updateAuth,
-              nsfw: item.nftPreview?.nsfw ?? false,
-            ),
-          )
-          .toList();
-      return RecommendedCategory(
-        label: curation.name,
-        imageUrls: imageUrls,
-        artistUsernames: curation.artistUsernames,
-        artworks: artworks,
-      );
-    }).toList();
+    final moderation = _moderation();
+    bool hidden(api.ItemRender item) {
+      final preview = item.nftPreview;
+      return preview != null
+          ? moderation.hidesPreview(preview)
+          : moderation.hidesMint(item.mintAccount ?? '');
+    }
+
+    return response.curations
+        .where((curation) => !moderation.hidesAddress(curation.owner?.address))
+        .map((curation) {
+          final shown = [
+            for (final item in curation.artworks)
+              if (!hidden(item)) item,
+          ];
+          final imageUrls = shown
+              .map((item) => item.imageUrl)
+              .whereType<String>()
+              .where((url) => url.isNotEmpty)
+              .toList();
+          final artworks = shown
+              .where(
+                (item) =>
+                    item.mintAccount != null &&
+                    item.imageUrl != null &&
+                    item.imageUrl!.isNotEmpty,
+              )
+              .map(
+                (item) => PortfolioArtwork(
+                  mintAccount: item.mintAccount!,
+                  title: item.name ?? '',
+                  imageUrl: item.imageUrl!,
+                  playbackId: item.nftPreview?.playbackId,
+                  clipPlaybackId: item.nftPreview?.clipPlaybackId,
+                  // Rendered by CurationScreen's cards, which prefer the creator
+                  // username and fall back to the creator address.
+                  artistName: formatUsernameOrAddress(
+                    username: item.nftPreview?.creator?.username,
+                    address: item.nftPreview?.creator?.effectiveAddress,
+                  ),
+                  artistUsername: item.nftPreview?.creator?.username,
+                  collectionName: item.nftPreview?.collectionName,
+                  aspectRatio: item.nftPreview?.aspectRatio ?? 1.0,
+                  lastPrice: item.nftPreview?.lastSale?.price,
+                  listingType: item.nftPreview?.listingType,
+                  supply: item.nftPreview?.supply,
+                  maxSupply: item.nftPreview?.maxSupply,
+                  editionNumber: item.nftPreview?.editionNumber,
+                  parentEdition: item.nftPreview?.parentEdition,
+                  auctionMetadata: item.nftPreview?.auctionMetadata,
+                  buyNowMetadata: item.nftPreview?.buyNowMetadata,
+                  updateAuth: item.nftPreview?.updateAuth,
+                  nsfw: item.nftPreview?.nsfw ?? false,
+                ),
+              )
+              .toList();
+          return RecommendedCategory(
+            label: curation.name,
+            imageUrls: imageUrls,
+            artistUsernames: curation.artistUsernames,
+            artworks: artworks,
+          );
+        })
+        .toList();
   }
 
   /// Map [HomeDiscoverResponse] to UI [ArtistPreview] list.
   List<ArtistPreview> mapDiscoverArtists(api.HomeDiscoverResponse response) {
+    final moderation = _moderation();
     return response.artists
+        .where((artist) => !moderation.hidesAddress(artist.address))
         .map(
           (artist) => ArtistPreview(
             address: artist.address,
@@ -393,8 +447,10 @@ class HomeFeedRepository {
   List<PopularCollection> mapPopularCollections(
     api.HomePopularCollectionsResponse response,
   ) {
+    final moderation = _moderation();
     return response.collections
         .where((c) => c.imageUrl != null && c.imageUrl!.isNotEmpty)
+        .where((c) => !moderation.hidesAnyAddress(userRefAddresses(c.creator)))
         .map(
           (c) => PopularCollection(
             id: c.slug,

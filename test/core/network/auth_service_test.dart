@@ -30,7 +30,21 @@ class _MockPrefs extends Mock implements PreferencesService {}
 
 class _MockWalletRepo extends Mock implements WalletRepository {}
 
-/// Dio adapter that stubs `/v0/login` (returning a minimal LoginResult plus a
+/// `POST /v2/session`: the `login-token` cookie and `{address}` — never the
+/// user, which the app reads from `/v0/currentUser` next.
+ResponseBody _sessionResponse(RequestOptions options) =>
+    ResponseBody.fromString(
+      jsonEncode({
+        'result': {'address': (options.data as Map)['address']},
+      }),
+      200,
+      headers: {
+        Headers.contentTypeHeader: [Headers.jsonContentType],
+        'set-cookie': ['login-token=LOGIN_TOK; Path=/'],
+      },
+    );
+
+/// Dio adapter that stubs `/v2/session` + `/v0/currentUser` (returning a minimal LoginResult plus a
 /// `login-token` Set-Cookie so the auth interceptor is installed) and records
 /// the `Cookie` header of every request, so a probe issued after login reveals
 /// which wallet-sig cookies the interceptor actually attaches.
@@ -44,7 +58,8 @@ class _StubLoginAdapter implements HttpClientAdapter {
     Future<void>? cancelFuture,
   ) async {
     lastCookie = options.headers['Cookie'] as String?;
-    if (options.path.endsWith('/v0/login')) {
+    if (options.path.endsWith('/v2/session')) return _sessionResponse(options);
+    if (options.path.endsWith('/v0/currentUser')) {
       return ResponseBody.fromString(
         jsonEncode({
           'result': {'user': <String, dynamic>{}},
@@ -69,16 +84,16 @@ class _StubLoginAdapter implements HttpClientAdapter {
   void close({bool force = false}) {}
 }
 
-/// Dio adapter that lets a test hold `/v0/login` open per address, so
+/// Dio adapter that lets a test hold `/v2/session` open per address, so
 /// overlapping [AuthService.switchWallet] calls can be observed mid-flight.
 ///
 /// Every login request is recorded in [startedLogins] **as it arrives** (not
 /// when it resolves) and then parks on that address's gate until the test calls
 /// [release]. Recording at arrival is what makes the queue-window assertions
-/// meaningful: a duplicate switch is visible the moment its `/v0/login` is
+/// meaningful: a duplicate switch is visible the moment its `/v2/session` is
 /// dispatched, even if the response never comes back.
 class _GatedLoginAdapter implements HttpClientAdapter {
-  /// Login addresses in dispatch order — one entry per `/v0/login` sent.
+  /// Login addresses in dispatch order — one entry per `/v2/session` sent.
   final List<String> startedLogins = [];
 
   final Map<String, Completer<void>> _gates = {};
@@ -109,7 +124,16 @@ class _GatedLoginAdapter implements HttpClientAdapter {
     Stream<Uint8List>? requestStream,
     Future<void>? cancelFuture,
   ) async {
-    if (!options.path.endsWith('/v0/login')) {
+    if (options.path.endsWith('/v0/currentUser')) {
+      return ResponseBody.fromString(
+        jsonEncode({
+          'result': {'user': <String, dynamic>{}},
+        }),
+        200,
+        headers: _jsonHeaders,
+      );
+    }
+    if (!options.path.endsWith('/v2/session')) {
       return ResponseBody.fromString('{}', 200, headers: _jsonHeaders);
     }
 
@@ -142,7 +166,7 @@ class _GatedLoginAdapter implements HttpClientAdapter {
   void close({bool force = false}) {}
 }
 
-/// Dio adapter for the cold-start shape: `/v0/login` answers with the PUBLIC
+/// Dio adapter for the cold-start shape: `/v0/currentUser` answers with the PUBLIC
 /// user render (no `perks`, no `userDetails` — what the backend returns when the
 /// request carries no wallet-sig cookie), while `/v0/authToken/verify` answers
 /// with the privileged one plus the `wallet-sig` Set-Cookie.
@@ -150,6 +174,9 @@ class _StubVerifyAdapter implements HttpClientAdapter {
   /// Perks the *verify* render reports. Mutable so a test can prove a second,
   /// non-active-wallet verify does not overwrite what the first one adopted.
   List<String> perks = const ['gif-pfp'];
+
+  /// The proof `/v0/authToken/verify` sets.
+  String sig = 'SIGJWT';
 
   /// Set when `/v0/authToken/verify` is reached.
   bool verifyCalled = false;
@@ -165,7 +192,8 @@ class _StubVerifyAdapter implements HttpClientAdapter {
     Stream<Uint8List>? requestStream,
     Future<void>? cancelFuture,
   ) async {
-    if (options.path.endsWith('/v0/login')) {
+    if (options.path.endsWith('/v2/session')) return _sessionResponse(options);
+    if (options.path.endsWith('/v0/currentUser')) {
       return ResponseBody.fromString(
         jsonEncode({
           'result': {
@@ -197,7 +225,7 @@ class _StubVerifyAdapter implements HttpClientAdapter {
         200,
         headers: {
           ..._jsonHeaders,
-          'set-cookie': ['wallet-sig-$address=SIGJWT; Path=/'],
+          'set-cookie': ['wallet-sig-$address=$sig; Path=/'],
         },
       );
     }
@@ -209,7 +237,7 @@ class _StubVerifyAdapter implements HttpClientAdapter {
 }
 
 /// Dio adapter that mirrors the backend's `hasValidSignedWallet` gate on
-/// `/v0/login`: the response is the PRIVILEGED render only when the request
+/// `/v0/currentUser`: the response is the PRIVILEGED render only when the request
 /// already carries a `wallet-sig-<address>` cookie, and the public one
 /// otherwise. The public render OMITS `perks`, `showNsfw` and `disabledChains`
 /// outright — the shape `renderSingle` produces, and the reason a client cannot
@@ -246,7 +274,8 @@ class _SignedLoginAdapter implements HttpClientAdapter {
     Stream<Uint8List>? requestStream,
     Future<void>? cancelFuture,
   ) async {
-    if (options.path.endsWith('/v0/login')) {
+    if (options.path.endsWith('/v2/session')) return _sessionResponse(options);
+    if (options.path.endsWith('/v0/currentUser')) {
       final signed = (options.headers['Cookie'] as String? ?? '').contains(
         'wallet-sig-$_address=',
       );
@@ -311,7 +340,8 @@ class _SigLapseAdapter implements HttpClientAdapter {
     Stream<Uint8List>? requestStream,
     Future<void>? cancelFuture,
   ) async {
-    if (options.path.endsWith('/v0/login')) {
+    if (options.path.endsWith('/v2/session')) return _sessionResponse(options);
+    if (options.path.endsWith('/v0/currentUser')) {
       return ResponseBody.fromString(
         jsonEncode({
           'result': {'user': <String, dynamic>{}},
@@ -460,7 +490,7 @@ void main() {
     });
   });
 
-  // `/v0/login` renders the user PUBLICLY unless the request already carries a
+  // `/v0/currentUser` renders the user PUBLICLY unless the request already carries a
   // valid wallet-sig cookie, and on a cold start it cannot: the login POST goes
   // out before the signature handshake has run. So the privileged fields —
   // perks, the full roles, showNsfw, disabledChains — are absent from the login
@@ -605,7 +635,7 @@ void main() {
   });
 
   // Regression, and the case the group above never reached: the SECOND and
-  // every later cold start. `/v0/login` went out before any wallet-sig was in
+  // every later cold start. `/v0/currentUser` went out before any wallet-sig was in
   // memory, so the backend answered with the public render — and the signature
   // handshake that follows it short-circuits on the still-valid 30-day sig
   // sitting on disk, so `/v0/authToken/verify` never ran and nothing upgraded
@@ -814,7 +844,7 @@ void main() {
     });
   });
 
-  // Regression, post-Web3Auth-migration: social signing became LOCAL and silent
+  // Regression: social signing became LOCAL and silent
   // (the key is stored on device at sign-in), but the background handshake kept
   // the blanket "social wallets cannot sign" skip from the era when signing a
   // social wallet meant a remote, interactive round trip. A social wallet then
@@ -828,6 +858,134 @@ void main() {
   // recovering it opens an OAuth browser tab, and these callers are background
   // paths (post-login warm-up, wallet switch, the 401 interceptor) that must
   // never go interactive.
+  group('proofs for one request', () {
+    // The interceptor sends the shared map on every request, and enough proofs
+    // outgrow what a server accepts for one header, which breaks the whole API
+    // for that device. These proofs must never join it.
+    test(
+      'a proof on disk comes back without joining the shared cookies',
+      () async {
+        final jwt = _jwt(futureExp);
+        when(
+          () => storage.loadWalletSigCookie(address),
+        ).thenAnswer((_) async => jwt);
+
+        expect(
+          await auth.storedWalletProofCookie(address),
+          'wallet-sig-$address=$jwt',
+        );
+        expect(auth.hasAnyVerifiedSession([address]), isFalse);
+      },
+    );
+
+    test('an expired proof on disk is no proof', () async {
+      when(
+        () => storage.loadWalletSigCookie(address),
+      ).thenAnswer((_) async => _jwt(pastExp));
+
+      expect(await auth.storedWalletProofCookie(address), isNull);
+    });
+
+    test(
+      'signing for one stores it without joining the shared cookies',
+      () async {
+        registerFallbackValue(const AuthTokenRequest(address: 'X'));
+        auth = AuthService(
+          api,
+          walletManager,
+          storage,
+          Dio()
+            ..httpClientAdapter = (_StubVerifyAdapter()..sig = _jwt(futureExp)),
+        );
+        when(
+          () => walletManager.isHardwareWallet(any()),
+        ).thenAnswer((_) async => false);
+        when(
+          () => walletManager.needsSocialKeyRecovery(any()),
+        ).thenAnswer((_) async => false);
+        when(
+          () => api.getAuthToken(any()),
+        ).thenAnswer((_) async => const ApiResponse<String>(result: 'TOKEN'));
+        when(
+          () => walletManager.signLoginChallengeForAddress(
+            any(),
+            message: any(named: 'message'),
+            token: any(named: 'token'),
+          ),
+        ).thenAnswer(
+          (_) async => const LoginChallengeSignature(
+            chain: Chain.solana,
+            signature: 'SIG',
+          ),
+        );
+        when(
+          () => storage.storeWalletSigCookie(any(), any()),
+        ).thenAnswer((_) async {});
+
+        final cookie = await auth.signWalletProofCookie(address);
+
+        expect(cookie, startsWith('wallet-sig-$address='));
+        verify(() => storage.storeWalletSigCookie(address, any())).called(1);
+        expect(auth.hasAnyVerifiedSession([address]), isFalse);
+      },
+    );
+
+    test('a refused proof leaves disk and the shared cookies', () async {
+      when(
+        () => storage.loadWalletSigCookie(address),
+      ).thenAnswer((_) async => _jwt(futureExp));
+      when(
+        () => storage.deleteWalletSigCookie(address),
+      ).thenAnswer((_) async {});
+      await auth.hasValidWalletSigForAny([address]);
+      expect(auth.hasAnyVerifiedSession([address]), isTrue);
+
+      final jwt = await storage.loadWalletSigCookie(address);
+      await auth.discardWalletProof(address, 'wallet-sig-$address=$jwt');
+
+      verify(() => storage.deleteWalletSigCookie(address)).called(1);
+      expect(auth.hasAnyVerifiedSession([address]), isFalse);
+    });
+
+    test('a proof signed while the refused one was out is kept', () async {
+      when(
+        () => storage.loadWalletSigCookie(address),
+      ).thenAnswer((_) async => _jwt(futureExp));
+      await auth.hasValidWalletSigForAny([address]);
+
+      await auth.discardWalletProof(address, 'wallet-sig-$address=OLDER');
+
+      verifyNever(() => storage.deleteWalletSigCookie(any()));
+      expect(auth.hasAnyVerifiedSession([address]), isTrue);
+    });
+
+    test('a hardware wallet is never asked to sign', () async {
+      when(
+        () => walletManager.isHardwareWallet(any()),
+      ).thenAnswer((_) async => true);
+
+      expect(await auth.signWalletProofCookie(address), isNull);
+      verifyNever(
+        () => walletManager.signLoginChallengeForAddress(
+          any(),
+          message: any(named: 'message'),
+          token: any(named: 'token'),
+        ),
+      );
+    });
+
+    test('a social wallet with no key is never asked to sign', () async {
+      when(
+        () => walletManager.isHardwareWallet(any()),
+      ).thenAnswer((_) async => false);
+      when(
+        () => walletManager.needsSocialKeyRecovery(any()),
+      ).thenAnswer((_) async => true);
+
+      expect(await auth.signWalletProofCookie(address), isNull);
+    });
+  });
+
   group('social wallet background signature verification', () {
     const socialAddr = 'SOCIAL_A';
 
@@ -891,6 +1049,32 @@ void main() {
         () => storage.loadWalletSigCookie(any()),
       ).thenAnswer((_) async => null);
     }
+
+    test('a proof signed for the logged-in wallet joins the shared cookies, '
+        'and another wallet\'s does not', () async {
+      // The session's own reads need the logged-in wallet's proof, or its
+      // following, likes and invites stay empty until the next launch.
+      auth = AuthService(
+        api,
+        walletManager,
+        storage,
+        Dio()
+          ..httpClientAdapter = (_StubVerifyAdapter()..sig = _jwt(futureExp)),
+      );
+      withNoCachedSig();
+      when(
+        () => walletManager.needsSocialKeyRecovery(any()),
+      ).thenAnswer((_) async => false);
+      await auth.initializeSession();
+      auth.forgetWalletSig(socialAddr);
+      expect(auth.hasAnyVerifiedSession([socialAddr]), isFalse);
+
+      await auth.signWalletProofCookie(socialAddr);
+      expect(auth.hasAnyVerifiedSession([socialAddr]), isTrue);
+
+      await auth.signWalletProofCookie('SOCIAL_B');
+      expect(auth.hasAnyVerifiedSession(['SOCIAL_B']), isFalse);
+    });
 
     test('a social wallet holding its key signs at login', () async {
       final adapter = _StubVerifyAdapter();
@@ -999,6 +1183,23 @@ void main() {
           adapter.gatedCookies.last,
           contains('wallet-sig-$socialAddr=$freshSig'),
         );
+      });
+
+      // A background read waiting for a proof (the block list) listens for
+      // this, so the re-sign that lands one has to announce it.
+      test('walletSigChanges fires when the re-sign lands a proof', () async {
+        when(
+          () => walletManager.needsSocialKeyRecovery(any()),
+        ).thenAnswer((_) async => false);
+        await auth.initializeSession();
+        var changes = 0;
+        void onChange() => changes++;
+        auth.walletSigChanges.addListener(onChange);
+
+        await dio.get<dynamic>('https://api.test/gated');
+        auth.walletSigChanges.removeListener(onChange);
+
+        expect(changes, greaterThan(0));
       });
 
       test(
@@ -1805,6 +2006,49 @@ void main() {
         expect(request!.walletType, WalletType.ledger);
         expect(signCalls, 0);
       });
+
+      // A background read (the block list behind every profile view) marks
+      // itself out of the re-sign. Its 401 must reach the caller with no sheet:
+      // otherwise every profile open asks a hardware wallet to sign, and asks
+      // again after each cancel.
+      for (final type in [
+        WalletType.ledger,
+        WalletType.seedVault,
+        WalletType.keystone,
+      ]) {
+        test(
+          'a ${type.name} 401 on an opted-out request shows no sheet',
+          () async {
+            registerSession(type);
+            await auth.initializeSession();
+            var sheetRequests = 0;
+            final sub = controller.requests.listen((r) {
+              sheetRequests++;
+              r.completer.complete(false);
+            });
+
+            await expectLater(
+              dio.get<dynamic>(
+                'https://api.test/gated',
+                options: Options(extra: {kSkipSignatureRetryExtra: true}),
+              ),
+              throwsA(
+                isA<DioException>().having(
+                  (e) => e.response?.statusCode,
+                  'status',
+                  401,
+                ),
+              ),
+            );
+            await sub.cancel();
+
+            expect(sheetRequests, 0);
+            expect(signCalls, 0);
+            expect(adapter.verifyBodies, isEmpty);
+            expect(adapter.gatedCookies, hasLength(1), reason: 'no retry');
+          },
+        );
+      }
     });
   });
 }

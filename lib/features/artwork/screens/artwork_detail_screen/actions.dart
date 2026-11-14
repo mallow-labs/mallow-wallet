@@ -538,6 +538,7 @@ extension _ArtworkDetailActions on _ArtworkDetailViewState {
         nsfw: artwork.nsfw,
         onNext: onNext,
         isSubmitting: isSubmitting,
+        showPermanentDelegateWarning: _corePermanentDelegate,
       ),
       onSubmit: (price) => context.read<MarketBloc>().add(
         MarketEvent.placeBid(mintAccount: widget.mintAccount, amount: price),

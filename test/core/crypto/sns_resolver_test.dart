@@ -54,34 +54,52 @@ List<int> _registryOwnedBy(String ownerBase58) => [
 const _vestingOwner = 'H8qDPn7iMZCs8EBwhCHpBrXjvxWgnX6GUmsC2qQvmKvp';
 
 void main() {
-  group('SnsResolver.isSolDomain', () {
-    test('accepts a normal .sol domain', () {
-      expect(SnsResolver.isSolDomain('mallow.sol'), isTrue);
+  group('SnsResolver.isSnsDomain', () {
+    test('accepts a .sns domain and a legacy .sol domain', () {
+      expect(SnsResolver.isSnsDomain('mallow.sns'), isTrue);
+      expect(SnsResolver.isSnsDomain('mallow.sol'), isTrue);
     });
 
-    test('rejects bare ".sol" with no name (length <= 4)', () {
-      // The guard requires length > 4 to keep the resolver from issuing a
-      // request for an empty name.
-      expect(SnsResolver.isSolDomain('.sol'), isFalse);
+    test('rejects a bare suffix with no name', () {
+      // Keeps the resolver from issuing a request for an empty name.
+      expect(SnsResolver.isSnsDomain('.sns'), isFalse);
+      expect(SnsResolver.isSnsDomain('.sol'), isFalse);
     });
 
-    test('rejects strings without the .sol suffix', () {
-      expect(SnsResolver.isSolDomain('mallow'), isFalse);
-      expect(SnsResolver.isSolDomain('mallow.eth'), isFalse);
-      expect(SnsResolver.isSolDomain(''), isFalse);
+    test('rejects strings without an SNS suffix', () {
+      expect(SnsResolver.isSnsDomain('mallow'), isFalse);
+      expect(SnsResolver.isSnsDomain('mallow.eth'), isFalse);
+      expect(SnsResolver.isSnsDomain('mallow.skr'), isFalse);
+      expect(SnsResolver.isSnsDomain(''), isFalse);
     });
 
     test('is case-insensitive and trims surrounding whitespace', () {
-      expect(SnsResolver.isSolDomain('MALLOW.SOL'), isTrue);
-      expect(SnsResolver.isSolDomain('  mallow.sol  '), isTrue);
-      expect(SnsResolver.isSolDomain('mallow.Sol'), isTrue);
+      expect(SnsResolver.isSnsDomain('MALLOW.SNS'), isTrue);
+      expect(SnsResolver.isSnsDomain('  mallow.sol  '), isTrue);
+      expect(SnsResolver.isSnsDomain('mallow.Sol'), isTrue);
     });
 
-    test('a Solana base58 address is NOT a .sol domain', () {
+    test('a Solana base58 address is NOT an SNS domain', () {
       expect(
-        SnsResolver.isSolDomain('So11111111111111111111111111111111111111112'),
+        SnsResolver.isSnsDomain('So11111111111111111111111111111111111111112'),
         isFalse,
       );
+    });
+
+    test('only .sol counts as legacy', () {
+      expect(SnsResolver.isLegacySolDomain('mallow.sol'), isTrue);
+      expect(SnsResolver.isLegacySolDomain('mallow.sns'), isFalse);
+    });
+  });
+
+  group('SnsResolver.snsNameFor', () {
+    test('reads a .sol name as its .sns twin', () {
+      expect(SnsResolver.snsNameFor(' Bonfida.SOL '), 'bonfida.sns');
+      expect(SnsResolver.snsNameFor('dex.bonfida.sol'), 'dex.bonfida.sns');
+    });
+
+    test('leaves a .sns name alone', () {
+      expect(SnsResolver.snsNameFor('bonfida.sns'), 'bonfida.sns');
     });
   });
 
@@ -127,6 +145,23 @@ void main() {
       );
     });
 
+    test('derives .sns and legacy .sol to the same registry', () async {
+      // SNS kept its registry when it moved to `.sns`: the label is the key.
+      final sns = await SnsResolver.deriveAccountKeys('bobtoshi.sns');
+      final sol = await SnsResolver.deriveAccountKeys('bobtoshi.sol');
+      expect(
+        sns!.registry.toBase58(),
+        'G2KGzA6ZZTrER4qJCtfecNYzW7Nn9pQrh8UyBWgCmvx3',
+      );
+      expect(sol!.all, sns.all);
+      expect(
+        (await SnsResolver.deriveAccountKeys(
+          'dex.bonfida.sns',
+        ))!.registry.toBase58(),
+        'HoFfFXqFHAC8RP3duuQNzag1ieUwJRBv1HtRNiWFq4Qu',
+      );
+    });
+
     test('is case- and whitespace-insensitive', () async {
       final keys = await SnsResolver.deriveAccountKeys('  BOBTOSHI.SOL ');
       expect(
@@ -145,6 +180,7 @@ void main() {
         );
         expect(await SnsResolver.deriveAccountKeys('.sol'), isNull);
         expect(await SnsResolver.deriveAccountKeys('sub..sol'), isNull);
+        expect(await SnsResolver.deriveAccountKeys('.sns'), isNull);
       },
     );
   });

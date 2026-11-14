@@ -137,5 +137,35 @@ void main() {
         hashed,
       );
     });
+
+    test('a Solana off-chain message names the app version it needs', () {
+      final text = ledgerSigningFailure(
+        _status(0x6A81),
+        chain: Chain.solana,
+        offchainMessage: true,
+      );
+      expect(text, contains('1.14'));
+      expect(
+        ledgerSigningFailure(
+          _status(0x6A83),
+          chain: Chain.solana,
+          offchainMessage: true,
+        ),
+        contains('too large'),
+      );
+      // Rejection and app errors read as for any other Solana request.
+      expect(
+        ledgerSigningFailure(
+          _status(0x6985),
+          chain: Chain.solana,
+          offchainMessage: true,
+        ),
+        contains('You rejected'),
+      );
+      expect(
+        ledgerSigningFailure(_status(0x6A81), chain: Chain.solana),
+        isNot(contains('1.14')),
+      );
+    });
   });
 }

@@ -3,9 +3,12 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mallow_wallet/core/models/account.dart' show WalletType;
 import 'package:mallow_wallet/features/browser/models/dapp_request.dart';
+import 'package:mallow_wallet/features/browser/models/solana_offchain_message.dart';
 import 'package:mallow_wallet/features/browser/services/dapp_permission_service.dart';
 import 'package:mallow_wallet/features/browser/services/dapp_request_coordinator.dart';
+import 'package:solana/base58.dart';
 
 void main() {
   const address = '11111111111111111111111111111111';
@@ -76,6 +79,28 @@ void main() {
   tearDown(() async {
     coordinator.dispose();
     await permissions.dispose();
+  });
+
+  test('a served request reports its namespace as activity', () async {
+    final activity = <String>[];
+    final watched = DappRequestCoordinator(
+      permissions: permissions,
+      currentWallet: () => wallet,
+      approveConnection: (request) => approve(request),
+      execute: (request) => execute(request),
+      isContextCurrent: (_) => current,
+      onActivity: activity.add,
+    );
+    addTearDown(watched.dispose);
+    await watched.handle(message('connect', {'onlyIfTrusted': true}), frame());
+    expect(activity, ['solana']);
+    // A method the wallet does not serve is not a sign of use.
+    await watched.handle(message('mine'), frame());
+    await watched.handle({
+      ...message('connect', {'silent': true}),
+      'namespace': 'eip155',
+    }, frame());
+    expect(activity, ['solana'], reason: 'no Ethereum wallet is offered');
   });
 
   test(
@@ -244,6 +269,395 @@ void main() {
       );
       expect(transactionResult['result'], isNotNull);
       expect(executions, 1);
+    },
+  );
+
+  test(
+    'Given a Ledger, off-chain messages are built natively and reach the review while raw messages stay refused',
+    () async {
+      const other = 'So11111111111111111111111111111111111111112';
+      wallet = const DappWallet(
+        id: 'ledger',
+        address: address,
+        canSign: true,
+        canSignMessages: false,
+        type: WalletType.ledger,
+      );
+      await permissions.grant(origin.origin, address);
+      DappSigningRequest? received;
+      execute = (request) async {
+        received = request;
+        return {'signature': 'sig'};
+      };
+      Map<String, dynamic> offchain(List<String> signers, [String? text]) => {
+        'message': text ?? 'Approve order 42',
+        'requiredSigners': [
+          for (final signer in signers) base64Encode(base58decode(signer)),
+        ],
+        'account': address,
+      };
+
+      final connect = await coordinator.handle(message('connect'), frame());
+      expect(connect['result'], containsPair('canSignOffchainMessages', true));
+      expect(connect['result'], containsPair('canSignMessages', false));
+
+      final signed = await coordinator.handle(
+        message('signOffchainMessage', offchain([other, address])),
+        frame(),
+      );
+      expect(signed['result'], {'signature': 'sig'});
+      expect(received!.method, 'signOffchainMessage');
+      final built = SolanaOffchainMessage.parse(received!.payloads.single);
+      expect(built.content, 'Approve order 42');
+      expect(built.signers, [address, other]);
+
+      // The connected account must be one of the signers.
+      final notSigner = await coordinator.handle(
+        message('signOffchainMessage', offchain([other])),
+        frame(),
+      );
+      expect(errorCode(notSigner), -32602);
+      final duplicate = await coordinator.handle(
+        message('signOffchainMessage', offchain([address, address])),
+        frame(),
+      );
+      expect(errorCode(duplicate), -32602);
+      final empty = await coordinator.handle(
+        message('signOffchainMessage', offchain([address], '')),
+        frame(),
+      );
+      expect(errorCode(empty), -32602);
+      expect(executions, 0, reason: 'only the valid request executed');
+    },
+  );
+
+  test(
+    'Connecting never asks for a signature, for any wallet; only an explicit sign-in does',
+    () async {
+      for (final type in WalletType.values) {
+        wallet = DappWallet(
+          id: type.name,
+          address: address,
+          canSign: type != WalletType.viewOnly,
+          type: type,
+        );
+        final connect = await coordinator.handle(message('connect'), frame());
+        expect(connect['result'], containsPair('publicKey', address));
+        await coordinator.handle(
+          message('connect', {'onlyIfTrusted': true}),
+          frame(),
+        );
+        await coordinator.handle(message('connect', {'silent': true}), frame());
+      }
+      expect(approvals, 1, reason: 'one grant per origin and address');
+      expect(executions, 0);
+    },
+  );
+
+  test(
+    'Given no connection, sign-in asks to connect, then signs the message it wrote and returns the account',
+    () async {
+      DappSigningRequest? received;
+      execute = (request) async {
+        received = request;
+        return {'signature': 'sig', 'signedMessage': 'msg'};
+      };
+      final result = await coordinator.handle(
+        message('signIn', {'nonce': 'abc12345', 'statement': 'Hello'}),
+        frame(),
+      );
+      expect(approvals, 1);
+      expect(await permissions.isGranted(origin.origin, address), isTrue);
+      expect(result['result'], containsPair('publicKey', address));
+      expect(result['result'], containsPair('signedMessage', 'msg'));
+      expect(received!.method, 'signIn');
+      expect(received!.options['offchainMessage'], isFalse);
+      expect(
+        utf8.decode(received!.payloads.single),
+        'example.org wants you to sign in with your Solana account:\n'
+        '$address\n\nHello\n\nNonce: abc12345',
+      );
+
+      // Connected now: a second sign-in signs without asking again.
+      await coordinator.handle(message('signIn'), frame());
+      expect(approvals, 1);
+    },
+  );
+
+  group('sign-in from a site that is not connected', () {
+    const other = 'So11111111111111111111111111111111111111112';
+    const ledger = DappWallet(
+      id: 'ledger',
+      address: address,
+      canSign: true,
+      canSignMessages: false,
+      type: WalletType.ledger,
+    );
+    const viewOnly = DappWallet(
+      id: 'view',
+      address: address,
+      canSign: false,
+      type: WalletType.viewOnly,
+    );
+    String? errorMessage(Map<String, Object?> result) =>
+        (result['error'] as Map?)?['message'] as String?;
+
+    test('naming another account asks to connect first, and reports the '
+        'mismatch only once the connection is approved', () async {
+      final result = await coordinator.handle(
+        message('signIn', {'address': other}),
+        frame(),
+      );
+      expect(approvals, 1, reason: 'the connect sheet came first');
+      expect(errorCode(result), 4100);
+      expect(errorMessage(result), contains('does not match'));
+      expect(executions, 0);
+      expect(await permissions.isGranted(origin.origin, address), isTrue);
+    });
+
+    test('a view-only wallet asks to connect first, and says it cannot sign '
+        'only once the connection is approved', () async {
+      wallet = viewOnly;
+      final result = await coordinator.handle(message('signIn'), frame());
+      expect(approvals, 1, reason: 'the connect sheet came first');
+      expect(errorCode(result), 4200);
+      expect(errorMessage(result), contains('view-only'));
+      expect(executions, 0);
+    });
+
+    test('a wallet that signs in only off-chain asks to connect first, then '
+        'says so, and signs the off-chain form', () async {
+      wallet = ledger;
+      final plain = await coordinator.handle(message('signIn'), frame());
+      expect(approvals, 1, reason: 'the connect sheet came first');
+      expect(errorCode(plain), 4200);
+      expect(errorMessage(plain), contains('off-chain'));
+      expect(executions, 0);
+
+      // The off-chain form is one a Ledger can sign.
+      DappSigningRequest? received;
+      execute = (request) async {
+        received = request;
+        return {'signature': 'sig'};
+      };
+      final offchain = await coordinator.handle(
+        message('signIn', {
+          'useOffchainMessage': {'messageVersion': 1},
+        }),
+        frame(),
+      );
+      expect(offchain['result'], containsPair('canSignOffchainMessages', true));
+      expect(received!.options['offchainMessage'], isTrue);
+      final built = SolanaOffchainMessage.parse(received!.payloads.single);
+      expect(built.signers, [address]);
+      expect(built.content, startsWith('example.org wants you to sign in'));
+    });
+
+    test(
+      'a rejected connection reads the same whichever wallet is active',
+      () async {
+        approve = (_) async {
+          approvals++;
+          return false;
+        };
+        final outcomes = <String>[];
+        for (final (active, params) in <(DappWallet, Map<String, dynamic>)>[
+          (wallet, {}),
+          (wallet, {'address': other}),
+          (wallet, {'address': address}),
+          (ledger, {}),
+          (viewOnly, {}),
+          (viewOnly, {'address': other}),
+        ]) {
+          wallet = active;
+          final result = await coordinator.handle(
+            message('signIn', params),
+            frame(),
+          );
+          outcomes.add(jsonEncode(result['error']));
+        }
+        expect(approvals, outcomes.length, reason: 'every request prompted');
+        expect(outcomes.toSet(), hasLength(1));
+        expect(outcomes.first, contains('4001'));
+        expect(executions, 0);
+        expect(await permissions.isGranted(origin.origin, address), isFalse);
+      },
+    );
+
+    test('a malformed request fails without a prompt, and the same way '
+        'whichever wallet is active', () async {
+      for (final params in <Map<String, dynamic>>[
+        {'statement': 'a\nb'},
+        {'address': 42},
+        {'version': '2'},
+        {'expirationTime': '2020-01-01T00:00:00Z'},
+        // Malformed and naming another account: still only malformed.
+        {'statement': 'a\nb', 'address': other},
+      ]) {
+        final outcomes = <String>[];
+        for (final active in [wallet, ledger, viewOnly]) {
+          wallet = active;
+          final result = await coordinator.handle(
+            message('signIn', params),
+            frame(),
+          );
+          expect(errorCode(result), -32602, reason: '$params');
+          outcomes.add(jsonEncode(result['error']));
+        }
+        expect(outcomes.toSet(), hasLength(1), reason: '$params');
+      }
+      expect(approvals, 0);
+      expect(executions, 0);
+    });
+  });
+
+  test(
+    'Given a connected site, a sign-in the wallet cannot answer fails at once',
+    () async {
+      await permissions.grant(origin.origin, address);
+      final otherAccount = await coordinator.handle(
+        message('signIn', {
+          'address': 'So11111111111111111111111111111111111111112',
+        }),
+        frame(),
+      );
+      expect(errorCode(otherAccount), 4100);
+      final malformed = await coordinator.handle(
+        message('signIn', {'statement': 'a\nb'}),
+        frame(),
+      );
+      expect(errorCode(malformed), -32602);
+
+      wallet = const DappWallet(
+        id: 'ledger',
+        address: address,
+        canSign: true,
+        canSignMessages: false,
+        type: WalletType.ledger,
+      );
+      final plain = await coordinator.handle(message('signIn'), frame());
+      expect(errorCode(plain), 4200);
+      expect((plain['error'] as Map)['message'], contains('off-chain'));
+
+      wallet = const DappWallet(
+        id: 'view',
+        address: address,
+        canSign: false,
+        type: WalletType.viewOnly,
+      );
+      final viewOnly = await coordinator.handle(message('signIn'), frame());
+      expect(errorCode(viewOnly), 4200);
+      expect((viewOnly['error'] as Map)['message'], contains('view-only'));
+
+      expect(approvals, 0);
+      expect(executions, 0);
+    },
+  );
+
+  group('sign-in validity', () {
+    late DateTime clock;
+    setUp(() {
+      clock = DateTime.utc(2026, 10, 28, 10);
+      coordinator.dispose();
+      coordinator = DappRequestCoordinator(
+        permissions: permissions,
+        currentWallet: () => wallet,
+        approveConnection: (request) => approve(request),
+        execute: (request) => execute(request),
+        isContextCurrent: (_) => current,
+        now: () => clock,
+      );
+    });
+
+    test('a request inside its window is signed', () async {
+      final result = await coordinator.handle(
+        message('signIn', {
+          'version': '1',
+          'issuedAt': '2026-10-28T10:02:00Z',
+          'notBefore': '2026-10-28T10:04:00Z',
+          'expirationTime': '2026-10-28T10:10:00Z',
+        }),
+        frame(),
+      );
+      expect(result['error'], isNull);
+      expect(executions, 1);
+    });
+
+    test('an expired, not yet valid, future-dated or unreadable request is '
+        'refused without any sheet', () async {
+      for (final (params, reason) in <(Map<String, dynamic>, String)>[
+        ({'expirationTime': '2026-10-28T10:00:00Z'}, 'expired'),
+        ({'expirationTime': '2026-10-28T09:00:00.000Z'}, 'expired'),
+        ({'notBefore': '2026-10-28T10:06:00Z'}, 'not valid yet'),
+        ({'issuedAt': '2026-10-28T10:06:00Z'}, 'dated in the future'),
+        ({'expirationTime': 'tomorrow'}, 'cannot read'),
+        ({'issuedAt': '2026-10-28 10:00:00'}, 'cannot read'),
+        ({'version': '2'}, 'version'),
+      ]) {
+        final result = await coordinator.handle(
+          message('signIn', params),
+          frame(),
+        );
+        expect(errorCode(result), -32602, reason: '$params');
+        expect(
+          (result['error'] as Map)['message'],
+          contains(reason),
+          reason: '$params',
+        );
+      }
+      expect(approvals, 0);
+      expect(executions, 0);
+    });
+
+    test(
+      'a request that expires while the connect sheet is open is not signed',
+      () async {
+        approve = (_) async {
+          approvals++;
+          clock = clock.add(const Duration(minutes: 11));
+          return true;
+        };
+        final result = await coordinator.handle(
+          message('signIn', {'expirationTime': '2026-10-28T10:10:00Z'}),
+          frame(),
+        );
+        expect(approvals, 1);
+        expect(errorCode(result), -32602);
+        expect((result['error'] as Map)['message'], contains('expired'));
+        expect(executions, 0);
+      },
+    );
+  });
+
+  test('Given a rejected connection, sign-in signs nothing', () async {
+    approve = (_) async => false;
+    final result = await coordinator.handle(message('signIn'), frame());
+    expect(errorCode(result), 4001);
+    expect(executions, 0);
+    expect(await permissions.isGranted(origin.origin, address), isFalse);
+  });
+
+  test(
+    'Given a view-only wallet, off-chain message signing is refused',
+    () async {
+      wallet = const DappWallet(
+        id: 'view',
+        address: address,
+        canSign: false,
+        type: WalletType.viewOnly,
+      );
+      await permissions.grant(origin.origin, address);
+      final connect = await coordinator.handle(message('connect'), frame());
+      expect(connect['result'], containsPair('canSignOffchainMessages', false));
+      final result = await coordinator.handle(
+        message('signOffchainMessage', {
+          'message': 'hi',
+          'requiredSigners': [base64Encode(base58decode(address))],
+        }),
+        frame(),
+      );
+      expect(errorCode(result), 4200);
+      expect(executions, 0);
     },
   );
 

@@ -427,7 +427,12 @@ void main() {
       ),
     );
     expect(find.byKey(const Key('review-pending')), findsOneWidget);
-    await tester.tap(find.byKey(const Key('approve-signing-early')));
+    final early = await tester.startGesture(
+      tester.getCenter(find.byKey(const Key('approve-signing-early'))),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 1300));
+    await early.up();
     for (var i = 0; i < 20 && !outcome.done; i++) {
       await tester.pump(const Duration(milliseconds: 100));
     }

@@ -64,9 +64,20 @@
       }
     },
     {
-      "_note": "ApiResponse<LoginResult> (POST /v0/login).",
+      "_note": "POST /v2/session: `{ result: { address, expiresAt } }` and nothing else. AuthService reads `result` (a missing one fails the login) and stores `expiresAt`; the user comes from /v0/currentUser next. The real route also sets the login-token cookie; this mock sends none, as the old /v0/login route did not.",
       "method": "POST",
-      "path": "/v0/login",
+      "path": "/v2/session",
+      "body": {
+        "result": {
+          "address": "",
+          "expiresAt": null
+        }
+      }
+    },
+    {
+      "_note": "GET /v0/currentUser: `result` parses as LoginResult — `user` REQUIRED (an empty object is a valid User), `userDetails`, `following`, `likesByContentType`, `invitedGumballCount` optional. A missing `result.user` fails the login.",
+      "method": "GET",
+      "path": "/v0/currentUser",
       "body": {
         "result": {
           "user": {}

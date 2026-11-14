@@ -3,22 +3,23 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/security/pin_attempt_verifier.dart';
 import '../../core/security/secure_storage.dart';
 import '../../di.dart';
 import '../theme/mallow_theme.dart';
 import 'custom_number_pad.dart';
 import 'mallow_sheet.dart';
+import 'pin_cooldown_pad.dart';
 
-/// Modal bottom-sheet PIN entry used as a step-up auth fallback when
-/// biometric is unavailable. Resolves with `true` when the user enters
-/// the correct PIN, `false` (or `null`) when they dismiss or never make
-/// it past the cooldown.
+/// Modal bottom-sheet PIN entry behind the re-auth gate and the step-up auth
+/// fallback. Resolves with `true` when the user enters the correct PIN, `false`
+/// after three wrong attempts or when the store cannot answer, and `null` when
+/// they dismiss it.
 ///
-/// Cooldown / lockout policy intentionally lives in [AppLockBloc] for
-/// app-unlock — this sheet is a lighter "prove it again" gate and simply
-/// rejects the prompt after three wrong attempts so the caller can fail
-/// the transaction. Repeated tries against a real attacker still require
-/// re-opening the signing flow.
+/// Every attempt goes through [PinAttemptVerifier], so it spends the same
+/// persisted budget as the lock screen: reopening the sheet buys no new
+/// guesses. While a cooldown runs the sheet stays up and says so, with the pad
+/// frozen, and dismissing it is the way out.
 class PinPromptSheet extends StatefulWidget {
   const PinPromptSheet._();
 
@@ -49,6 +50,11 @@ class _PinPromptSheetState extends State<PinPromptSheet>
   String _pin = '';
   bool _isError = false;
   int _failedAttempts = 0;
+  DateTime? _cooldownUntil;
+
+  late final PinAttemptVerifier _verifier = PinAttemptVerifier(
+    sl<SecureWalletStorage>(),
+  );
 
   late final AnimationController _shakeController;
   late final Animation<double> _shakeAnimation;
@@ -70,6 +76,13 @@ class _PinPromptSheetState extends State<PinPromptSheet>
         ]).animate(
           CurvedAnimation(parent: _shakeController, curve: Curves.easeInOut),
         );
+    unawaited(_loadCooldown());
+  }
+
+  Future<void> _loadCooldown() async {
+    final until = await _verifier.activeCooldown();
+    if (!mounted || until == null) return;
+    setState(() => _cooldownUntil = until);
   }
 
   @override
@@ -96,25 +109,36 @@ class _PinPromptSheetState extends State<PinPromptSheet>
   }
 
   Future<void> _validatePin() async {
-    final ok = await sl<SecureWalletStorage>().verifyPin(_pin);
+    final result = await _verifier.verify(_pin);
     if (!mounted) return;
-    if (ok) {
-      Navigator.of(context).pop(true);
-      return;
+    switch (result) {
+      case PinVerified():
+        Navigator.of(context).pop(true);
+      case PinCheckUnavailable():
+        Navigator.of(context).pop(false);
+      case PinCoolingDown(:final until):
+        _showRejection(cooldownUntil: until);
+      case PinRejected(:final cooldownUntil?):
+        _showRejection(cooldownUntil: cooldownUntil);
+      case PinRejected():
+        final attempts = _failedAttempts + 1;
+        if (attempts >= _maxAttempts) {
+          Navigator.of(context).pop(false);
+          return;
+        }
+        _failedAttempts = attempts;
+        _showRejection();
     }
-    final attempts = _failedAttempts + 1;
-    if (attempts >= _maxAttempts) {
-      Navigator.of(context).pop(false);
-      return;
-    }
+  }
+
+  void _showRejection({DateTime? cooldownUntil}) {
     setState(() {
-      _failedAttempts = attempts;
       _isError = true;
       _pin = '';
+      _cooldownUntil = cooldownUntil;
     });
-    // Error haptic paired with the wrong-PIN shake. Fired here — the single
-    // wrong-PIN branch of _validatePin — so it buzzes once per rejected
-    // attempt alongside the shake, never on rebuild.
+    // Error haptic paired with the wrong-PIN shake. Fired here, once per
+    // rejected attempt alongside the shake, never on rebuild.
     unawaited(HapticFeedback.heavyImpact());
     unawaited(_shakeController.forward(from: 0));
   }
@@ -152,7 +176,13 @@ class _PinPromptSheetState extends State<PinPromptSheet>
               ),
             ),
             const SizedBox(height: 24),
-            CustomNumberPad(onNumberTap: _onNumber, onBackspace: _onBackspace),
+            PinCooldownPad(
+              cooldownUntil: _cooldownUntil,
+              child: CustomNumberPad(
+                onNumberTap: _onNumber,
+                onBackspace: _onBackspace,
+              ),
+            ),
             const SizedBox(height: 24),
           ],
         ),

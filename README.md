@@ -11,8 +11,10 @@ Android, built with Flutter. There is no web or desktop build.
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Flutter](https://img.shields.io/badge/Flutter-3.44.8-02569B?logo=flutter&logoColor=white)](CONTRIBUTING.md)
 
-The App Store, Google Play and Solana dApp Store listings are not live yet. See
-[SECURITY.md](SECURITY.md) for the official builds and how to verify one.
+Get it on the [App Store](https://apps.apple.com/app/id6758995397),
+[Google Play](https://play.google.com/store/apps/details?id=com.mallow.wallet.android)
+or the Solana dApp Store. [SECURITY.md](SECURITY.md) lists the official builds
+and how to tell one from a copy.
 
 <p align="center">
   <img src="docs/images/gallery.webp" width="320"
@@ -44,13 +46,26 @@ Each claim names what proves it; [docs/security.md](docs/security.md) has the fu
   option only appears when the OS actually provides one, decided by a runtime
   probe rather than by the device model, which any ROM can claim.
 - **Social sign-in wallets have a different custody model**
-  ([`social_auth_service.dart`](lib/core/services/social_auth_service.dart)).
-  Google or Apple sign-in derives the key through Web3Auth from your social
-  identity, so it is reproducible off this device by whoever controls that
-  identity — which is what makes "restore by logging in again" work, and is a
-  real trust dependency. One secp256k1 key backs both the Ethereum and Tezos
-  addresses, so the two share a fate. Create or import a wallet instead if you
-  do not want that.
+  ([`lib/core/social_vault/`](lib/core/social_vault/)). A Google or Apple
+  wallet is a recovery phrase kept in a *social vault*: the backend stores it
+  encrypted and cannot open it. Your sign-in finds the vault; a key only your
+  devices hold opens it — a secret in your iCloud Keychain or Google backup
+  (end-to-end encrypted), or a passkey. So the wallet comes back after a
+  reinstall or on a new device, and someone with only your Google or Apple
+  account cannot open it — but someone with that account *and* your device
+  backup or a passkey can, and if you lose the account itself only an exported
+  recovery phrase brings the wallet back (Settings → Security & Privacy → Show
+  secrets). On iOS 16 and 17 no passkey can be added, so the web needs one from
+  an iOS 18 or Android device. Create or import a wallet instead if you want
+  none of this.
+- **Wallets from the older sign-in are a different thing again.** Before the
+  vault, Google and Apple sign-in ran through Web3Auth, and for such a wallet
+  the Google or Apple account alone reproduces the keys. The app no longer
+  contains Web3Auth and never moves such a wallet into a vault. One that is
+  already on a phone keeps working from its stored keys, carries a small mark
+  on its Google or Apple icon, and says what it is on its own screens. If the
+  phone is lost, it is recovered on the mallow website with the older sign-in:
+  export its keys there and import them in the app.
 - **Signing is gated by app lock; per-transaction auth is opt-in and off by
   default.** The floor is the lock screen — biometric-first with a PIN fallback,
   on cold start and after 60 seconds backgrounded. `TransactionAuthGate` can
@@ -164,8 +179,9 @@ the compiled binary.
 | `API_BASE_URL` | The backend every API call resolves against. | **Required.** No default. | Your own backend implementing `packages/mallow_api/openapi/openapi.yaml` — or `https://api.mallow.art` if you hold a `MALLOW_API_KEY`. Set the two together. |
 | `MALLOW_API_KEY` | Authenticates this build against a mallow-operated backend, sent as `x-api-key` to the `API_BASE_URL` hosts only. | Optional. The short path to a running app instead of writing a backend. | Ask in the mallow [Discord](https://mallow.art/discord) or email <support@mallow.art>. |
 | `RPC_PROXY_BASE_URL` | Solana JSON-RPC **and DAS**. Drives the portfolio and every NFT list. | Optional, strongly recommended. The default has no DAS. | A DAS-capable provider: [Helius](https://www.helius.dev), [Triton](https://triton.one), [QuickNode](https://www.quicknode.com). |
-| `WEB3AUTH_CLIENT_ID` | Sign in with Google / Apple. | Optional. | <https://dashboard.web3auth.io>. |
-| `ENV` | Cluster, explorer, Web3Auth network, rewards-store path. | Optional. Defaults to `production`. | You choose. 🛑 It is part of social key derivation — never change it for a live deployment. |
+| `GOOGLE_SERVER_CLIENT_ID`, `GOOGLE_IOS_CLIENT_ID`, `APPLE_SERVICES_ID` | Sign in with Google / Apple (the social vault). | Optional. Unset, that button reports it is not configured. | Your Google Cloud OAuth clients and Apple Services ID; your backend must accept their ID tokens. |
+| `PASSKEY_RP_ID` | The domain social-vault passkeys belong to. | Optional. Unset, no passkeys are offered. | A domain you serve association files from. |
+| `ENV` | Cluster, explorer, rewards-store path. | Optional. Defaults to `production`. | You choose. |
 
 [docs/configuration.md](docs/configuration.md) documents all of them; [`.env.example`](.env.example) is the template.
 

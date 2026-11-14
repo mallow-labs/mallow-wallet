@@ -115,7 +115,7 @@ void main() {
     });
   });
 
-  group('profilePortfolioAddresses', () {
+  group('portfolioSolanaAddresses', () {
     late _MockSession session;
     late SessionPortfolioAggregator agg;
 
@@ -124,12 +124,26 @@ void main() {
       agg = SessionPortfolioAggregator(session, _MockTokens());
     });
 
-    test('null outside profile mode — account sessions keep one wallet', () {
+    test('every Solana wallet in an account session, not just the signer', () {
+      when(() => session.isProfileMode).thenReturn(false);
+      when(() => session.sessionWallets).thenReturn([
+        _wallet('SOL_STANDARD'),
+        _wallet('SOL_LEGACY'),
+        _wallet('ETH_1', chain: 'ethereum'),
+      ]);
+      // Why: a seed account imported with a legacy path holds two Solana
+      // wallets, and the drawer's account row sums both. Null here sent the
+      // header down the active-signer path, which showed $0 for the empty
+      // wallet beside a funded account row.
+      expect(agg.portfolioSolanaAddresses(), ['SOL_STANDARD', 'SOL_LEGACY']);
+    });
+
+    test('null when the session holds no Solana wallet', () {
       when(() => session.isProfileMode).thenReturn(false);
       when(
         () => session.sessionWallets,
-      ).thenReturn([_wallet('SOL_A'), _wallet('SOL_B')]);
-      expect(agg.profilePortfolioAddresses(), isNull);
+      ).thenReturn([_wallet('ETH_1', chain: 'ethereum')]);
+      expect(agg.portfolioSolanaAddresses(), isNull);
     });
 
     test('the linked wallet when a profile holds a single Solana wallet', () {
@@ -142,7 +156,7 @@ void main() {
       // not guarantee that to be one of its linked wallets, so the header could
       // total a wallet the profile never linked. Naming the linked wallet keeps
       // the read inside the profile even when it links exactly one.
-      expect(agg.profilePortfolioAddresses(), ['SOL_A']);
+      expect(agg.portfolioSolanaAddresses(), ['SOL_A']);
     });
 
     test('the distinct Solana set when a profile spans multiple', () {
@@ -152,7 +166,7 @@ void main() {
         _wallet('SOL_B'),
         _wallet('SOL_A'), // duplicate
       ]);
-      expect(agg.profilePortfolioAddresses(), ['SOL_A', 'SOL_B']);
+      expect(agg.portfolioSolanaAddresses(), ['SOL_A', 'SOL_B']);
     });
   });
 

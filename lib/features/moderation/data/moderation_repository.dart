@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:injectable/injectable.dart';
 import 'package:mallow_api/mallow_api.dart' as api;
 
+import '../../../core/network/auth_service.dart' show kSkipSignatureRetryExtra;
 import '../models/moderation_models.dart';
 
 /// Thin wrapper over the `/v2` moderation writes — blocks and content reports.
@@ -11,9 +12,10 @@ import '../models/moderation_models.dart';
 /// concerns. Session state lives in `BlockStore`; the local, viewer-side
 /// content suppression lives in `ModerationHideStore`.
 ///
-/// Every route is `LoginAddress`-authenticated (the `login-token` cookie), so
-/// an anonymous caller gets a 401 — the flows in `moderation_actions.dart` gate
-/// on a profile first.
+/// Every route takes a signed login: the `login-token` cookie plus a
+/// `wallet-sig` proof for that address. An anonymous caller, or one with no
+/// proof, gets a 401. The flows in `moderation_actions.dart` gate on a profile
+/// and a proof first.
 @lazySingleton
 class ModerationRepository {
   ModerationRepository(this._apiV2);
@@ -68,8 +70,18 @@ class ModerationRepository {
 
   /// `GET /v2/blocks` — newest first, unpaged, server-capped at 1000 rows.
   /// Rows with no address are dropped: without one there is nothing to unblock.
-  Future<List<api.BlockedAccount>> listBlocks() async {
-    final response = await _apiV2.getBlockedAccounts();
+  ///
+  /// Always sent with `requireProof=true` (the client's default), so a login without a valid proof is
+  /// a 401 the caller can tell from "no blocks", not an empty list.
+  ///
+  /// [background] marks a load the user did not ask for. Its 401 is returned
+  /// to the caller and never re-signs: on a hardware wallet the re-sign is a
+  /// verify sheet. Without it (the Blocked accounts screen) the 401 re-signs
+  /// as usual and the read is retried.
+  Future<List<api.BlockedAccount>> listBlocks({bool background = false}) async {
+    final response = await _apiV2.getBlockedAccounts(
+      extras: background ? const {kSkipSignatureRetryExtra: true} : const {},
+    );
     return response.result
         .where((b) => b.address.isNotEmpty)
         .toList(growable: false);

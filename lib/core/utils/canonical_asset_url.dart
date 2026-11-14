@@ -204,16 +204,214 @@ String canonicalizeAssetUrl(String raw) {
 /// target when the image CDN is unreachable or 5xxing. Https forms return
 /// verbatim. Never use this to route around a 410 takedown verdict (see
 /// `ImageFallback.directUrlFor`, which HEAD-checks first).
+///
+/// A CID in another multibase keeps its spelling in the canonical form, and is
+/// respelled here as lower-case base32, the one spelling every gateway serves.
 String toDirectUrl(String canonical) {
   if (canonical.startsWith('ipfs://')) {
     return '${_trimSlash(Config.ipfsGatewayUrl)}/ipfs/'
-        '${canonical.substring('ipfs://'.length)}';
+        '${_gatewayPath(canonical.substring('ipfs://'.length))}';
   }
   if (canonical.startsWith('ar://')) {
     return '${_trimSlash(Config.arweaveGatewayUrl)}/'
         '${canonical.substring('ar://'.length)}';
   }
   return canonical;
+}
+
+String _gatewayPath(String rest) {
+  // The URL parser removes these wherever they are, so `%2<LF>F` is a separator too.
+  final cleaned = rest.replaceAll(RegExp(r'[\t\r\n]'), '');
+  // A non-CID spelling keeps its query in the canonical form, so unlike
+  // `_firstSegment`'s callers this one can see it. The CID also ends at what the URL
+  // parser or the gateway will read as a separator, or the path after it would be
+  // dropped with the padding the respelling removes.
+  final end = cleaned.indexOf(RegExp(r'[/\\?#]|%2[fF]'));
+  final segment = end == -1 ? cleaned : cleaned.substring(0, end);
+  // A CID names its bytes, so nothing after the path can matter except to change them: a
+  // gateway reads `?uri=` as a redirect and `?format=` as another encoding.
+  final path = cleaned.substring(segment.length).split(RegExp('[?#]')).first;
+  if (_cidRegex.hasMatch(segment)) return '$segment$path';
+  final cid = _cidBytes(
+    segment.replaceAllMapped(
+      RegExp('%[0-9a-fA-F]{2}'),
+      (hex) => String.fromCharCode(int.parse(hex[0]!.substring(1), radix: 16)),
+    ),
+  );
+  if (cid == null || !_namesMultihash(cid)) return rest;
+  return 'b${_base32Lower(cid)}$path';
+}
+
+const _base32 = 'abcdefghijklmnopqrstuvwxyz234567';
+const _base32Hex = '0123456789abcdefghijklmnopqrstuv';
+const _base36 = '0123456789abcdefghijklmnopqrstuvwxyz';
+const _base58Btc = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+const _base58Flickr =
+    '123456789abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ';
+const _base64 =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+const _base64Url =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+/// Multibase prefix to alphabet: the set a gateway decodes. Padded and unpadded
+/// variants share an alphabet, since padding is trimmed before decoding.
+const _multibases = <String, String>{
+  '0': '01',
+  '7': '01234567',
+  '9': '0123456789',
+  'f': '0123456789abcdef',
+  'F': '0123456789abcdef',
+  'b': _base32,
+  'B': _base32,
+  'c': _base32,
+  'C': _base32,
+  'v': _base32Hex,
+  'V': _base32Hex,
+  't': _base32Hex,
+  'T': _base32Hex,
+  'h': 'ybndrfg8ejkmcpqxot1uwisza345h769',
+  'k': _base36,
+  'K': _base36,
+  'z': _base58Btc,
+  'Z': _base58Flickr,
+  'm': _base64,
+  'M': _base64,
+  'u': _base64Url,
+  'U': _base64Url,
+};
+
+/// Alphabets where upper and lower case are different digits.
+const _caseSensitive = {_base58Btc, _base58Flickr, _base64, _base64Url};
+
+/// The radix decode is quadratic, and base2 of a 512-bit CID still fits.
+const _maxCidLength = 1024;
+
+/// A shorter digest is an inline (identity) CID or noise that decoded by chance.
+const _minDigestLength = 16;
+
+/// The raw bytes of a CID in any version or multibase, or null if it isn't one.
+List<int>? _cidBytes(String segment) {
+  if (segment.isEmpty) return null;
+  // Line breaks don't count: the decoders skip them, and so does the gateway, which has
+  // no such limit. What this bounds is the radix decoders' work on the characters they keep.
+  final kept = segment.replaceAll(RegExp(r'[\r\n]'), '').length;
+  if (kept > _maxCidLength) return null;
+  if (segment.length == 46 && segment.startsWith('Qm')) {
+    return _decodeDigits(segment, _base58Btc);
+  }
+  final alphabet = _multibases[segment[0]];
+  if (alphabet == null) return null;
+  // The gateway's decoders skip line breaks, and stop reading at padding whatever
+  // follows it.
+  final body = segment
+      .substring(1)
+      .replaceAll(RegExp(r'[\r\n]'), '')
+      .split('=')[0];
+  if (segment[0] == '0') return _decodeBase2(body);
+  return _decodeDigits(
+    _caseSensitive.contains(alphabet) ? body : body.toLowerCase(),
+    alphabet,
+  );
+}
+
+/// The gateway's base2: zeros on the left to whole bytes, then each 8 characters
+/// through `ParseInt`, so one can carry a sign and a negative one wraps.
+List<int>? _decodeBase2(String body) {
+  final padded = '0' * ((8 - body.length % 8) % 8) + body;
+  final chunk = RegExp(r'^([+-]?)([01]+)$');
+  final out = <int>[];
+  for (var i = 0; i < padded.length; i += 8) {
+    final match = chunk.firstMatch(padded.substring(i, i + 8));
+    if (match == null) return null;
+    final value = int.parse(match[2]!, radix: 2);
+    out.add(match[1] == '-' ? -value & 0xff : value);
+  }
+  return out;
+}
+
+List<int>? _decodeDigits(String body, String alphabet) {
+  final digits = <int>[];
+  for (var i = 0; i < body.length; i++) {
+    final digit = alphabet.indexOf(body[i]);
+    if (digit < 0) return null;
+    digits.add(digit);
+  }
+  final radix = alphabet.length;
+  if (radix & (radix - 1) == 0) {
+    // A power of two: leftover bits at the end are padding, whatever they hold.
+    final width = radix.bitLength - 1;
+    final out = <int>[];
+    var accumulator = 0;
+    var held = 0;
+    for (final digit in digits) {
+      accumulator = (accumulator << width) | digit;
+      held += width;
+      if (held >= 8) {
+        held -= 8;
+        out.add((accumulator >> held) & 0xff);
+        accumulator &= (1 << held) - 1;
+      }
+    }
+    return out;
+  }
+  final littleEndian = <int>[];
+  for (final digit in digits) {
+    var carry = digit;
+    for (var i = 0; i < littleEndian.length; i++) {
+      carry += littleEndian[i] * radix;
+      littleEndian[i] = carry & 0xff;
+      carry >>= 8;
+    }
+    while (carry > 0) {
+      littleEndian.add(carry & 0xff);
+      carry >>= 8;
+    }
+  }
+  for (final digit in digits) {
+    if (digit != 0) break;
+    littleEndian.add(0);
+  }
+  return littleEndian.reversed.toList();
+}
+
+/// Offset just past the varint at [start], or null if there isn't one.
+int? _skipVarint(List<int> bytes, int start) {
+  for (var i = start; i < bytes.length && i < start + 9; i++) {
+    if (bytes[i] & 0x80 == 0) return i + 1;
+  }
+  return null;
+}
+
+/// Whether [cid] holds a multihash. A bare sha2-256 multihash counts: gateways read
+/// it as a CIDv0, so `zQm…` and `bciq…` resolve.
+bool _namesMultihash(List<int> cid) {
+  if (cid.length == 34 && cid[0] == 0x12 && cid[1] == 0x20) return true;
+  if (cid.isEmpty || cid[0] != 0x01) return false;
+  final multihash = _skipVarint(cid, 1);
+  if (multihash == null) return false;
+  final digestLength = _skipVarint(cid, multihash);
+  if (digestLength == null) return false;
+  final digest = _skipVarint(cid, digestLength);
+  if (digest == null || digest != digestLength + 1) return false;
+  final length = cid[digestLength];
+  return length >= _minDigestLength && cid.length - digest >= length;
+}
+
+String _base32Lower(List<int> bytes) {
+  final out = StringBuffer();
+  var accumulator = 0;
+  var held = 0;
+  for (final byte in bytes) {
+    accumulator = (accumulator << 8) | byte;
+    held += 8;
+    while (held >= 5) {
+      held -= 5;
+      out.write(_base32[(accumulator >> held) & 31]);
+    }
+    accumulator &= (1 << held) - 1;
+  }
+  if (held > 0) out.write(_base32[(accumulator << (5 - held)) & 31]);
+  return out.toString();
 }
 
 String _trimSlash(String url) =>

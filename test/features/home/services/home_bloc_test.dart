@@ -5,6 +5,9 @@ import 'package:mallow_wallet/core/session/session_manager.dart';
 import 'package:mallow_wallet/features/home/data/home_feed_repository.dart';
 import 'package:mallow_wallet/features/home/services/home_bloc.dart';
 import 'package:mallow_wallet/features/portfolio/data/portfolio_repository.dart';
+import 'package:mocktail/mocktail.dart' show registerFallbackValue;
+
+import '../../moderation/support/moderation_fakes.dart';
 
 /// Behavioural tests for [HomeBloc]'s cache-first + progressive revalidation.
 ///
@@ -19,6 +22,8 @@ import 'package:mallow_wallet/features/portfolio/data/portfolio_repository.dart'
 /// the network/cache methods — the real mappers still run, so the state the
 /// screen renders is exercised end-to-end.
 void main() {
+  setUpAll(() => registerFallbackValue(() {}));
+
   // ---- fixtures -----------------------------------------------------------
 
   const feed = api.HomeFeedResponse();
@@ -124,6 +129,110 @@ void main() {
     expect((states.first as HomeLoaded).isRefreshing, isTrue);
     expect((bloc.state as HomeLoaded).isRefreshing, isFalse);
   });
+
+  // Home is always mounted, so a block or a report made anywhere has to take
+  // effect on the sections it already shows. The repository's mappers filter;
+  // the bloc only has to run them again.
+  group('when the block list or the reports change', () {
+    const blocked = 'A1';
+
+    /// A repository whose mappers leave out [blocked] after `block()`.
+    ({_FakeHomeRepo repo, TestNotifier changes, void Function() block})
+    harness() {
+      final m = moderationOver();
+      final r = _FakeHomeRepo(
+        feed: feed,
+        discover: discoverOneArtist,
+        recommended: emptyRecommended,
+        popularCollections: emptyCollections,
+        popularCurations: emptyCurations,
+        moderation: () => m.filter,
+      );
+      final changes = TestNotifier();
+      addTearDown(changes.dispose);
+      return (
+        repo: r,
+        changes: changes,
+        block: () {
+          m.blocks.blocked.value = {blocked};
+          changes.fire();
+        },
+      );
+    }
+
+    test('the sections are mapped again from the cache, and the blocked '
+        'account is gone before any request answers', () async {
+      final h = harness();
+      h.repo.cached = const CachedHomeSections(
+        feed: feed,
+        recommended: emptyRecommended,
+        discover: discoverOneArtist,
+        popularCollections: emptyCollections,
+        popularCurations: emptyCurations,
+      );
+      final bloc = HomeBloc(
+        h.repo,
+        _FakePortfolioRepo(),
+        moderationChanges: h.changes,
+      );
+      addTearDown(bloc.close);
+      await run(bloc, const HomeEvent.load());
+      expect((bloc.state as HomeLoaded).artists, hasLength(1));
+
+      final states = <HomeState>[];
+      final sub = bloc.stream.listen(states.add);
+      addTearDown(sub.cancel);
+      h.block();
+      await bloc.stream.firstWhere((s) => s is HomeLoaded && !s.isRefreshing);
+
+      expect((states.first as HomeLoaded).artists, isEmpty);
+      expect(states.whereType<HomeLoading>(), isEmpty);
+      expect((bloc.state as HomeLoaded).artists, isEmpty);
+    });
+
+    test('with no cache to paint from, the sections stay up while they are '
+        'mapped again', () async {
+      final h = harness();
+      final bloc = HomeBloc(
+        h.repo,
+        _FakePortfolioRepo(),
+        moderationChanges: h.changes,
+      );
+      addTearDown(bloc.close);
+      await run(bloc, const HomeEvent.load());
+
+      final states = <HomeState>[];
+      final sub = bloc.stream.listen(states.add);
+      addTearDown(sub.cancel);
+      h.block();
+      await bloc.stream.firstWhere((s) => s is HomeLoaded && !s.isRefreshing);
+
+      expect(states.whereType<HomeLoading>(), isEmpty, reason: 'no skeleton');
+      expect((bloc.state as HomeLoaded).artists, isEmpty);
+    });
+
+    test('a change that lands during a revalidation is applied when it '
+        'finishes', () async {
+      final h = harness();
+      final bloc = HomeBloc(
+        h.repo,
+        _FakePortfolioRepo(),
+        moderationChanges: h.changes,
+      );
+      addTearDown(bloc.close);
+      await run(bloc, const HomeEvent.load());
+
+      bloc.add(const HomeEvent.refresh());
+      await bloc.stream.firstWhere((s) => s is HomeLoaded && s.isRefreshing);
+      h.block();
+      await pumpEventQueue();
+      await pumpEventQueue();
+
+      final state = bloc.state as HomeLoaded;
+      expect(state.isRefreshing, isFalse);
+      expect(state.artists, isEmpty);
+    });
+  });
 }
 
 /// Fake repository: overrides the network + cache surface, keeps the real
@@ -135,6 +244,7 @@ class _FakeHomeRepo extends HomeFeedRepository {
     required this.recommended,
     required this.popularCollections,
     required this.popularCurations,
+    super.moderation,
   }) : super(_FakeApi(), _FakeApiV2(), _FakeDb(), _FakeSession());
 
   api.HomeFeedResponse feed;

@@ -22,6 +22,11 @@ import '../widgets/unblock_pill.dart';
 /// Lists `GET /v2/blocks` with a per-row Unblock. Two jobs: it is the only
 /// place a block can be undone, and it makes the feature legible to an App
 /// Review tester who needs to see that blocking is real and reversible.
+///
+/// The read sends `requireProof=true` and keeps the ordinary 401 re-sign
+/// ([BlockStore.refresh]): the user opened this screen, so a signature prompt
+/// is the right answer to a missing proof. Without it an unproven login came
+/// back as an empty list, which read as "You haven’t blocked anyone".
 class BlockedAccountsScreen extends StatefulWidget {
   const BlockedAccountsScreen({super.key});
 
@@ -81,15 +86,30 @@ class _BlockedAccountsScreenState extends State<BlockedAccountsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final store = sl<BlockStore>();
     return SettingsPageScaffold(
       title: 'Blocked accounts',
-      child: MallowRefreshIndicator(onRefresh: _load, child: _body(context)),
+      child: MallowRefreshIndicator(
+        onRefresh: _load,
+        // Rows are shown only while the store holds them blocked. A block or
+        // unblock that lands while a read is out makes that read's rows stale;
+        // the store drops them and re-reads, and the screen follows the store
+        // rather than the stale answer it was handed.
+        child: ValueListenableBuilder<Set<String>>(
+          valueListenable: store.blocked,
+          builder: (context, _, _) => _body(
+            context,
+            _accounts
+                ?.where((row) => store.isBlocked(row.address))
+                .toList(growable: false),
+          ),
+        ),
+      ),
     );
   }
 
-  Widget _body(BuildContext context) {
+  Widget _body(BuildContext context, List<api.BlockedAccount>? accounts) {
     final colors = context.mallowColors;
-    final accounts = _accounts;
 
     if (_error != null) {
       return _centered(

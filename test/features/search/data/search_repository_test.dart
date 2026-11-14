@@ -118,4 +118,40 @@ void main() {
     expect(result.isLoading, isFalse);
     expect(result.curations.single.id, 'curation');
   });
+
+  group('fetchArtworkResults', () {
+    setUpAll(() => registerFallbackValue(const api.ExploreRequest()));
+
+    final targets = <String, ArtworkDrilldownTarget>{
+      'category chip': SearchFilterType.categoryPhotography,
+      'tag chip': const TagDrilldownTarget('sunset'),
+      'landing listing type': SearchFilterType.buyNow,
+      'landing 1/1s': SearchFilterType.oneOfOne,
+    };
+    for (final MapEntry(key: name, value: target) in targets.entries) {
+      test('hides edition prints for a $name drilldown', () async {
+        final client = _Api();
+        when(
+          () => client.explore(any()),
+        ).thenAnswer((_) async => const api.ExploreResponse());
+
+        await SearchRepository(client, _Dio()).fetchArtworkResults(
+          target,
+          // The user's filter leaves `hidePrints` false, its default; that
+          // must not bring the prints back.
+          filter: const api.ExploreFilter(),
+        );
+
+        final request =
+            verify(() => client.explore(captureAny())).captured.single
+                as api.ExploreRequest;
+        expect(request.filter?.hidePrints, isTrue);
+        // The drilldown's own pin still applies.
+        expect(
+          request.filter,
+          target.pinTo(const api.ExploreFilter()).copyWith(hidePrints: true),
+        );
+      });
+    }
+  });
 }

@@ -8,7 +8,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import '../../../core/analytics/analytics_events.dart';
 import '../../../core/analytics/analytics_service.dart';
 import '../../../core/crypto/ens_resolver.dart';
-import '../../../core/crypto/sns_resolver.dart';
+import '../../../core/crypto/solana_name_resolver.dart';
 import '../../../core/data/mallow_tokens.dart' as mallow_tokens;
 import '../../../core/security/security_utils.dart' show SecurityUtils;
 import '../../../core/session/session_manager.dart';
@@ -251,7 +251,7 @@ class _TransferArtworkSheetState extends State<_TransferArtworkSheet> {
   /// themselves.
   String? _selfAddress;
 
-  // SNS (.sol) resolution state for the recipient field.
+  // Name (.sns/.sol/.skr, or .eth) resolution state for the recipient field.
   Timer? _resolveDebounce;
   bool _isResolving = false;
   String? _resolvedAddress;
@@ -460,11 +460,14 @@ class _TransferArtworkSheetState extends State<_TransferArtworkSheet> {
     }
 
     // Human-readable names resolve (debounced) to an address before the bloc
-    // sees them: `.eth` via ENS for EVM artworks, `.sol` via SNS for Solana.
+    // sees them: `.eth` via ENS for EVM artworks, `.sns`/`.sol`/`.skr` for
+    // Solana.
     final isDomain = _isEvm
         ? EnsResolver.isEthDomain(trimmed)
-        : SnsResolver.isSolDomain(trimmed);
-    final resolveDomain = _isEvm ? EnsResolver.resolve : SnsResolver.resolve;
+        : SolanaNameResolver.isDomain(trimmed);
+    final resolveDomain = _isEvm
+        ? EnsResolver.resolve
+        : SolanaNameResolver.resolve;
     if (isDomain) {
       setState(() => _isResolving = true);
       _setBlocRecipient('');
@@ -501,8 +504,9 @@ class _TransferArtworkSheetState extends State<_TransferArtworkSheet> {
   /// three-way chain the way the token send sheet does.
   Chain get _searchChain => _isEvm ? Chain.ethereum : Chain.solana;
 
-  /// Fills the field with the picked profile's handle and commits its address
-  /// for this chain. Deliberately does not advance — one profile can produce
+  /// Fills the field with the picked profile's handle (the full address when it
+  /// has no username) and commits its address for this chain. Deliberately does
+  /// not advance — one profile can produce
   /// several rows, so the user needs to see which wallet they landed on.
   void _onSuggestionPicked(RecipientSuggestion suggestion) {
     // Assigning `.text` does not fire `onChanged`, so the gate is not re-run.
@@ -553,7 +557,7 @@ class _TransferArtworkSheetState extends State<_TransferArtworkSheet> {
         : SecurityUtils.isValidSolanaAddress(trimmed);
     final isDomain = _isEvm
         ? EnsResolver.isEthDomain(trimmed)
-        : SnsResolver.isSolDomain(trimmed);
+        : SolanaNameResolver.isDomain(trimmed);
     if (!isAddress && !isDomain) return;
     final route = ModalRoute.of(routeContext);
     if (route == null || !route.isCurrent) return;
@@ -847,6 +851,11 @@ class _TransferArtworkSheetState extends State<_TransferArtworkSheet> {
                         color: colors.textSecondary,
                       ),
                     ),
+                    if (SolanaNameResolver.notice(_addressController.text)
+                        case final notice? when !_isEvm) ...[
+                      const SizedBox(height: MallowTheme.spacingSm),
+                      SendWarningNotice(message: notice),
+                    ],
                   ],
                   if (input.isEvm &&
                       input.maxQuantity != null &&
@@ -1336,7 +1345,7 @@ class _RecentRow extends StatelessWidget {
   }
 }
 
-/// Inline "Resolving…" row shown while a `.sol` domain resolves.
+/// Inline "Resolving…" row shown while a recipient name resolves.
 class _ResolvingRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {

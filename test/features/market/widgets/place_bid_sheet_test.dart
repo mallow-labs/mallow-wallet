@@ -1,4 +1,5 @@
 import 'package:bloc_test/bloc_test.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mallow_api/mallow_api.dart';
@@ -65,9 +66,13 @@ void main() {
     int? minBid = minBidRaw,
     AuctionMetadata? auction,
     String? artworkImageUrl,
+    ValueListenable<bool>? warning,
+    ValueChanged<MarketPrice>? onNext,
   }) => MaterialApp(
     home: Scaffold(
       body: PlaceBidSheet(
+        showPermanentDelegateWarning: warning,
+        onNext: onNext,
         artworkTitle: 'Amazing NFT',
         mintAccount: 'mint',
         artworkImageUrl: artworkImageUrl,
@@ -78,6 +83,119 @@ void main() {
       ),
     ),
   );
+
+  group('permanent delegate warning', () {
+    Finder warningText() => find.text(kCoreAuctionPermanentDelegateWarning);
+
+    testWidgets('shows, and the bid still goes through', (tester) async {
+      MarketPrice? submitted;
+      final warning = ValueNotifier(true);
+      addTearDown(warning.dispose);
+      await tester.pumpWidget(
+        buildSheet(warning: warning, onNext: (price) => submitted = price),
+      );
+
+      expect(warningText(), findsOneWidget);
+      await tester.enterText(find.byType(TextField), '2');
+      await tester.pump();
+      tester.widget<MallowButton>(find.byType(MallowButton)).onPressed!();
+      expect(submitted?.rawAmount, 2000000000);
+    });
+
+    testWidgets('appears when the read finishes after the sheet opened', (
+      tester,
+    ) async {
+      final warning = ValueNotifier(false);
+      addTearDown(warning.dispose);
+      await tester.pumpWidget(buildSheet(warning: warning));
+      expect(warningText(), findsNothing);
+
+      warning.value = true;
+      await tester.pump();
+      expect(warningText(), findsOneWidget);
+    });
+
+    testWidgets('says nothing without a delegate, and leaves bidding alone', (
+      tester,
+    ) async {
+      for (final warning in [null, ValueNotifier(false)]) {
+        MarketPrice? submitted;
+        await tester.pumpWidget(
+          buildSheet(warning: warning, onNext: (price) => submitted = price),
+        );
+        expect(warningText(), findsNothing);
+        await tester.enterText(find.byType(TextField), '2');
+        await tester.pump();
+        tester.widget<MallowButton>(find.byType(MallowButton)).onPressed!();
+        expect(submitted?.rawAmount, 2000000000);
+      }
+    });
+
+    testWidgets('keeps Next on screen on a small phone with the keyboard up', (
+      tester,
+    ) async {
+      tester.view
+        ..physicalSize = const Size(360, 640)
+        ..devicePixelRatio = 1
+        ..viewPadding = const FakeViewPadding(top: 24, bottom: 24);
+      addTearDown(tester.view.reset);
+      final warning = ValueNotifier(true);
+      addTearDown(warning.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: MallowTheme.lightTheme,
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => showMallowSheet<void>(
+                  context: context,
+                  isScrollControlled: true,
+                  builder: (_) => SheetStepSwitcher(
+                    child: PlaceBidSheet(
+                      artworkTitle: 'Test Artwork #07',
+                      mintAccount: 'mint',
+                      artworkImageUrl: 'https://example.com/artwork.png',
+                      minBidRaw: minBidRaw,
+                      auction: AuctionMetadata(
+                        startsAt: DateTime.now().subtract(
+                          const Duration(hours: 1),
+                        ),
+                        endsAt: DateTime.now().add(const Duration(hours: 1)),
+                        timeExtPeriod: 900,
+                        bidMint: solMint,
+                      ),
+                      tokenBalanceBloc: balanceBloc,
+                      showPermanentDelegateWarning: warning,
+                    ),
+                  ),
+                ),
+                child: const Text('Open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      Future<void> settle() async {
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+        await tester.pump(const Duration(seconds: 1));
+      }
+
+      await tester.tap(find.text('Open'));
+      await settle();
+      expect(tester.takeException(), isNull);
+      expect(warningText(), findsOneWidget);
+      expect(tester.getRect(warningText()).top, greaterThanOrEqualTo(0));
+
+      tester.view.viewInsets = const FakeViewPadding(bottom: 330);
+      await settle();
+      expect(tester.takeException(), isNull);
+      expect(
+        tester.getRect(find.byType(MallowButton)).bottom,
+        lessThanOrEqualTo(310),
+      );
+    });
+  });
 
   testWidgets('caps the artwork preview at 74px', (tester) async {
     await tester.pumpWidget(
@@ -120,10 +238,10 @@ void main() {
                   isScrollControlled: true,
                   builder: (_) => SheetStepSwitcher(
                     child: PlaceBidSheet(
-                      artworkTitle: 'Mini Toad #07',
+                      artworkTitle: 'Test Artwork #07',
                       mintAccount: 'mint',
                       artworkImageUrl: 'https://example.com/artwork.png',
-                      artistUsername: 'rahal_art',
+                      artistUsername: 'artist',
                       minBidRaw: 130000000,
                       currentHighestBid: const MarketPrice(
                         rawAmount: 120000000,

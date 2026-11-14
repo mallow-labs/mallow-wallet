@@ -12,21 +12,97 @@ import '../../../core/crypto/ed25519_verify.dart';
 import '../../../core/crypto/wallet_manager.dart';
 import '../../../core/data/mallow_tokens.dart'
     show isRegistryMint, mallowTokenMints, tokenByMint;
+import '../../../core/network/kept_alive_http.dart';
 import '../../../core/models/simulation_review.dart';
 import '../../../core/services/program_label_service.dart';
 import '../models/dapp_message_review.dart';
 import '../models/dapp_request.dart';
+import '../models/solana_offchain_message.dart';
+import 'solana_asset_instructions.dart';
 import 'solana_dapp_transaction.dart';
 import 'browser_transaction_tracker.dart';
 import 'solana_lookup_table_cache.dart';
 
+export 'solana_asset_instructions.dart' show solanaCoreProgram;
+
 const solanaSystemProgram = '11111111111111111111111111111111';
+const _computeBudgetProgram = 'ComputeBudget111111111111111111111111111111';
 const solanaTokenProgram = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 const solanaToken2022Program = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 const solanaNativeMint = 'So11111111111111111111111111111111111111112';
-const solanaCoreProgram = 'CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d';
 const _lookupProgram = 'AddressLookupTab1e1111111111111111111111111';
+const _memoPrograms = {
+  'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr',
+  'Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo',
+  'Memo4c2pN8afCj432Lb7RMVKi9PbQnnW7ewFFaV3oAH',
+};
 const _sol = ReviewAsset(id: solanaNativeMint, symbol: 'SOL', decimals: 9);
+
+/// A [SimulationReview.warnings] entry: the wallet signs for an instruction
+/// of a program this review has no reader for, so what the review lists is
+/// not all the transaction can do.
+const kSolanaUnreadProgramsWarning =
+    'Some instructions you sign for could not be read. The programs they run can change assets or permissions that are not shown here.';
+
+const _lookupsUnresolvedWarning =
+    'Address lookup tables could not be resolved. Some affected accounts are unknown.';
+
+/// The name a compressed NFT goes by when no asset lookup named it.
+const _compressedNftName = 'Compressed NFT';
+
+/// A name its creator chose, as the review may show it, or null when
+/// [value] is no text or nothing readable is left of it.
+///
+/// An NFT's name comes from metadata anyone can write, and the review draws
+/// it inside its own rows and card titles. So it is made one short line of
+/// plain text before it enters the review: no control characters; none of
+/// the characters that change the direction text is drawn in, which could
+/// reorder the words around the name; no characters that take up no width,
+/// which could make a name that looks empty; line breaks and tabs become one
+/// space; and it is cut at [max] characters, with an ellipsis.
+String? solanaCreatorText(Object? value, {int max = 64}) {
+  if (value is! String) return null;
+  final kept = <int>[];
+  for (final rune in value.runes) {
+    final lineBreakOrTab =
+        (rune >= 0x09 && rune <= 0x0D) ||
+        rune == 0x85 ||
+        rune == 0x2028 ||
+        rune == 0x2029;
+    final dropped =
+        // C0 and C1 controls.
+        rune <= 0x1F ||
+        (rune >= 0x7F && rune <= 0x9F) ||
+        // Direction marks, embeddings, overrides and isolates.
+        rune == 0x061C ||
+        rune == 0x200E ||
+        rune == 0x200F ||
+        (rune >= 0x202A && rune <= 0x202E) ||
+        (rune >= 0x2066 && rune <= 0x2069) ||
+        // Zero-width space, word joiner and byte-order mark.
+        rune == 0x200B ||
+        rune == 0x2060 ||
+        rune == 0xFEFF ||
+        // Half of a surrogate pair on its own, which is no character and
+        // which text layout refuses to draw.
+        (rune >= 0xD800 && rune <= 0xDFFF);
+    if (lineBreakOrTab || rune == 0x20) {
+      if (kept.isNotEmpty && kept.last != 0x20) kept.add(0x20);
+    } else if (!dropped) {
+      kept.add(rune);
+    }
+  }
+  if (kept.isNotEmpty && kept.last == 0x20) kept.removeLast();
+  final cleaned = String.fromCharCodes(kept).trim();
+  // Joiners shape the letters or emoji beside them and show nothing alone.
+  if (cleaned.runes.every((rune) => rune == 0x200C || rune == 0x200D)) {
+    return null;
+  }
+  final runes = cleaned.runes;
+  return runes.length > max
+      ? '${String.fromCharCodes(runes.take(max)).trimRight()}…'
+      : cleaned;
+}
 
 /// The most transactions of one batch the review simulates. A larger batch is
 /// still reviewed and signed as a whole, with a warning that its effects were
@@ -146,8 +222,46 @@ class SolanaMessageReview extends DappMessageReview {
   @override
   String? get signInStatement => _signIn?.statement;
 
-  SignInMessage? get _signIn =>
-      parseSignInMessage(text, address: address, chain: 'Solana');
+  SignInMessage? get _signIn => parseSignInMessage(
+    text,
+    address: address,
+    chain: 'Solana',
+    resourceList: true,
+  );
+}
+
+/// A `solana:signOffchainMessage` request. [bytes] is the whole version 1
+/// message the wallet built, which is what gets signed and what the exact
+/// bytes and digest show; the review reads the site's text and signers from
+/// [message].
+class SolanaOffchainMessageReview extends SolanaMessageReview {
+  SolanaOffchainMessageReview({
+    required this.message,
+    required super.origin,
+    required super.address,
+    required super.walletId,
+    required super.chain,
+  }) : super(bytes: message.bytes);
+  final SolanaOffchainMessage message;
+
+  @override
+  String get text => message.content;
+
+  @override
+  List<String> get coSigners => [
+    for (final signer in message.signers)
+      if (signer != address) signer,
+  ];
+
+  // A sign-in proves one wallet's ownership; with other signers required it
+  // is something else, so it gets the plain message review.
+  @override
+  Map<String, String> get signInFields =>
+      coSigners.isEmpty ? super.signInFields : const {};
+
+  @override
+  String? get signInStatement =>
+      coSigners.isEmpty ? super.signInStatement : null;
 }
 
 /// The browser owns its RPC transport so the dapp's cluster never accidentally
@@ -192,24 +306,56 @@ class SolanaDappAdapter {
   /// as [Config.solanaRpcUrl] does, merged into any query the base carries.
   static String dasUrl(String chain) {
     validateChain(chain);
-    final base = Uri.parse(Config.rpcProxyBaseUrl);
-    if (chain == 'solana:mainnet') return base.toString();
-    return base
+    return _onCluster(Config.rpcProxyBaseUrl, chain);
+  }
+
+  /// Where a review's own reads go ([simulationMethods]): the endpoint near
+  /// the user that [Config.solanaSimulationUrl] names, or null when the build
+  /// names none and they share [rpcUrl] and [dasUrl] with everything else.
+  static String? simulationUrl(String chain) {
+    validateChain(chain);
+    final base = Config.solanaSimulationUrl;
+    return base.isEmpty ? null : _onCluster(base, chain);
+  }
+
+  /// The reads [prepareTransaction] makes, which [simulationUrl] serves.
+  static const simulationMethods = {
+    'simulateTransaction',
+    'getMultipleAccounts',
+    'getAssetBatch',
+    'getFeeForMessage',
+  };
+
+  /// [base] for [chain]: devnet is selected with `network=devnet`, merged
+  /// into any query the base carries, as [Config.solanaRpcUrl] does.
+  static String _onCluster(String base, String chain) {
+    final uri = Uri.parse(base);
+    if (chain == 'solana:mainnet') return uri.toString();
+    return uri
         .replace(
           queryParameters: {
-            ...base.queryParametersAll,
+            ...uri.queryParametersAll,
             'network': const ['devnet'],
           },
         )
         .toString();
   }
 
-  /// One client for every adapter, so a review's calls reuse one kept-alive
-  /// connection instead of each paying for its own TLS handshake. The
+  /// One client for every adapter, so a review's calls reuse kept-alive
+  /// connections instead of each paying for its own TLS handshake. The
   /// browser builds an adapter per request.
-  static final _dio = Dio(
+  static final _dio = keptAliveDio(
     BaseOptions(
       connectTimeout: const Duration(seconds: 12),
+      receiveTimeout: const Duration(seconds: 20),
+    ),
+  );
+
+  /// The client for [simulationUrl]. It gives up on connecting sooner, since
+  /// a review that cannot reach it still has [_dio]'s path to fall back to.
+  static final _simulationDio = keptAliveDio(
+    BaseOptions(
+      connectTimeout: const Duration(seconds: 4),
       receiveTimeout: const Duration(seconds: 20),
     ),
   );
@@ -219,8 +365,34 @@ class SolanaDappAdapter {
     String method,
     List<Object?> params,
   ) async {
-    final url = method == 'getAssetBatch' ? dasUrl(chain) : rpcUrl(chain);
-    final response = await _dio.post<Object?>(
+    final simulation = simulationMethods.contains(method)
+        ? simulationUrl(chain)
+        : null;
+    if (simulation != null) {
+      try {
+        return await _post(_simulationDio, simulation, method, params);
+      } on DioException {
+        // Unreachable, refusing or rate-limited: the call goes the usual
+        // way, which costs this review time rather than its simulation.
+      } on FormatException {
+        // Not a JSON-RPC answer; likewise.
+      }
+    }
+    return _post(
+      _dio,
+      method == 'getAssetBatch' ? dasUrl(chain) : rpcUrl(chain),
+      method,
+      params,
+    );
+  }
+
+  static Future<Object?> _post(
+    Dio dio,
+    String url,
+    String method,
+    List<Object?> params,
+  ) async {
+    final response = await dio.post<Object?>(
       url,
       data: {
         'jsonrpc': '2.0',
@@ -237,6 +409,26 @@ class SolanaDappAdapter {
     }
     if (!body.containsKey('result')) throw const FormatException();
     return body['result'];
+  }
+
+  /// Opens the connections a mainnet review reads through, as many to each
+  /// host as the review has calls in flight there at once: the simulation,
+  /// the account read and the DAS batch.
+  static Future<void> warmConnections() async {
+    const chain = 'solana:mainnet';
+    final simulation = simulationUrl(chain);
+    if (simulation != null) {
+      await openConnections(
+        dioHead(_simulationDio),
+        simulation,
+        connections: 3,
+      );
+      return;
+    }
+    await Future.wait([
+      openConnections(dioHead(_dio), rpcUrl(chain), connections: 2),
+      openConnections(dioHead(_dio), dasUrl(chain)),
+    ]);
   }
 
   SolanaMessageReview prepareMessage({
@@ -263,6 +455,38 @@ class SolanaDappAdapter {
     );
   }
 
+  /// Reads back the off-chain message the coordinator built, so the review
+  /// shows exactly the bytes that will be signed.
+  SolanaOffchainMessageReview prepareOffchainMessage({
+    required Uint8List bytes,
+    required String origin,
+    required String address,
+    required String walletId,
+    required String chain,
+  }) {
+    validateChain(chain);
+    final SolanaOffchainMessage message;
+    try {
+      message = SolanaOffchainMessage.parse(bytes);
+    } on FormatException {
+      throw const DappException(-32602, 'Invalid off-chain message.');
+    }
+    if (!message.signers.contains(address))
+      throw const DappException(
+        -32602,
+        'The required signers must include the connected account.',
+      );
+    return SolanaOffchainMessageReview(
+      message: message,
+      origin: origin,
+      address: address,
+      walletId: walletId,
+      chain: chain,
+    );
+  }
+
+  /// Signs [review]'s exact bytes: a site's raw message, or a whole off-chain
+  /// message the wallet built.
   Future<Uint8List> signMessage(
     SolanaMessageReview review, {
     required void Function() ensureActive,
@@ -416,8 +640,9 @@ class SolanaDappAdapter {
   }
 
   /// A transaction reviewed without simulating it, for a batch larger than
-  /// [kMaxSimulatedSolanaBatch]: no RPC is called, so only its program calls
-  /// and Explorer link are known. It is checked and signed like any other.
+  /// [kMaxSimulatedSolanaBatch]: no RPC is called, so the review holds what
+  /// the transaction's own bytes ask for, its program calls and its Explorer
+  /// link. It is checked and signed like any other.
   /// [describeUnsimulated], on this adapter: what an approval given before
   /// the review signs.
   PreparedSolanaTransaction describeTransaction({
@@ -444,17 +669,49 @@ class SolanaDappAdapter {
     validateChain(chain);
     final frozen = Uint8List.fromList(transaction).asUnmodifiableView();
     final tx = parseDappTransaction(frozen, signer: address);
-    final keys = tx.compiledMessage.accountKeys
-        .map((k) => k.toBase58())
-        .toList();
+    final message = tx.compiledMessage;
+    final keys = message.accountKeys.map((k) => k.toBase58()).toList();
+    // Whoever asks for the signature can make a simulation unavailable (a
+    // batch too large to simulate, a node kept busy), so an unsimulated
+    // transaction is still read: the transfers the wallet makes, the
+    // compressed NFTs it sends and the permissions it gives are in its
+    // bytes. An account loaded from a lookup table cannot be named with no
+    // node to ask, and the review says so.
+    final warnings = <String>[];
+    final funds = <FundChange>[];
+    final accounts = <AccountChange>[];
+    final nfts = <NftChange>[];
+    decodeSolanaInstructions(
+      tx,
+      keys,
+      const {},
+      funds,
+      accounts,
+      warnings,
+      address,
+      nfts: nfts,
+    );
+    if (message is CompiledMessageV0 &&
+        message.addressTableLookups.isNotEmpty) {
+      warnings.add(_lookupsUnresolvedWarning);
+    }
+    if (solanaSignsUnreadProgram(tx, keys, address)) {
+      warnings.add(kSolanaUnreadProgramsWarning);
+    }
     return PreparedSolanaTransaction(
       frozen,
       SimulationReview(
         explorerUrl: _inspectorUrl(chain, tx),
         // Program ids always sit in the static keys; parsing enforces it.
         programCalls: solanaProgramCalls(
-          solanaInvocations(tx.compiledMessage.instructions, keys),
+          solanaInvocations(message.instructions, keys),
         ),
+        nftMetadata: {
+          for (final id in _coreDelegatedAssetIds(accounts))
+            id: const ReviewNftMetadata(),
+          for (final id in _compressedAssetIds(accounts, nfts))
+            id: const ReviewNftMetadata(name: _compressedNftName),
+        },
         payloadDigest: sha256.convert(frozen).toString(),
         origin: origin,
         walletId: walletId,
@@ -465,6 +722,10 @@ class SolanaDappAdapter {
         coverage: SimulationCoverage.unavailable,
         feePayer: keys.first,
         error: 'Simulation is unavailable.',
+        warnings: warnings.toSet().toList(),
+        funds: funds,
+        accounts: accounts,
+        nfts: nfts,
       ),
     );
   }
@@ -490,13 +751,19 @@ class SolanaDappAdapter {
     final nftMetadata = <String, ReviewNftMetadata>{};
     final tokenMetadata = <String, ReviewTokenMetadata>{};
     final singleSupply = <String>{};
+    var delegatedBy = const <String, Set<String>>{};
     var execution = SimulationExecution.unavailable;
+    var effectsUndecodable = false;
+    // Whether the transaction's own instructions have been read yet.
+    var decoded = false;
     int? slot;
     int? fee;
     var complete = false;
     // Both snapshots cover every inspected account, at one slot.
     var snapshotComplete = false;
     var tokenDecimals = const <String, int>{};
+    Future<List<Map<String, Object?>>?> inspectedAssets = Future.value();
+    var inspectedKeys = const <String>{};
     String? error;
     try {
       final message = tx.compiledMessage;
@@ -507,9 +774,7 @@ class SolanaDappAdapter {
             await _resolveLookups(chain, message.addressTableLookups),
           );
         } catch (_) {
-          warnings.add(
-            'Address lookup tables could not be resolved. Some affected accounts are unknown.',
-          );
+          warnings.add(_lookupsUnresolvedWarning);
         }
       }
       // Include the signer first even when the transaction has over 100 accounts.
@@ -537,6 +802,21 @@ class SolanaDappAdapter {
       // Awaited after the read: until then a failure is held for that await,
       // not reported as unhandled.
       simulation.ignore();
+      // The assets the review will name are, nearly always, among the
+      // accounts it inspects: a token's mint and a Core asset are accounts of
+      // the instructions that move them. So DAS is asked for all of them now,
+      // alongside the simulation, rather than after it for those it moved; a
+      // DAS record names only accounts that are assets. A transaction of
+      // System and compute-budget calls alone moves no asset to ask about.
+      if (!message.instructions.every(
+        (ix) => const {
+          solanaSystemProgram,
+          _computeBudgetProgram,
+        }.contains(keys[ix.programIdIndex]),
+      )) {
+        inspectedKeys = inspected.where((key) => key != address).toSet();
+        inspectedAssets = _assetBatch(chain, inspectedKeys.toList());
+      }
       Map<String, Object?> before = const {};
       try {
         before = _map(
@@ -556,6 +836,7 @@ class SolanaDappAdapter {
       for (var i = 0; i < inspected.length && i < preList.length; i++) {
         pre[inspected[i]] = _map(preList[i]);
       }
+      decoded = true;
       decodeSolanaInstructions(
         tx,
         keys,
@@ -564,6 +845,7 @@ class SolanaDappAdapter {
         accounts,
         warnings,
         address,
+        nfts: nfts,
       );
       final result = _map(await simulation);
       slot = _map(result['context'])['slot'] as int?;
@@ -583,9 +865,7 @@ class SolanaDappAdapter {
             for (final lookup in message.addressTableLookups) {
               _lookupTables.forget(chain, lookup.accountKey.toBase58());
             }
-            warnings.add(
-              'Address lookup tables could not be resolved. Some affected accounts are unknown.',
-            );
+            warnings.add(_lookupsUnresolvedWarning);
           }
         }
       }
@@ -630,25 +910,82 @@ class SolanaDappAdapter {
         } else if (beforeSlot != slot) {
           warnings.add(kSimulationSnapshotSlotsWarning);
         }
-        // Inner instructions carry token actions performed by other programs.
-        // A call the node parsed itself has no data left to decode; the
-        // account reads below still catch what it changed.
+        delegatedBy = solanaDelegationOrigins(
+          tx.compiledMessage.instructions,
+          keys,
+          inner,
+        );
+        // Inner instructions carry token actions performed by other programs,
+        // and the moves no balance of the wallet's shows: a compressed NFT, a
+        // stake account, a program's authority. A call the node parsed itself
+        // has no data left to decode; the account reads below still catch
+        // what a token call changed, and the fields the node names say what a
+        // stake, loader or System call did.
+        final innerFunds = <FundChange>[];
         for (final call in inner.values.expand((calls) => calls)) {
-          if (call.instruction == null) continue;
           try {
+            if (call.instruction == null) {
+              if (call.program == solanaSystemProgram) {
+                _applyParsedSystemCall(
+                  call.parsed,
+                  address,
+                  innerFunds,
+                  accounts,
+                  warnings,
+                );
+                continue;
+              }
+              final effect = decodeParsedSolanaAssetInstruction(
+                call.program,
+                call.parsed,
+                address,
+              );
+              if (effect != null) {
+                _applyAssetEffect(
+                  effect,
+                  address,
+                  true,
+                  innerFunds,
+                  accounts,
+                  nfts,
+                  warnings,
+                );
+              }
+              continue;
+            }
             decodeSolanaInstructions(
               tx,
               keys,
               pre,
-              <FundChange>[],
+              innerFunds,
               accounts,
               warnings,
               address,
               instructions: [call.instruction!],
+              nfts: nfts,
             );
           } catch (_) {
             // State deltas remain available when an inner call is malformed.
           }
+        }
+        // The simulation's balances already count what an inner call moved
+        // in or out of the wallet. What it moved out of another account the
+        // wallet controls is in no balance of the wallet's, so it is kept.
+        funds.addAll(innerFunds.where((f) => _isOffBalance(f, address)));
+        for (var i = 0; i < funds.length; i++) {
+          final fund = funds[i];
+          if (fund.isNet || !_isOffBalance(fund, address)) continue;
+          // Shown beside the simulated changes, which the review prefers to
+          // requested ones: these are the part of the outcome it cannot see.
+          funds[i] = FundChange(
+            asset: fund.asset,
+            address: fund.address,
+            rawAmount: fund.rawAmount,
+            evidence: fund.evidence,
+            from: fund.from,
+            to: fund.to,
+            isNet: true,
+          );
         }
         final postList = value['accounts'] is List
             ? value['accounts'] as List
@@ -677,7 +1014,9 @@ class SolanaDappAdapter {
           nfts.addAll(decodeCoreAssetDelta(key, old, next, address));
           final core = _coreState(next) ?? _coreState(old);
           if (core != null)
-            nftMetadata[key] = ReviewNftMetadata(name: core.name);
+            nftMetadata[key] = ReviewNftMetadata(
+              name: solanaCreatorText(core.name),
+            );
           final oldToken = _tokenState(old);
           final nextToken = _tokenState(next);
           final token = oldToken ?? nextToken;
@@ -763,25 +1102,67 @@ class SolanaDappAdapter {
     } catch (_) {
       error ??=
           'Simulation is unavailable. The effects and cost could not be verified.';
+      // A simulation that ran but whose answer could not be read to the end
+      // is not a success: what was read so far stays, and approving takes
+      // the same care as when it did not run.
+      if (execution == SimulationExecution.succeeded) {
+        execution = SimulationExecution.unavailable;
+        effectsUndecodable = true;
+      }
+      // What the bytes ask for does not depend on the node. When it failed
+      // before they were read, they are read now, with no account state.
+      if (!decoded) {
+        try {
+          decodeSolanaInstructions(
+            tx,
+            keys,
+            const {},
+            funds,
+            accounts,
+            warnings,
+            address,
+            nfts: nfts,
+          );
+        } catch (_) {
+          warnings.add(
+            'An instruction references accounts or data that could not be decoded.',
+          );
+        }
+      }
     }
     final succeeded = execution == SimulationExecution.succeeded;
     if (!succeeded) {
       fee = null;
     }
+    final compressed = _compressedAssetIds(accounts, nfts);
+    final coreDelegated = _coreDelegatedAssetIds(accounts);
     final assetIds = <String>{
       ...nfts.map((n) => n.assetId),
       ...accounts.map((a) => a.assetId).whereType<String>(),
       ...funds
-          .where((f) => f.asset.id != solanaNativeMint)
+          .where((f) => f.asset.id != solanaNativeMint && !_isUnknownMint(f))
           .map((f) => f.asset.id),
     }.take(100).toList();
-    // One DAS batch serves both the mints' identities and the review's
-    // names and images; a node that left out the fee is asked alongside it.
-    final assetBatch = _assetBatch(chain, assetIds);
+    // DAS serves both the mints' identities and the review's names and
+    // images. The batch sent with the simulation covers every inspected
+    // account; only an asset outside them, or every asset when that batch
+    // failed, is asked for now, alongside the fee a node left out.
+    final inspectedBatch = await inspectedAssets;
+    final wanted = assetIds.toSet();
+    final remaining = inspectedBatch == null
+        ? assetIds
+        : assetIds.where((id) => !inspectedKeys.contains(id)).toList();
+    final assetBatch = _assetBatch(chain, remaining);
     final feeLookup = succeeded && fee == null
         ? _feeForMessage(chain, tx, warnings)
         : null;
-    final assets = await assetBatch;
+    final asked = await assetBatch;
+    final assets = inspectedBatch == null && asked == null
+        ? null
+        : [
+            ...?inspectedBatch?.where((asset) => wanted.contains(asset['id'])),
+            ...?asked,
+          ];
     if (feeLookup != null) fee = await feeLookup;
     if (succeeded) {
       singleSupply.addAll(
@@ -790,7 +1171,14 @@ class SolanaDappAdapter {
           funds,
           nfts,
           warnings,
-          accounts.map((a) => a.assetId).whereType<String>(),
+          // Neither a compressed NFT nor a Core one has a mint account to
+          // read.
+          accounts
+              .map((a) => a.assetId)
+              .whereType<String>()
+              .where(
+                (id) => !compressed.contains(id) && !coreDelegated.contains(id),
+              ),
           decimals: tokenDecimals,
           assets: assets,
         ),
@@ -811,7 +1199,12 @@ class SolanaDappAdapter {
     }
     if (!complete)
       warnings.add(
-        'Some effects could not be decoded. Unknown programs, inner calls and NFT extensions may change additional assets or permissions.',
+        // Said in the review when the wallet's signature reaches a program
+        // it cannot read. The general statement stays with the review's
+        // coverage, since nearly every transaction is partial in that sense.
+        solanaSignsUnreadProgram(tx, keys, address)
+            ? kSolanaUnreadProgramsWarning
+            : 'Some effects could not be decoded. Unknown programs, inner calls and NFT extensions may change additional assets or permissions.',
       );
     if (assets != null) {
       try {
@@ -861,11 +1254,10 @@ class SolanaDappAdapter {
                   ].contains(interface)))
             continue;
           final content = _map(asset['content']);
-          final name = _map(content['metadata'])['name'];
           nftMetadata[id] = ReviewNftMetadata(
-            name: name is String && name.trim().isNotEmpty
-                ? name
-                : nftMetadata[id]?.name,
+            name:
+                solanaCreatorText(_map(content['metadata'])['name']) ??
+                nftMetadata[id]?.name,
             imageUrl: _nftImage(content),
           );
         }
@@ -875,9 +1267,21 @@ class SolanaDappAdapter {
     }
     // A single-supply mint DAS could not describe is still an NFT: the
     // review names it as one, with a placeholder image, rather than as a
-    // bare token account.
-    for (final id in singleSupply) {
+    // bare token account. So is a Core asset the wallet signs a delegate
+    // onto, whether or not its account or a lookup named it.
+    for (final id in {...singleSupply, ...coreDelegated}) {
       nftMetadata.putIfAbsent(id, () => const ReviewNftMetadata());
+    }
+    // So is a compressed NFT, which has no account of its own to read. One
+    // no lookup named is called what it is.
+    for (final id in compressed) {
+      final known = nftMetadata[id];
+      if (known?.name == null) {
+        nftMetadata[id] = ReviewNftMetadata(
+          name: _compressedNftName,
+          imageUrl: known?.imageUrl,
+        );
+      }
     }
     return PreparedSolanaTransaction(
       frozen,
@@ -890,6 +1294,7 @@ class SolanaDappAdapter {
               ),
         nftMetadata: nftMetadata,
         tokenMetadata: tokenMetadata,
+        delegatedBy: delegatedBy,
         payloadDigest: sha256.convert(frozen).toString(),
         origin: origin,
         walletId: walletId,
@@ -900,6 +1305,7 @@ class SolanaDappAdapter {
         coverage: complete
             ? SimulationCoverage.complete
             : SimulationCoverage.partial,
+        effectsUndecodable: effectsUndecodable,
         slot: slot,
         feeLamports: fee,
         feePayer: keys.first,
@@ -1032,7 +1438,7 @@ class SolanaDappAdapter {
     final singleSupply = <String>{};
     final mints = {
       ...funds
-          .where((f) => f.asset.id != solanaNativeMint)
+          .where((f) => f.asset.id != solanaNativeMint && !_isUnknownMint(f))
           .map((f) => f.asset.id),
       ...actionMints.where((id) => id != solanaNativeMint),
     }.take(100).toList();
@@ -1293,6 +1699,15 @@ _TokenState? _tokenState(Map<String, Object?> account) {
 }
 
 /// Requested instructions are intent, never presented as verified state deltas.
+///
+/// A transfer is given a direction only when the bytes prove one: out when
+/// the wallet is the source or the authority that signs for it, in when the
+/// destination is the wallet or a token account that is provably its own.
+/// Any other transfer is another account's and is listed without one.
+///
+/// [instructions] are calls another program made, from a simulation; without
+/// them the transaction's own instructions are read. [nfts] receives the
+/// compressed NFTs the instructions move.
 void decodeSolanaInstructions(
   SignedTx tx,
   List<String> keys,
@@ -1302,77 +1717,303 @@ void decodeSolanaInstructions(
   List<String> warnings,
   String signer, {
   List<CompiledInstruction>? instructions,
+  List<NftChange>? nfts,
 }) {
+  const evidence = ReviewEvidence.requestedInstruction;
+  // A program's own calls between accounts that are not the wallet's are its
+  // plumbing; only the transaction's own instructions are listed as such.
+  final topLevel = instructions == null;
   for (final instruction in instructions ?? tx.compiledMessage.instructions) {
     final program = keys[instruction.programIdIndex];
     final data = Uint8List.fromList(instruction.data.toList());
     final indexes = instruction.accountKeyIndexes;
     String at(int i) => keys[indexes[i]];
+    // An account that may be missing: one loaded from a lookup table that
+    // could not be resolved has an index past the known keys.
+    String? named(int i) => i < indexes.length && indexes[i] < keys.length
+        ? keys[indexes[i]]
+        : null;
+    // The wallet is one of the accounts the instruction names, so its
+    // signature reaches it. A call another program makes carries the
+    // signature on with it.
+    bool namesWallet() =>
+        indexes.any((i) => i < keys.length && keys[i] == signer);
+
+    // SOL that [from] sends [to]. [authorised] is the wallet signing for an
+    // account that is not its own address: one derived from it, a nonce
+    // account, a stake account.
+    void sol(
+      String? from,
+      String? to,
+      BigInt lamports, {
+      bool authorised = false,
+    }) {
+      if (from == signer && to == signer) return;
+      if (to == signer || from == signer) {
+        funds.add(
+          FundChange(
+            asset: _sol,
+            address: signer,
+            rawAmount: to == signer ? lamports : -lamports,
+            evidence: evidence,
+            from: from,
+            to: to,
+          ),
+        );
+      } else if (authorised && from != null) {
+        funds.add(
+          FundChange(
+            asset: _sol,
+            address: from,
+            rawAmount: -lamports,
+            evidence: evidence,
+            from: from,
+            to: to,
+          ),
+        );
+      } else if (from == null) {
+        throw RangeError('account');
+      } else if (topLevel) {
+        accounts.add(
+          AccountChange(
+            kind: AccountChangeKind.close,
+            address: from,
+            program: program,
+            description:
+                'Transfer of ${formatReviewAmount(lamports, 9)} SOL between other accounts',
+            beneficiary: to,
+            evidence: evidence,
+          ),
+        );
+      }
+    }
+
+    // A new account funded by [from] and owned by [owner]. The deposit
+    // leaves the wallet for an account another program controls, so it is a
+    // movement as well as an account change.
+    void create(String? from, String account, BigInt lamports, String owner) {
+      accounts.add(
+        AccountChange(
+          kind: AccountChangeKind.create,
+          address: account,
+          program: program,
+          description:
+              'Create account; rent deposit ${formatReviewAmount(lamports, 9)} SOL',
+          beneficiary: owner,
+          evidence: evidence,
+        ),
+      );
+      if (from == signer && lamports > BigInt.zero) {
+        funds.add(
+          FundChange(
+            asset: _sol,
+            address: signer,
+            rawAmount: -lamports,
+            evidence: evidence,
+            from: from,
+            to: account,
+          ),
+        );
+      }
+    }
+
+    void assign(String account, String owner) => accounts.add(
+      AccountChange(
+        kind: AccountChangeKind.authority,
+        address: account,
+        program: program,
+        description: 'Assign account to a program',
+        beneficiary: owner,
+        evidence: evidence,
+      ),
+    );
+
+    // A System or Token instruction that was not read. It gets a caution
+    // when the wallet is one of its accounts and it is one that can move or
+    // re-assign holdings, or one with no name at all. Any other is named in
+    // the program calls and needs none: upkeep of a mint, or an instruction
+    // about accounts that are not the wallet's. Returns whether it cautioned.
+    bool unread() {
+      if (!namesWallet() || !solanaUnreadInstructionIsRisky(program, data)) {
+        return false;
+      }
+      warnings.add(solanaUnreadInstructionWarning(program, data));
+      return true;
+    }
+
+    // The System Program ignores bytes after an instruction's own, so an
+    // instruction with more than [length] of them is read as the program
+    // runs it. The review still says they are there, when it is the
+    // wallet's instruction.
+    void extraBytes(int length) {
+      if (data.length > length && namesWallet()) {
+        warnings.add(solanaExtraBytesWarning(program, data));
+      }
+    }
+
     try {
-      if (program == solanaSystemProgram && data.length >= 4) {
-        final tag = ByteData.sublistView(data).getUint32(0, Endian.little);
-        if (tag == 2 && data.length == 12 && indexes.length >= 2) {
-          final amount = _u64(data, 4);
-          funds.add(
-            FundChange(
-              asset: _sol,
-              address: signer,
-              rawAmount: at(0) == signer ? -amount : amount,
-              evidence: ReviewEvidence.requestedInstruction,
-              from: at(0),
-              to: at(1),
-            ),
-          );
-        } else if (tag == 0 && data.length == 52 && indexes.length >= 2) {
-          accounts.add(
-            AccountChange(
-              kind: AccountChangeKind.create,
-              address: at(1),
-              program: program,
-              description:
-                  'Create account; rent deposit ${formatReviewAmount(_u64(data, 4), 9)} SOL',
-              evidence: ReviewEvidence.requestedInstruction,
-            ),
-          );
-        } else if (tag == 1 && data.length == 36 && indexes.isNotEmpty) {
-          accounts.add(
-            AccountChange(
-              kind: AccountChangeKind.authority,
-              address: at(0),
-              program: program,
-              description: 'Assign account to a program',
-              beneficiary: base58encode(data.sublist(4)),
-              evidence: ReviewEvidence.requestedInstruction,
-            ),
-          );
-        } else {
-          warnings.add(
-            'An additional system instruction could not be interpreted.',
-          );
+      if (program == solanaSystemProgram) {
+        final tag = data.length >= 4
+            ? ByteData.sublistView(data).getUint32(0, Endian.little)
+            : null;
+        // Where a seeded instruction's fields resume after its base address
+        // and its seed (a length, then that many bytes).
+        int afterSeed(int lengthAt) {
+          final length = _u64(data, lengthAt);
+          if (length > BigInt.from(32)) throw RangeError('seed');
+          return lengthAt + 8 + length.toInt();
         }
-      } else if (_isTokenProgram(program) && data.isNotEmpty) {
-        final tag = data[0];
-        if ((tag == 3 || tag == 12) &&
-            data.length >= 9 &&
-            indexes.length >= (tag == 12 ? 4 : 3)) {
+
+        if (tag == 2 && data.length >= 12 && indexes.length >= 2) {
+          sol(named(0), named(1), _u64(data, 4));
+          extraBytes(12);
+        } else if (tag == 0 && data.length >= 52 && indexes.length >= 2) {
+          create(
+            named(0),
+            at(1),
+            _u64(data, 4),
+            base58encode(data.sublist(20, 52)),
+          );
+          extraBytes(52);
+        } else if (tag == 3 && indexes.length >= 2) {
+          // CreateAccountWithSeed: base, seed, lamports, space, owner.
+          final rest = afterSeed(36);
+          create(
+            named(0),
+            at(1),
+            _u64(data, rest),
+            base58encode(data.sublist(rest + 16, rest + 48)),
+          );
+        } else if (tag == 1 && data.length >= 36 && indexes.isNotEmpty) {
+          assign(at(0), base58encode(data.sublist(4, 36)));
+          extraBytes(36);
+        } else if (tag == 9 && indexes.isNotEmpty) {
+          // AllocateWithSeed: base, seed, space, owner.
+          final rest = afterSeed(36);
+          assign(at(0), base58encode(data.sublist(rest + 8, rest + 40)));
+        } else if (tag == 10 && indexes.isNotEmpty) {
+          // AssignWithSeed: base, seed, owner.
+          final rest = afterSeed(36);
+          assign(at(0), base58encode(data.sublist(rest, rest + 32)));
+        } else if (tag == 11 && data.length >= 12 && indexes.length >= 3) {
+          // TransferWithSeed: [from, base, to]. The base signs for an
+          // account derived from it.
+          sol(named(0), named(2), _u64(data, 4), authorised: at(1) == signer);
+        } else if (tag == 5 && data.length >= 12 && indexes.length >= 5) {
+          // WithdrawNonceAccount: [nonce, to, sysvars…, authority].
+          sol(named(0), named(1), _u64(data, 4), authorised: at(4) == signer);
+          extraBytes(12);
+        } else if (tag == 7 && data.length >= 36 && indexes.length >= 2) {
+          // AuthorizeNonceAccount: [nonce, authority]; the new authority.
+          final next = base58encode(data.sublist(4, 36));
+          extraBytes(36);
+          if (at(1) == signer && next != signer) {
+            accounts.add(
+              AccountChange(
+                kind: AccountChangeKind.authority,
+                address: at(0),
+                program: program,
+                description: 'Control of a nonce account changes',
+                beneficiary: next,
+                evidence: evidence,
+              ),
+            );
+          }
+        } else {
+          unread();
+        }
+      } else if (_isTokenProgram(program)) {
+        final tag = data.isEmpty ? null : data[0];
+        // Token-2022's TransferCheckedWithFee is TransferChecked with the
+        // expected fee after it.
+        final withFee =
+            program == solanaToken2022Program &&
+            tag == 26 &&
+            data.length >= 11 &&
+            data[1] == 1;
+        final checked = tag == 12 || withFee;
+        // Whether the instruction was left unread without a caution.
+        var stepped = false;
+        if (((tag == 3 || tag == 12) &&
+                data.length >= 9 &&
+                indexes.length >= (checked ? 4 : 3)) ||
+            (withFee && indexes.length >= 4)) {
           final source = at(0);
-          final destination = at(tag == 12 ? 2 : 1);
+          final destination = named(checked ? 2 : 1);
+          final authority = named(checked ? 3 : 2);
           final state = _tokenState(before[source] ?? const {});
-          final mint = tag == 12 ? at(1) : state?.mint;
-          if (mint != null) {
-            final amount = _u64(data, 1);
+          final destinationState = destination == null
+              ? null
+              : _tokenState(before[destination] ?? const {});
+          final mint = checked
+              ? named(1)
+              : state?.mint ?? destinationState?.mint;
+          final amount = _u64(data, withFee ? 2 : 1);
+          // The Token programs ignore bytes after an instruction's own, so
+          // TransferChecked's decimals are there whatever follows them.
+          final decimals = withFee
+              ? data[10]
+              : tag == 12 && data.length >= 10
+              ? data[9]
+              : null;
+          final outgoing = state?.owner == signer || authority == signer;
+          final incoming =
+              !outgoing &&
+              destination != null &&
+              (destinationState?.owner == signer ||
+                  (mint != null &&
+                      solanaAssociatedTokenAddress(signer, mint, program) ==
+                          destination));
+          if (outgoing || incoming) {
+            funds.add(
+              FundChange(
+                // A plain Transfer names no mint. With no account state to
+                // read it from, the token account stands in for it (see
+                // [_isUnknownMint]), so the transfer is still shown.
+                asset: ReviewAsset(
+                  id: mint ?? source,
+                  symbol: 'Token',
+                  decimals: decimals,
+                ),
+                address: outgoing ? source : destination!,
+                rawAmount: outgoing ? -amount : amount,
+                evidence: evidence,
+                from: source,
+                to: destination,
+              ),
+            );
+          } else if (topLevel) {
+            accounts.add(
+              AccountChange(
+                kind: AccountChangeKind.close,
+                address: source,
+                program: program,
+                assetId: mint,
+                description:
+                    'Transfer of ${formatReviewAmount(amount, decimals)}${decimals == null ? ' of a token' : ' tokens'} between other accounts',
+                beneficiary: destination,
+                evidence: evidence,
+              ),
+            );
+          }
+        } else if ((tag == 8 || tag == 15) &&
+            data.length >= 9 &&
+            indexes.length >= 3) {
+          // Burn and BurnChecked: [account, mint, authority].
+          final source = at(0);
+          final state = _tokenState(before[source] ?? const {});
+          if (state?.owner == signer || named(2) == signer) {
             funds.add(
               FundChange(
                 asset: ReviewAsset(
-                  id: mint,
+                  id: named(1) ?? state?.mint ?? source,
                   symbol: 'Token',
-                  decimals: tag == 12 && data.length == 10 ? data[9] : null,
+                  decimals: tag == 15 && data.length >= 10 ? data[9] : null,
                 ),
                 address: source,
-                rawAmount: state?.owner == signer ? -amount : amount,
-                evidence: ReviewEvidence.requestedInstruction,
+                rawAmount: -_u64(data, 1),
+                evidence: evidence,
                 from: source,
-                to: destination,
               ),
             );
           }
@@ -1388,7 +2029,7 @@ void decodeSolanaInstructions(
               beneficiary: at(tag == 13 ? 2 : 1),
               rawAllowance: _u64(data, 1),
               balance: state?.amount,
-              evidence: ReviewEvidence.requestedInstruction,
+              evidence: evidence,
             ),
           );
         } else if (tag == 5) {
@@ -1399,7 +2040,7 @@ void decodeSolanaInstructions(
               program: program,
               assetId: _tokenState(before[at(0)] ?? const {})?.mint,
               description: 'Revoke token spending permission',
-              evidence: ReviewEvidence.requestedInstruction,
+              evidence: evidence,
             ),
           );
         } else if ((tag == 10 || tag == 11) && indexes.length >= 2) {
@@ -1414,20 +2055,31 @@ void decodeSolanaInstructions(
               description: tag == 10
                   ? 'Freeze token account'
                   : 'Thaw token account',
-              evidence: ReviewEvidence.requestedInstruction,
+              evidence: evidence,
             ),
           );
         } else if (tag == 6 && data.length >= 3) {
+          // SetAuthority: the authority's type, then whether a new one
+          // follows: 0 removes the authority, 1 hands it to the 32 bytes
+          // after. The program ignores whatever comes after those, so more
+          // bytes must not turn "handed on" into "removed". Anything else is
+          // not an instruction the program runs, and is not given a meaning.
+          final String next;
+          if (data[2] == 0) {
+            next = 'Remove authority';
+          } else if (data[2] == 1 && data.length >= 35) {
+            next = base58encode(data.sublist(3, 35));
+          } else {
+            throw const FormatException('authority');
+          }
           accounts.add(
             AccountChange(
               kind: AccountChangeKind.authority,
               address: at(0),
               program: program,
               description: 'Change token authority (type ${data[1]})',
-              beneficiary: data[2] == 1 && data.length == 35
-                  ? base58encode(data.sublist(3))
-                  : 'Remove authority',
-              evidence: ReviewEvidence.requestedInstruction,
+              beneficiary: next,
+              evidence: evidence,
             ),
           );
         } else if (tag == 9) {
@@ -1443,17 +2095,18 @@ void decodeSolanaInstructions(
                 program: program,
                 description: 'Close token account and refund rent',
                 beneficiary: at(1),
-                evidence: ReviewEvidence.requestedInstruction,
+                evidence: evidence,
               ),
             );
         } else {
-          warnings.add(
-            'A token instruction or extension could not be interpreted.',
-          );
+          stepped = !unread();
         }
-        if (program == solanaToken2022Program)
+        // Extensions act on tokens that move or change hands. An instruction
+        // stepped over above does neither to the wallet's, so it does not
+        // bring this caution with it.
+        if (program == solanaToken2022Program && !stepped)
           warnings.add('Token-2022 extensions may cause additional effects.');
-      } else if (program != 'ComputeBudget111111111111111111111111111111') {
+      } else if (program != _computeBudgetProgram) {
         accounts.add(
           AccountChange(
             kind: AccountChangeKind.contractCall,
@@ -1461,9 +2114,21 @@ void decodeSolanaInstructions(
             program: program,
             description:
                 'Program call: effects may include funds, NFTs or permissions',
-            evidence: ReviewEvidence.requestedInstruction,
+            evidence: evidence,
           ),
         );
+        final effect = decodeSolanaAssetInstruction(program, data, named);
+        if (effect != null) {
+          _applyAssetEffect(
+            effect,
+            signer,
+            namesWallet(),
+            funds,
+            accounts,
+            nfts ?? <NftChange>[],
+            warnings,
+          );
+        }
       }
     } catch (_) {
       warnings.add(
@@ -1471,6 +2136,339 @@ void decodeSolanaInstructions(
       );
     }
   }
+}
+
+/// Adds what an asset program's instruction does to the review, when it
+/// concerns the wallet: its compressed NFT moves or gets a delegate, its Core
+/// NFT gets one, or something it controls is handed on or withdrawn. Another
+/// account's are left out. [namesWallet] is whether the wallet is among the
+/// instruction's accounts, which decides whether one that could not be read
+/// is its concern.
+void _applyAssetEffect(
+  SolanaAssetEffect effect,
+  String signer,
+  bool namesWallet,
+  List<FundChange> funds,
+  List<AccountChange> accounts,
+  List<NftChange> nfts,
+  List<String> warnings,
+) {
+  const evidence = ReviewEvidence.requestedInstruction;
+  switch (effect) {
+    case CompressedNftTransfer(:final assetId, :final owner, :final to):
+      if (owner == to || (owner != signer && to != signer)) return;
+      nfts.add(
+        NftChange(
+          kind: NftChangeKind.transfer,
+          assetId: assetId,
+          description: 'Compressed NFT ownership changes',
+          evidence: evidence,
+          from: owner,
+          to: to,
+        ),
+      );
+    case CompressedNftBurn(:final assetId, :final owner):
+      if (owner != signer) return;
+      nfts.add(
+        NftChange(
+          kind: NftChangeKind.burn,
+          assetId: assetId,
+          description: 'Compressed NFT burned',
+          evidence: evidence,
+          from: owner,
+        ),
+      );
+    case CompressedNftDelegation(
+      :final assetId,
+      :final owner,
+      :final delegate,
+      :final freeze,
+    ):
+      if (owner != signer) return;
+      // Naming the owner as its own delegate is how one is removed.
+      final revoked = delegate == owner;
+      accounts.add(
+        AccountChange(
+          kind: revoked ? AccountChangeKind.revoke : AccountChangeKind.approve,
+          address: assetId,
+          program: solanaBubblegumProgram,
+          assetId: assetId,
+          description: revoked
+              ? 'Compressed NFT delegate removed'
+              : 'Compressed NFT delegate',
+          beneficiary: revoked ? null : delegate,
+          rawAllowance: revoked ? null : BigInt.one,
+          evidence: evidence,
+        ),
+      );
+      if (freeze) {
+        accounts.add(
+          AccountChange(
+            kind: AccountChangeKind.freeze,
+            address: assetId,
+            program: solanaBubblegumProgram,
+            assetId: assetId,
+            description: 'Freeze compressed NFT',
+            evidence: evidence,
+          ),
+        );
+      }
+    case CoreNftDelegation(
+      :final assetId,
+      :final owner,
+      :final delegate,
+      :final power,
+    ):
+      // The wallet signs for the asset, and names someone else.
+      if (owner != signer || delegate == signer) return;
+      accounts.add(
+        AccountChange(
+          kind: AccountChangeKind.approve,
+          address: assetId,
+          program: solanaCoreProgram,
+          assetId: assetId,
+          description: 'Core NFT ${power.name} delegate',
+          beneficiary: delegate,
+          rawAllowance: BigInt.one,
+          power: power,
+          evidence: evidence,
+        ),
+      );
+    case AuthorityHandover(
+      :final program,
+      :final account,
+      :final what,
+      :final current,
+      :final next,
+    ):
+      // Only what the wallet controls now, and would not afterwards.
+      if (current != signer || next == signer) return;
+      accounts.add(
+        AccountChange(
+          kind: AccountChangeKind.authority,
+          address: account,
+          program: program,
+          description: 'Control of $what changes',
+          beneficiary: next ?? 'Remove authority',
+          evidence: evidence,
+        ),
+      );
+    case StakeWithdrawal(
+      :final account,
+      :final authority,
+      :final to,
+      :final lamports,
+    ):
+      if (authority != signer) return;
+      funds.add(
+        FundChange(
+          asset: _sol,
+          // To the wallet it is the wallet's own balance that changes; to
+          // anyone else it leaves the stake account, which no balance of the
+          // wallet's shows (see [_isOffBalance]).
+          address: to == signer ? signer : account,
+          rawAmount: to == signer ? lamports : -lamports,
+          evidence: evidence,
+          from: account,
+          to: to,
+        ),
+      );
+    case UnreadAssetInstruction(:final program):
+      if (namesWallet) warnings.add(solanaUnreadAssetWarning(program));
+  }
+}
+
+/// What a System call the node parsed itself does to something the wallet
+/// controls outside its own balance. A node reports the calls a program makes
+/// in its own form, named fields and no data, for the programs it can parse,
+/// the System Program among them: inside another program's call these arrive
+/// only like this, so a reader of bytes alone never sees them.
+///
+/// The wallet's own SOL is in the simulation's balances already, and a
+/// program's upkeep of its own accounts is its plumbing. Neither is listed.
+/// What is: SOL the wallet signs out of a nonce account or an account derived
+/// from it, the wallet's own account or one derived from it handed to a
+/// program, and a nonce account's authority handed on.
+void _applyParsedSystemCall(
+  Object? parsed,
+  String signer,
+  List<FundChange> funds,
+  List<AccountChange> accounts,
+  List<String> warnings,
+) {
+  if (parsed is! Map) return;
+  final type = parsed['type'];
+  final info = parsed['info'] is Map
+      ? (parsed['info'] as Map).cast<String, Object?>()
+      : const <String, Object?>{};
+  String? text(String key) {
+    final value = info[key];
+    return value is String && value.isNotEmpty ? value : null;
+  }
+
+  const program = solanaSystemProgram;
+  const evidence = ReviewEvidence.requestedInstruction;
+  void unread(String name) =>
+      warnings.add(solanaUnreadNamedInstructionWarning(program, name));
+
+  // SOL that [authority] signs out of [from], an account that is not the
+  // wallet's own address. What reaches the wallet is in its balance.
+  void offBalance(String name, String? from, String? to, String? authority) {
+    if (authority != signer || from == signer || to == signer) return;
+    final lamports = switch (info['lamports']) {
+      final int value when value >= 0 => BigInt.from(value),
+      final String value => BigInt.tryParse(value),
+      _ => null,
+    };
+    if (from == null || lamports == null || lamports.isNegative) {
+      return unread(name);
+    }
+    funds.add(
+      FundChange(
+        asset: _sol,
+        address: from,
+        rawAmount: -lamports,
+        evidence: evidence,
+        from: from,
+        to: to,
+      ),
+    );
+  }
+
+  void handOver(String name, String? account, String? next, String what) {
+    if (account == null || next == null) return unread(name);
+    accounts.add(
+      AccountChange(
+        kind: AccountChangeKind.authority,
+        address: account,
+        program: program,
+        description: what,
+        beneficiary: next,
+        evidence: evidence,
+      ),
+    );
+  }
+
+  switch (type) {
+    case 'withdrawFromNonce':
+      offBalance(
+        'WithdrawNonceAccount',
+        text('nonceAccount'),
+        text('destination'),
+        text('nonceAuthority'),
+      );
+    case 'transferWithSeed':
+      offBalance(
+        'TransferWithSeed',
+        text('source'),
+        text('destination'),
+        text('sourceBase'),
+      );
+    case 'assign':
+      // A program assigns its own new accounts in every other call it makes.
+      // The wallet's own account handed to a program is the one that matters.
+      if (text('account') == signer) {
+        handOver(
+          'Assign',
+          signer,
+          text('owner'),
+          'Assign account to a program',
+        );
+      }
+    case 'assignWithSeed' || 'allocateWithSeed':
+      // An account derived from the wallet: only its signature assigns it.
+      if (text('base') == signer) {
+        handOver(
+          type == 'assignWithSeed' ? 'AssignWithSeed' : 'AllocateWithSeed',
+          text('account'),
+          text('owner'),
+          'Assign account to a program',
+        );
+      }
+    case 'authorizeNonce':
+      final next = text('newAuthorized');
+      if (text('nonceAuthority') == signer && next != signer) {
+        handOver(
+          'AuthorizeNonceAccount',
+          text('nonceAccount'),
+          next,
+          'Control of a nonce account changes',
+        );
+      }
+    case 'allocate':
+      // On the wallet's own account: it could no longer send SOL.
+      if (text('account') == signer) unread('Allocate');
+  }
+}
+
+/// SOL the wallet signs out of an account that is not its own address: a
+/// stake account, a nonce account, an account derived from it. A simulation's
+/// balances for the wallet do not include it, so the review keeps the
+/// requested amount beside them.
+bool _isOffBalance(FundChange fund, String signer) =>
+    fund.asset.id == solanaNativeMint &&
+    fund.address != signer &&
+    fund.rawAmount.isNegative;
+
+/// A token movement whose mint the instruction does not name and no account
+/// state supplied. Its asset id is the token account it moves from, which is
+/// never a mint, so it is kept out of every mint lookup and shown as an
+/// unknown token.
+bool _isUnknownMint(FundChange fund) =>
+    fund.evidence == ReviewEvidence.requestedInstruction &&
+    fund.asset.id == fund.address;
+
+/// The compressed NFTs a review's changes name. They are NFTs whatever an
+/// asset lookup says of them, and have no mint account to read.
+Set<String> _compressedAssetIds(
+  List<AccountChange> accounts,
+  List<NftChange> nfts,
+) => {
+  for (final account in accounts)
+    if (account.program == solanaBubblegumProgram) ?account.assetId,
+  for (final nft in nfts)
+    if (nft.description.startsWith('Compressed NFT')) nft.assetId,
+};
+
+/// The Core NFTs a review's changes give a delegate. They are NFTs whatever
+/// an asset lookup says of them, and have no mint account to read.
+Set<String> _coreDelegatedAssetIds(List<AccountChange> accounts) => {
+  for (final account in accounts)
+    if (account.program == solanaCoreProgram && account.power != null)
+      ?account.assetId,
+};
+
+/// Whether the wallet's signature reaches an instruction of a program this
+/// review has no reader for. System and Token instructions are read, or
+/// flagged one by one; so are those of the asset programs, except Core: only
+/// its delegates are read from the instruction, and the rest of what it does
+/// is known from the simulation's accounts or not at all. Compute Budget,
+/// Memo and creating an associated token account do nothing to what a wallet
+/// already holds.
+bool solanaSignsUnreadProgram(SignedTx tx, List<String> keys, String signer) {
+  for (final instruction in tx.compiledMessage.instructions) {
+    if (instruction.programIdIndex >= keys.length) continue;
+    final program = keys[instruction.programIdIndex];
+    if (program == solanaSystemProgram ||
+        program == _computeBudgetProgram ||
+        _isTokenProgram(program) ||
+        _memoPrograms.contains(program) ||
+        (isSolanaAssetProgram(program) && program != solanaCoreProgram)) {
+      continue;
+    }
+    final data = instruction.data.toList();
+    // Create and CreateIdempotent; RecoverNested moves tokens.
+    if (program == solanaAssociatedTokenProgram &&
+        (data.isEmpty || (data.length == 1 && data[0] <= 1))) {
+      continue;
+    }
+    if (instruction.accountKeyIndexes.any(
+      (i) => i < keys.length && keys[i] == signer,
+    )) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /// A hardware reply must prove it belongs to the approved account. Attaching
@@ -1597,12 +2595,14 @@ _coreState(Map<String, Object?> account) {
 /// An inner instruction from a simulation, with its reported stack height.
 ///
 /// [instruction] is null for a call the node parsed itself, which reports no
-/// data; [name] is then the node's name for it.
+/// data; [name] is then the node's name for it and [parsed] what it reported:
+/// `{"type", "info"}`, the fields named.
 typedef SolanaInnerInstruction = ({
   String program,
   CompiledInstruction? instruction,
   String? name,
   int? depth,
+  Object? parsed,
 });
 
 /// One inner instruction as `simulateTransaction` reports it, or null when it
@@ -1632,6 +2632,7 @@ SolanaInnerInstruction? parseSimulationInnerInstruction(
         ),
         name: null,
         depth: depth,
+        parsed: null,
       );
     }
     final program = ix['programId'];
@@ -1650,6 +2651,7 @@ SolanaInnerInstruction? parseSimulationInnerInstruction(
             ? name
             : null,
         depth: depth,
+        parsed: parsed,
       );
     }
     final data = base58decode(ix['data'] as String);
@@ -1670,12 +2672,137 @@ SolanaInnerInstruction? parseSimulationInnerInstruction(
             ),
       name: null,
       depth: depth,
+      parsed: null,
     );
   } catch (_) {
     // State deltas remain available when an inner call is malformed.
     return null;
   }
 }
+
+/// For each account whose delegate or authority a call sets, the programs of
+/// the top-level instructions that did so: the program itself when the
+/// transaction calls it directly, else the program whose calls reached it.
+/// [inner] holds the simulation's inner instructions by top-level index.
+///
+/// Traced, each under the account the review reports the change on: a token
+/// `Approve`, `ApproveChecked` or `SetAuthority`, under the token account; a
+/// System instruction that assigns an account or hands on a nonce account,
+/// under that account; a compressed or Core NFT's delegate, under its asset
+/// id; a stake account's authority, a program's upgrade authority, a name's
+/// owner and a tree's delegate, under the account that changes hands.
+///
+/// A call the node parsed for itself has no account list. An approval it
+/// parsed names the token account as its `source`, which traces it the same
+/// way. Any other that may be one of these adds its top-level program to
+/// every account's set, and to [kUntracedDelegations] so that a batch's other
+/// transactions count it too: that can only add a program to a set, never
+/// stand in for a traced call. So does an instruction that could not be read
+/// and may have set one: an asset program's, a System or Token instruction
+/// with no name, and a Token-2022 batch.
+Map<String, Set<String>> solanaDelegationOrigins(
+  List<CompiledInstruction> instructions,
+  List<String> keys,
+  Map<int, List<SolanaInnerInstruction>> inner,
+) {
+  final origins = <String, Set<String>>{};
+  final untraced = <String>{};
+  for (final (i, top) in instructions.indexed) {
+    if (top.programIdIndex >= keys.length) continue;
+    final origin = keys[top.programIdIndex];
+    void record(String account) =>
+        origins.putIfAbsent(account, () => {}).add(origin);
+    final calls = <SolanaInnerInstruction>[
+      (program: origin, instruction: top, name: null, depth: 1, parsed: null),
+      ...?inner[i],
+    ];
+    for (final call in calls) {
+      final instruction = call.instruction;
+      if (isSolanaAssetProgram(call.program)) {
+        if (instruction == null) {
+          untraced.add(origin);
+          continue;
+        }
+        final indexes = instruction.accountKeyIndexes;
+        final effect = decodeSolanaAssetInstruction(
+          call.program,
+          Uint8List.fromList(instruction.data.toList()),
+          (i) => i < indexes.length && indexes[i] < keys.length
+              ? keys[indexes[i]]
+              : null,
+        );
+        switch (effect) {
+          case CompressedNftDelegation(:final assetId) ||
+              CoreNftDelegation(:final assetId):
+            record(assetId);
+          case AuthorityHandover(:final account):
+            record(account);
+          case UnreadAssetInstruction():
+            // It may have set a delegate or an authority, on an account
+            // this cannot name.
+            untraced.add(origin);
+          default:
+        }
+        continue;
+      }
+      final system = call.program == solanaSystemProgram;
+      if (!system && !_isTokenProgram(call.program)) continue;
+      if (instruction == null) {
+        final name = call.name;
+        if (name != null && !system && name.startsWith('Approve')) {
+          final parsed = call.parsed;
+          final info = parsed is Map ? parsed['info'] : null;
+          final source = info is Map ? info['source'] : null;
+          if (source is String && source.isNotEmpty) {
+            record(source);
+            continue;
+          }
+        }
+        if (name == null ||
+            (system
+                ? _systemHandoverNames.any(name.startsWith)
+                : name.startsWith('Approve') ||
+                      name.startsWith('SetAuthority'))) {
+          untraced.add(origin);
+        }
+        continue;
+      }
+      final data = Uint8List.fromList(instruction.data.toList());
+      // System: Assign, AuthorizeNonceAccount, AllocateWithSeed and
+      // AssignWithSeed. Token: Approve, SetAuthority and ApproveChecked.
+      final sets = system
+          ? data.length >= 4 &&
+                const {1, 7, 9, 10}.contains(
+                  ByteData.sublistView(data).getUint32(0, Endian.little),
+                )
+          : data.isNotEmpty && const {4, 6, 13}.contains(data[0]);
+      if (!sets) {
+        // An instruction the compiled-in tables have no name for, and a
+        // batch, which runs other token instructions inside itself, may set
+        // a delegate or an authority where this cannot see it.
+        final name = solanaBuiltInInstructionName(call.program, data);
+        if (name == null || name == 'Batch') untraced.add(origin);
+        continue;
+      }
+      final account = instruction.accountKeyIndexes.firstOrNull;
+      if (account == null || account >= keys.length) {
+        untraced.add(origin);
+      } else {
+        record(keys[account]);
+      }
+    }
+  }
+  return {
+    for (final MapEntry(:key, :value) in origins.entries)
+      key: {...value, ...untraced},
+    if (untraced.isNotEmpty) kUntracedDelegations: untraced,
+  };
+}
+
+/// How a node names the System instructions that hand an account to a
+/// program or a nonce account to a new authority, capitalised as
+/// [parseSimulationInnerInstruction] reports them.
+const _systemHandoverNames = ['Assign', 'AllocateWithSeed', 'AuthorizeNonce'];
 
 /// One instruction as it runs: a top-level instruction has depth 1, and a
 /// call it makes has its simulation-reported stack height. [data] is null,
@@ -1960,6 +3087,12 @@ SimulationReview combineSolanaReviews(
     ],
     accounts: [for (final part in parts) ...part.accounts],
     nfts: [for (final part in parts) ...part.nfts],
+    delegatedBy: {
+      for (final account in {
+        for (final part in parts) ...part.delegatedBy.keys,
+      })
+        account: {for (final part in parts) ...?part.delegatedBy[account]},
+    },
   );
 }
 

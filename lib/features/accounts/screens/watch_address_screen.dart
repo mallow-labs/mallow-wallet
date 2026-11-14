@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/crypto/ens_resolver.dart';
-import '../../../core/crypto/sns_resolver.dart';
+import '../../../core/crypto/solana_name_resolver.dart';
 import '../../../core/models/account.dart';
 import '../../../core/router/app_router.dart';
 import '../../../core/session/session_manager.dart';
@@ -42,7 +42,8 @@ bool isWatchableAddress(String input) {
 
 /// Screen for adding a view-only (watch) wallet.
 ///
-/// Supports entering a Solana or Ethereum address, or a `.sol`/`.eth` domain.
+/// Supports entering a Solana or Ethereum address, or a `.sns`/`.sol`/`.skr`/
+/// `.eth` domain.
 class WatchAddressScreen extends StatefulWidget {
   const WatchAddressScreen({required this.accountId, super.key});
 
@@ -97,14 +98,16 @@ class _WatchAddressScreenState extends State<WatchAddressScreen> {
     });
   }
 
-  /// True when the input is a resolvable name (`.sol` or `.eth`) rather than a
+  /// True when the input is a resolvable name (Solana or `.eth`) rather than a
   /// raw address.
   bool _isDomain(String input) =>
-      SnsResolver.isSolDomain(input) || EnsResolver.isEthDomain(input);
+      SolanaNameResolver.isDomain(input) || EnsResolver.isEthDomain(input);
 
-  /// Resolve a `.sol`/`.eth` domain to its address, or null if unresolvable.
+  /// Resolve a Solana or `.eth` domain to its address, or null if unresolvable.
   Future<String?> _resolveDomain(String input) async {
-    if (SnsResolver.isSolDomain(input)) return SnsResolver.resolve(input);
+    if (SolanaNameResolver.isDomain(input)) {
+      return SolanaNameResolver.resolve(input);
+    }
     if (EnsResolver.isEthDomain(input)) return EnsResolver.resolve(input);
     return null;
   }
@@ -140,7 +143,7 @@ class _WatchAddressScreenState extends State<WatchAddressScreen> {
               const SizedBox(height: MallowTheme.spacingLg),
               MallowPillField(
                 controller: _controller,
-                hintText: 'Address or .sol/.eth domain',
+                hintText: 'Address or .sns/.skr/.eth domain',
                 errorText: _error,
                 autocorrect: false,
                 enableSuggestions: false,
@@ -174,6 +177,16 @@ class _WatchAddressScreenState extends State<WatchAddressScreen> {
                     ),
                   ),
                 ),
+                if (SolanaNameResolver.notice(_controller.text)
+                    case final notice?) ...[
+                  const SizedBox(height: MallowTheme.spacingSm),
+                  Text(
+                    notice,
+                    style: MallowTheme.uiCaption.copyWith(
+                      color: context.mallowColors.warning,
+                    ),
+                  ),
+                ],
               ],
               const Spacer(),
               MallowButton(

@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -272,6 +273,51 @@ void main() {
 
       await tester.pumpWidget(const SizedBox());
     });
+
+    testWidgets('the web view claims every touch that starts on it', (
+      tester,
+    ) async {
+      // Without the claim the enclosing scroll view won every vertical swipe,
+      // so an artwork could never receive one.
+      final params = await mount(tester);
+      expect(
+        params.gestureRecognizers!.single.constructor(),
+        isA<EagerGestureRecognizer>(),
+      );
+      expect(params.initialSettings!.disallowOverScroll, isTrue);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets(
+      'the poster leaves drags to the page until the artwork paints',
+      (tester) async {
+        final scroll = ScrollController();
+        addTearDown(scroll.dispose);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ListView(
+              controller: scroll,
+              children: const [
+                SizedBox(
+                  height: 300,
+                  child: ArtworkHtmlViewer(
+                    sources: ['https://gateway.example/ipfs/cid/'],
+                    placeholder: ColoredBox(color: Colors.grey),
+                  ),
+                ),
+                SizedBox(height: 2000),
+              ],
+            ),
+          ),
+        );
+
+        await tester.dragFrom(const Offset(200, 150), const Offset(0, -100));
+        await tester.pump();
+        expect(scroll.offset, greaterThan(0));
+
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
 
     testWidgets('locks the main frame to the first committed origin', (
       tester,

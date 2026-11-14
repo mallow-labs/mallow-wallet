@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 import 'package:injectable/injectable.dart';
 // web3dart 3.x re-homed EthereumAddress/EtherAmount in package:wallet; it
 // imports them but does not re-export, so they need a direct import here.
@@ -13,6 +14,7 @@ import 'package:web3dart/web3dart.dart';
 import '../config/environment.dart';
 import '../observability/app_logger.dart';
 import 'evm_simulation_decoder.dart';
+import 'kept_alive_http.dart';
 
 const _logTag = 'EthereumRpc';
 
@@ -64,7 +66,19 @@ class EthereumRpcService {
 
   /// Plain HTTP client for the Infura Gas API REST call (not JSON-RPC). Lazily
   /// created; only [getSuggestedGasFees] uses it.
-  final http.Client _gasHttpClient = http.Client();
+  final http.Client _gasHttpClient = IOClient(keptAliveHttpClient());
+
+  /// Opens two connections to the simulation endpoint, for the simulation
+  /// and the gas tiers a review requests from it together. Best effort.
+  Future<void> warmConnections() async {
+    final endpoint = Config.ethereumSimulationUrl;
+    if (endpoint.isEmpty) return;
+    await openConnections(
+      (url) => _gasHttpClient.head(Uri.parse(url)),
+      endpoint,
+      connections: 2,
+    );
+  }
 
   /// EIP-155 chain id signed into every transaction (mainnet = 1).
   int get chainId => Config.ethereumChainId;

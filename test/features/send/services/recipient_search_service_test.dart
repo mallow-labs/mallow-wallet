@@ -228,8 +228,9 @@ void main() {
         final result = await service.search('alice', Chain.solana);
 
         expect(result.single.label, 'Alice A');
-        // No @ prefix: it would read as a handle that does not exist.
-        expect(result.single.fieldText, 'Alice A');
+        // The address, never the name: anyone can set a display name to
+        // another user's handle, and the field reads as the recipient.
+        expect(result.single.fieldText, _sol1);
       },
     );
 

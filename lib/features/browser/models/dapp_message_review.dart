@@ -26,6 +26,10 @@ abstract class DappMessageReview {
   /// A caution when the sign-in names a network this wallet does not use.
   String? get signInNetworkWarning => null;
 
+  /// Other addresses whose signatures the message also requires, as a Solana
+  /// off-chain message can name. This wallet signs only for its own.
+  List<String> get coSigners => const [];
+
   String? get text {
     try {
       return utf8.decode(bytes);
@@ -48,7 +52,9 @@ typedef SignInMessage = ({Map<String, String> fields, String? statement});
 ///
 /// [chain] is the word in the header ("Solana", "Ethereum"). EIP-4361 also
 /// allows a trailing `Resources:` list and a `scheme://` before the domain;
-/// [resources] admits the list. A message whose address is not [address] is
+/// [resources] admits both, and EIP-4361's blank lines. Sign In With Solana
+/// has the list but neither of the others; [resourceList] admits the list
+/// alone. A message whose address is not [address] is
 /// not a sign-in for this wallet; [caseInsensitive] compares hex addresses
 /// without their EIP-55 casing.
 SignInMessage? parseSignInMessage(
@@ -56,8 +62,10 @@ SignInMessage? parseSignInMessage(
   required String address,
   required String chain,
   bool resources = false,
+  bool? resourceList,
   bool caseInsensitive = false,
 }) {
+  final list = resourceList ?? resources;
   if (content == null) return null;
   final lines = content.split('\n');
   final suffix = ' wants you to sign in with your $chain account:';
@@ -100,8 +108,7 @@ SignInMessage? parseSignInMessage(
     if (lines[i].isNotEmpty || ++i >= lines.length) return null;
     if (resources && lines[i].isEmpty) {
       if (++i >= lines.length) return null;
-    } else if (field(lines[i]) == null &&
-        !(resources && lines[i] == 'Resources:')) {
+    } else if (field(lines[i]) == null && !(list && lines[i] == 'Resources:')) {
       statement = lines[i];
       if (statement.trim().isEmpty) return null;
       i++;
@@ -111,7 +118,7 @@ SignInMessage? parseSignInMessage(
     }
   }
   for (; i < lines.length; i++) {
-    if (resources && lines[i] == 'Resources:') {
+    if (list && lines[i] == 'Resources:') {
       // The list is last, holds at least one item, and nothing follows it.
       final items = <String>[];
       for (i++; i < lines.length; i++) {

@@ -87,6 +87,7 @@ service each one belongs to:
 | `brand_x.svg`, `brand_ig.svg`, `brand_discord.svg`, `brand_youtube.svg`, `brand_yt.svg` | X, Instagram, Discord, YouTube | profile social links       |
 | `brand_ledger.svg`, `brand_ledger_mark.svg`                                             | Ledger SAS                     | the Ledger wallet badge and the hardware-wallet chooser |
 | `brand_keystone.svg`                                                                    | Keystone                       | the Keystone wallet badge and the hardware-wallet chooser |
+| `web3auth_mark.png`                                                                     | Web3Auth                       | the badge on a wallet made by the older sign-in |
 
 **These are their owners' marks, not mallow's**, they are here for
 identification only, and the MIT grant does not license them onward. The
@@ -96,6 +97,15 @@ whose owner objects.
 Apple's and Google's marks additionally carry their owners' own sign-in
 branding guidelines, which govern how those buttons may be drawn; a fork that
 reskins the sign-in surface is responsible for staying inside them.
+
+`web3auth_mark.png` is Web3Auth's logo, white on a transparent background,
+copied unchanged from Web3Auth's own website
+(`https://web3auth.io/images/web3authlogodark.png`). It is Web3Auth's
+trademark. The app draws it on Web3Auth's blue, as a small badge on the Google
+or Apple icon, for one purpose: to say that a wallet was created through
+Web3Auth's sign-in. The app no longer contains that sign-in, and the badge
+claims no partnership or endorsement. A fork keeps or removes the file on the
+same reasoning as the other marks here.
 
 ## Fonts
 
@@ -151,6 +161,15 @@ vectors from Keystone's SDKs and firmware are MIT and ISC. The licence texts
 and a file-by-file account of what was ported from where are in
 `packages/keystone_ur/LICENSE` and `packages/keystone_ur/NOTICE`, and a fork
 that ships the package carries both.
+
+`packages/passkeys_android/` is Corbado's
+[`passkeys_android`](https://pub.dev/packages/passkeys_android) 2.15.0, the
+Android half of the passkeys plugin, with two changes: a passkey response that
+cannot be parsed is no longer written to the system log or into the error
+returned to Dart, and two permissions the plugin cannot use are no longer
+requested. It is **BSD-3-Clause** (© 2023 Corbado GmbH), not MIT. The licence
+text is `packages/passkeys_android/LICENSE`, the changes are described in
+the `README.md` beside it, and a fork that ships the package carries both.
 
 ## 3D model viewer
 

@@ -309,6 +309,88 @@ void main() {
     expect(session.bookmarks, isEmpty);
   });
 
+  group('closing the browser for another Account or Profile', () {
+    void visit(BrowserSession session, String url, {String title = ''}) {
+      session.noteTyped(Uri.parse(url));
+      session.open(null);
+      session.update(session.activeId!, url: Uri.parse(url), title: title);
+    }
+
+    test('forgets the sites that were typed, keeps the bookmarks, and '
+        'stays forgotten after a restart', () async {
+      final session = BrowserSession(repository());
+      await session.load();
+      visit(session, 'https://first.example', title: 'First');
+      visit(session, 'https://second.example', title: 'Second');
+      session.bookmark(
+        BrowserBookmark(url: Uri.parse('https://first.example'), title: 'One'),
+      );
+      expect(session.typedSites.map((site) => site.origin), [
+        'https://second.example',
+        'https://first.example',
+      ]);
+      // An address typed just before the switch, whose page has not loaded.
+      session.noteTyped(Uri.parse('https://pending.example'));
+
+      session.clear(keepBookmarks: true);
+      expect(session.typedSites, isEmpty);
+      expect(session.tabs, isEmpty);
+      expect(session.bookmarks.single.title, 'One');
+      // What the site looked like is kept for the bookmark that stays.
+      final kept = session.site(Uri.parse('https://first.example'))!;
+      expect(kept.title, 'First');
+      expect(kept.typed, isFalse);
+
+      // The next identity's first page is not credited to the last one's
+      // typing.
+      session.open(null);
+      session.update(
+        session.activeId!,
+        url: Uri.parse('https://pending.example'),
+      );
+      expect(session.typedSites, isEmpty);
+      await session.flush();
+
+      final restored = BrowserSession(repository());
+      await restored.load();
+      expect(restored.typedSites, isEmpty);
+      expect(restored.bookmarks.single.title, 'One');
+      expect(
+        restored.site(Uri.parse('https://second.example'))?.typed,
+        isFalse,
+      );
+
+      // The next identity builds its own history.
+      visit(restored, 'https://third.example');
+      expect(restored.typedSites.single.origin, 'https://third.example');
+    });
+
+    test('forgets them when the switch lands before the stored session has '
+        'loaded', () async {
+      final first = BrowserSession(repository());
+      await first.load();
+      visit(first, 'https://first.example', title: 'First');
+      first.bookmark(
+        BrowserBookmark(url: Uri.parse('https://first.example'), title: 'One'),
+      );
+      await first.flush();
+
+      final session = BrowserSession(repository());
+      final loading = session.load();
+      session.clear(keepBookmarks: true);
+      await loading;
+      expect(session.typedSites, isEmpty);
+      expect(session.tabs, isEmpty);
+      expect(session.bookmarks.single.title, 'One');
+      await session.flush();
+
+      final restored = BrowserSession(repository());
+      await restored.load();
+      expect(restored.typedSites, isEmpty);
+      expect(restored.site(Uri.parse('https://first.example'))?.title, 'First');
+    });
+  });
+
   test('records written before site icons existed still load', () async {
     final storage = SecureWalletStorage(
       const FlutterSecureStorage(),

@@ -122,6 +122,40 @@ class Wallets extends Table {
   /// Social-auth provider: 'google' or 'apple' (null for non-social wallets)
   TextColumn get socialProvider => text().nullable()();
 
+  /// The social vault this social row's keys come from (base64url vault id).
+  /// Null for non-social rows, for a wallet from the older sign-in
+  /// ([legacySocial]), and for a vault wallet whose backup was deleted.
+  /// Carried on every row of the account, like [socialProvider], because
+  /// recovery, the recovery graph and the restore all work row by row.
+  TextColumn get socialVaultId => text().nullable()();
+
+  /// The sign-in identity [socialVaultId]'s vault belongs to: the opaque id
+  /// the backend returns with every `open` (32 hex characters, the same for
+  /// every sign-in with one provider account; not an email, and not derived
+  /// from one).
+  ///
+  /// Stored with the vault link so that a later sign-in can be recognised as
+  /// the same account or a different one before anything is concluded from
+  /// its answer: "this account has no vault" means the wallet's backup is
+  /// gone only when it is the wallet's own account answering. Here, and in
+  /// the recovery graph, because the comparison matters most exactly when
+  /// the keystore and the plugin store were lost.
+  ///
+  /// Null for non-social rows, for rows without a vault, and for a vault
+  /// wallet last opened before this column existed, until its next sign-in.
+  TextColumn get socialIdentityId => text().nullable()();
+
+  /// Whether this social row is a wallet from the older Google or Apple
+  /// sign-in, the one run by Web3Auth, whose keys the sign-in account alone
+  /// reproduces. Such a wallet is never placed in a social vault.
+  ///
+  /// Its own column because a null [socialVaultId] does not say it: a vault
+  /// wallet whose backup was deleted has no vault id either, and must not be
+  /// described as an older-sign-in wallet. Set once, by the v25 migration
+  /// (every social row that had no vault then predates the vault), and
+  /// carried through the recovery graph. Nothing in the app creates one.
+  BoolColumn get legacySocial => boolean().withDefault(const Constant(false))();
+
   /// Blockchain identifier
   TextColumn get chain => text().withDefault(const Constant('solana'))();
 
@@ -648,7 +682,7 @@ class MallowDatabase extends _$MallowDatabase {
   }
 
   @override
-  int get schemaVersion => 23;
+  int get schemaVersion => 26;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -671,8 +705,11 @@ class MallowDatabase extends _$MallowDatabase {
         await m.createAll();
         return;
       }
+      // Every step below can run twice: an upgrade interrupted part-way starts
+      // again from the same version (see [_addColumnIfMissing]). `createTable`
+      // is `CREATE TABLE IF NOT EXISTS` already.
       if (from < 18) {
-        await m.addColumn(wallets, wallets.socialProvider);
+        await _addColumnIfMissing(m, wallets, wallets.socialProvider);
       }
       if (from < 19) {
         await m.createTable(cachedPortfolios);
@@ -687,7 +724,8 @@ class MallowDatabase extends _$MallowDatabase {
       // from its *current* definition, which already carries the column, so an
       // unconditional ADD COLUMN fails on every upgrade that passes through it.
       if (from >= 21 && from < 22) {
-        await m.addColumn(
+        await _addColumnIfMissing(
+          m,
           cachedJupiterTokenList,
           cachedJupiterTokenList.dailyVolume,
         );
@@ -699,11 +737,55 @@ class MallowDatabase extends _$MallowDatabase {
       }
       if (from < 23) {
         // Keystone identity. Both nullable, so existing rows need nothing.
-        await m.addColumn(accounts, accounts.masterFingerprint);
-        await m.addColumn(wallets, wallets.masterFingerprint);
+        await _addColumnIfMissing(m, accounts, accounts.masterFingerprint);
+        await _addColumnIfMissing(m, wallets, wallets.masterFingerprint);
+      }
+      if (from < 24) {
+        // Social vault link. Nullable: existing social rows predate the vault
+        // and never get one.
+        await _addColumnIfMissing(m, wallets, wallets.socialVaultId);
+      }
+      if (from < 25) {
+        // Mark the wallets of the older (Web3Auth-run) sign-in. No release
+        // before this one could create a social vault, so every social row
+        // without a vault id here is one of them. After this step the mark is
+        // never set again: a vault wallet that later loses its vault id (its
+        // backup was deleted) stays unmarked.
+        await _addColumnIfMissing(m, wallets, wallets.legacySocial);
+        // Safe to repeat: it reads only the wallet type and the vault id, and
+        // nothing can write either before this upgrade finishes.
+        await customStatement(
+          'UPDATE wallets SET legacy_social = 1 '
+          "WHERE wallet_type = 'social' AND social_vault_id IS NULL",
+        );
+      }
+      if (from < 26) {
+        // The sign-in identity behind a vault link. Nullable: a vault wallet
+        // already on the device gets it at its next sign-in.
+        await _addColumnIfMissing(m, wallets, wallets.socialIdentityId);
       }
     },
   );
+
+  /// `ADD COLUMN`, skipped when [table] already has [column].
+  ///
+  /// The upgrade steps do not run in one transaction, and the schema version
+  /// is written only after the last of them. A process killed in between
+  /// leaves the columns already added in place with the old version, so the
+  /// next launch runs the same steps again. A plain `ADD COLUMN` then fails
+  /// with "duplicate column name" on every launch and the database never
+  /// opens. Checking first makes each step safe to run twice.
+  Future<void> _addColumnIfMissing(
+    Migrator m,
+    TableInfo<Table, dynamic> table,
+    GeneratedColumn<Object> column,
+  ) async {
+    final existing = await customSelect(
+      "PRAGMA table_info('${table.actualTableName}')",
+    ).get();
+    if (existing.any((row) => row.read<String>('name') == column.name)) return;
+    await m.addColumn(table, column);
+  }
 
   // ============================================================================
   // SeedPhrase Operations
@@ -946,6 +1028,27 @@ class MallowDatabase extends _$MallowDatabase {
   Future<void> updateWalletName(String id, String name) {
     return (update(wallets)..where((t) => t.id.equals(id))).write(
       WalletsCompanion(name: Value(name)),
+    );
+  }
+
+  /// Set the vault link of the rows [ids]: the vault and the sign-in
+  /// identity it belongs to. A null [vaultId] unlinks, and takes the
+  /// identity with it. A null [identityId] beside a vault id keeps whatever
+  /// identity each row already records.
+  Future<void> setWalletsSocialVaultLink(
+    List<String> ids,
+    String? vaultId, {
+    String? identityId,
+  }) {
+    return (update(wallets)..where((t) => t.id.isIn(ids))).write(
+      WalletsCompanion(
+        socialVaultId: Value(vaultId),
+        socialIdentityId: vaultId == null
+            ? const Value(null)
+            : identityId == null
+            ? const Value.absent()
+            : Value(identityId),
+      ),
     );
   }
 

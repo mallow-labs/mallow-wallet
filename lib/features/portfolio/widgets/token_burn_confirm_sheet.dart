@@ -66,7 +66,7 @@ class _TokenBurnConfirmSheetState extends State<TokenBurnConfirmSheet> {
   String? _payer;
 
   /// True while the picker is open / the switch is committing. Disables the
-  /// Burn CTA: the picker can be drag-dismissed before its `/v0/login` settles,
+  /// Burn CTA: the picker can be drag-dismissed before its `/v2/session` settles,
   /// which would otherwise leave this sheet tappable mid-switch.
   bool _switching = false;
 

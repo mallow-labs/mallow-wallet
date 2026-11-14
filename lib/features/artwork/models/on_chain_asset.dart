@@ -37,6 +37,7 @@ class DigitalAsset {
     this.tokenMetadataCreators = const [],
     this.royaltiesPluginBasisPoints,
     this.royaltiesPluginCreators = const [],
+    this.verifiedCreators = const [],
     this.primarySaleHappened = false,
   });
 
@@ -147,8 +148,8 @@ class DigitalAsset {
     // the on-chain signal the webapp's `isSecondaryMarket` reads for
     // Nft/pNFT/cNFT on its asset model — once true, the asset
     // trades on the secondary market and the primary proceeds split no longer
-    // applies. Absent/false for Core (which keys off owner vs update
-    // authority instead).
+    // applies. Absent/false for Core (which keys off the owner and the
+    // VerifiedCreators plugin instead).
     final primarySaleHappened = royalty['primary_sale_happened'] == true;
     final creatorsRaw = (json['creators'] as List<dynamic>?) ?? const [];
     final tokenMetadataCreators = creatorsRaw
@@ -185,6 +186,14 @@ class DigitalAsset {
               ),
             )
             .where((c) => c.address.isNotEmpty)
+            .toList(growable: false);
+    final verifiedCreators =
+        ((pluginData('verified_creators')?['signatures'] as List<dynamic>?) ??
+                const [])
+            .whereType<Map<String, dynamic>>()
+            .where((s) => s['verified'] == true)
+            .map((s) => s['address'])
+            .whereType<String>()
             .toList(growable: false);
 
     return DigitalAsset(
@@ -226,6 +235,7 @@ class DigitalAsset {
       tokenMetadataCreators: tokenMetadataCreators,
       royaltiesPluginBasisPoints: royaltiesPluginBasisPoints,
       royaltiesPluginCreators: royaltiesPluginCreators,
+      verifiedCreators: verifiedCreators,
       primarySaleHappened: primarySaleHappened,
     );
   }
@@ -342,11 +352,16 @@ class DigitalAsset {
   /// for Core royalties — mirrors the webapp's `getRoyalties`.
   final List<OnChainCreator> royaltiesPluginCreators;
 
+  /// Addresses that signed the mpl-core VerifiedCreators plugin (Core /
+  /// CoreCollection). A Core sale is primary only when its update authority
+  /// is one of them.
+  final List<String> verifiedCreators;
+
   /// Whether a primary sale has already happened (DAS
   /// `royalty.primary_sale_happened`). Meaningful only for token-metadata
   /// standards (Nft/pNFT/cNFT), where the webapp's `isSecondaryMarket`
   /// reads it directly. Always `false` for Core / CoreCollection assets,
-  /// which classify off owner-vs-update-authority instead.
+  /// which classify off the owner and [verifiedCreators] instead.
   final bool primarySaleHappened;
 
   /// Is someone other than the owner holding this asset — listed elsewhere,
@@ -392,6 +407,7 @@ class ArtworkPermissions {
     this.canTrade = false,
     this.tokenStandard,
     this.onChainRoyaltyBps,
+    this.hasCorePermanentDelegate = false,
   });
 
   final bool canTransfer;
@@ -437,6 +453,14 @@ class ArtworkPermissions {
   /// (`ArtworkDetails` → `getRoyalties`); without it the Royalties
   /// row states 0% for an artwork that really does pay a royalty.
   final int? onChainRoyaltyBps;
+
+  /// True when a Core asset or its collection carries a permanent freeze,
+  /// transfer or burn delegate, read from the same DAS calls.
+  ///
+  /// Not a permission: it never gates an action. Those delegates can act on a
+  /// Core asset during an auction or listing and after the sale, so the bid and
+  /// buy sheets warn about it. False when the read failed.
+  final bool hasCorePermanentDelegate;
 
   /// All-false permissions (fallback on error or view-only wallet).
   static const none = ArtworkPermissions(

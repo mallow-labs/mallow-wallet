@@ -17,14 +17,20 @@ import '../services/ethereum_dapp_adapter.dart';
 import 'browser_site_tile.dart';
 
 /// Native review for `eth_signTypedData_v4`. Everything shown is read from the
-/// parsed payload whose digest is signed, never from the website's JSON.
+/// parsed payload whose digest is signed, never from the website's JSON: the
+/// rows are the fields the primary type declares, in declared order (see
+/// [typedDataReviewRows]), and the parser has already refused a payload that
+/// holds any other key, so a page cannot put a row on screen that the
+/// signature does not cover.
 ///
 /// A permit (EIP-2612 or Permit2) leads with a spending-permission card, a
 /// transfer authorization with a transfer card, and a marketplace order
 /// with an order card, because those signatures move
 /// assets later without asking again. Any other payload is shown field by
-/// field. Either way the domain names the contract the signature is for, and
-/// approving a permission, transfer or order takes a press-and-hold.
+/// field under a caution: the wallet cannot say what a contract will do with
+/// a signature it does not recognise, so that one is not presumed harmless.
+/// Either way the domain names the contract the signature is for, and every
+/// typed-data signature is offered reject-first and takes a press-and-hold.
 class TypedDataSigningReview extends StatelessWidget {
   const TypedDataSigningReview({
     required this.review,
@@ -51,59 +57,26 @@ class TypedDataSigningReview extends StatelessWidget {
   /// session.
   final ReviewWalletIdentity? wallet;
 
-  static const _maxRows = 120;
-
   @override
   Widget build(BuildContext context) {
     final colors = context.mallowColors;
     final identity = wallet ?? ReviewWalletIdentity.resolve(review.address);
     final host = Uri.parse(review.origin).host;
     final data = review.data;
-    final grants = review.kind != TypedDataKind.generic;
     final revokes =
         review.unsummarizedPermissionCount == 0 &&
         review.permissions.isNotEmpty &&
         review.permissions.every(
           (permission) => permission.amount == BigInt.zero,
         );
-    final rows = <(String, Object?)>[];
-    void flatten(String type, Object? value, String path, int depth) {
-      if (rows.length > _maxRows) return;
-      final fields = data.types[_base(type)];
-      if (type.endsWith(']') && value is List) {
-        final item = type.substring(0, type.lastIndexOf('['));
-        for (final (i, element) in value.indexed) {
-          flatten(item, element, '$path[$i]', depth + 1);
-        }
-        if (value.isEmpty) rows.add((path, '(empty)'));
-      } else if (fields != null && value is Map && depth < 8) {
-        for (final field in fields) {
-          flatten(
-            field.type,
-            value[field.name],
-            path.isEmpty ? field.name : '$path.${field.name}',
-            depth + 1,
-          );
-        }
-      } else {
-        rows.add((path, _display(value)));
-      }
-    }
-
-    // The canonical values are the ones the digest was computed from, so an
-    // integer reads as decimal however the site wrote it (`0x…`, a string or a
-    // JSON number).
-    if (data.primaryType != 'EIP712Domain') {
-      flatten(data.primaryType, data.canonicalMessage, '', 0);
-    }
-    final truncated = rows.length > _maxRows;
+    final (:rows, :more) = typedDataReviewRows(data);
     final domain = data.domain;
     return SigningReviewLayout(
       footer: ReviewDecisionBar(
         rejectKey: const Key('reject-signing'),
         approveKey: const Key('approve-signing'),
         approveLabel: 'Sign',
-        holdToApprove: grants,
+        holdToApprove: true,
         onReject: onReject,
         onApprove: onApprove,
       ),
@@ -127,6 +100,19 @@ class TypedDataSigningReview extends StatelessWidget {
           '$host is asking for your signature. It is not a transaction and costs nothing to sign, but whoever holds this signature can submit it later to spend tokens, fill an order or move assets. Only sign if you trust this website.',
           iconColor: colors.warning,
         ),
+        if (review.kind == TypedDataKind.generic) ...[
+          const SizedBox(height: 14),
+          ReviewCautionCard(
+            key: const Key('unrecognised-typed-data'),
+            title: 'The wallet does not recognise this request.',
+            messages: [
+              data.verifyingContract == null
+                  ? 'It cannot tell what this signature will be used for. It could move tokens or grant a permission.'
+                  : 'It cannot tell what the contract below will do with this signature. It could move tokens or grant a permission.',
+              'Check every field, and reject unless you know what you are signing.',
+            ],
+          ),
+        ],
         if (review.unsummarizedPermissionCount > 0) ...[
           const SizedBox(height: 14),
           ReviewRiskCard(
@@ -190,16 +176,20 @@ class TypedDataSigningReview extends StatelessWidget {
         ],
         if (rows.isNotEmpty) ...[
           ReviewSectionLabel(data.primaryType),
-          for (final (path, value) in rows.take(_maxRows))
+          for (final (path, value) in rows)
             ReviewKvRow(
               label: path,
               dense: true,
               valueWidget: _value(context, value),
             ),
-          if (truncated)
-            const ReviewInfoLine(
-              'More fields follow. The full data is under Exact data.',
+          if (more > 0) ...[
+            const SizedBox(height: 10),
+            ReviewInfoLine(
+              key: const Key('typed-data-more-fields'),
+              'and $more more field${more == 1 ? '' : 's'}, all signed. The full data is under Exact data and digest.',
+              iconColor: colors.warning,
             ),
+          ],
         ],
         ReviewDisclosure(
           key: const Key('typed-data-full'),
@@ -256,36 +246,69 @@ class TypedDataSigningReview extends StatelessWidget {
     );
   }
 
+  /// From, to, amount, validity and the token contract, each on its own
+  /// row: these five decide where the tokens go and for how long the
+  /// signature can be used.
   Widget _transferCard(BuildContext context, TypedDataTransfer transfer) {
+    final colors = context.mallowColors;
     final asset = review.tokens[transfer.token];
-    final symbol = asset == null || !asset.verified ? 'token' : asset.symbol;
+    final verified = asset != null && asset.verified;
+    final symbol = verified ? asset.symbol : 'token';
     final amount = groupThousands(
       formatReviewAmount(transfer.amount, asset?.decimals),
     );
-    final expires = transfer.expires;
+    final own = transfer.from == review.address.toLowerCase();
+    final validFrom = transfer.validFrom, expires = transfer.expires;
+    Widget row(String label, Widget value) => Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          Text(label, style: TextStyle(color: colors.textSecondary)),
+          const SizedBox(width: MallowTheme.spacingMd),
+          Expanded(
+            child: Align(alignment: Alignment.centerRight, child: value),
+          ),
+        ],
+      ),
+    );
     return ReviewRiskCard(
+      key: const Key('typed-data-transfer'),
       tag: 'Transfer',
       title: 'Transfer $amount $symbol',
-      body: Text.rich(
-        TextSpan(
-          children: [
-            const TextSpan(text: 'To '),
-            reviewAddressSpan(context, transfer.recipient),
-            if (asset == null || !asset.verified) ...[
-              const TextSpan(text: ' from token contract '),
-              reviewAddressSpan(context, transfer.token),
-            ],
-            const TextSpan(
-              text:
-                  '. Submitting this signature moves these tokens without asking you again.',
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          row('From', ReviewAddress(transfer.from)),
+          row('To', ReviewAddress(transfer.recipient)),
+          row(
+            verified ? '$symbol contract' : 'Token contract',
+            ReviewAddress(transfer.token),
+          ),
+          row(
+            'Valid',
+            Text(
+              [
+                if (validFrom != null) 'from ${_date(validFrom)}',
+                expires == null
+                    ? 'end date not readable'
+                    : 'until ${_date(expires)}',
+              ].join(' '),
+              textAlign: TextAlign.right,
             ),
-            TextSpan(
-              text: expires == null
-                  ? ' Expiry could not be determined; check Exact data.'
-                  : ' This authorization expires ${_date(expires)}.',
+          ),
+          if (!own)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text('The account the tokens leave is not this wallet.'),
             ),
-          ],
-        ),
+          const Text(
+            'Whoever holds this signature can submit it to move these tokens, without asking you again.',
+          ),
+          if (expires == null)
+            const Text(
+              'Treat it as never expiring, and check validBefore under Exact data and digest.',
+            ),
+        ],
       ),
     );
   }
@@ -313,6 +336,69 @@ class TypedDataSigningReview extends StatelessWidget {
   }
 }
 
+/// The most field rows a review lists before it says how many are left.
+const kMaxTypedDataRows = 120;
+
+/// The rows of a typed-data review: one per leaf value the signature covers,
+/// labelled by its path, at most [limit] of them, and how many [more] the
+/// payload holds past that.
+///
+/// The walk follows the fields the primary type declares, in declared order,
+/// into each struct and array they reference. It never reads the keys of the
+/// message the website sent, so a row exists only for a value that is hashed
+/// into the digest, and no signed value is left out of the count.
+({List<(String, Object?)> rows, int more}) typedDataReviewRows(
+  Eip712TypedData data, {
+  int limit = kMaxTypedDataRows,
+}) {
+  final rows = <(String, Object?)>[];
+  var total = 0;
+  void add(String path, Object? value) {
+    if (total++ < limit) {
+      rows.add((path.isEmpty ? data.primaryType : path, value));
+    }
+  }
+
+  void walk(String type, Object? value, String path, int depth) {
+    final fields = data.types[type];
+    if (type.endsWith(']') && value is List) {
+      final item = type.substring(0, type.lastIndexOf('['));
+      if (value.isEmpty) add(path, '(empty)');
+      for (final (i, element) in value.indexed) {
+        walk(item, element, '$path[$i]', depth + 1);
+      }
+    } else if (fields != null && value is Map) {
+      // The parser bounds nesting well below this; past it a struct is named
+      // rather than walked, and still counted.
+      if (depth >= _maxRowDepth) {
+        add(path, '(nested data)');
+        return;
+      }
+      if (fields.isEmpty) add(path, '(no fields)');
+      for (final field in fields) {
+        walk(
+          field.type,
+          value[field.name],
+          path.isEmpty ? field.name : '$path.${field.name}',
+          depth + 1,
+        );
+      }
+    } else {
+      add(path, _display(value));
+    }
+  }
+
+  // The canonical values are the ones the digest was computed from, so an
+  // integer reads as decimal however the site wrote it (`0x…`, a string or a
+  // JSON number).
+  if (data.primaryType != 'EIP712Domain') {
+    walk(data.primaryType, data.canonicalMessage, '', 0);
+  }
+  return (rows: rows, more: total - rows.length);
+}
+
+const _maxRowDepth = 16;
+
 /// A canonical leaf as review text: integers in decimal, addresses and bytes
 /// as `0x` hex.
 Object? _display(Object? value) => switch (value) {
@@ -321,11 +407,6 @@ Object? _display(Object? value) => switch (value) {
     '0x${value.map((b) => b.toRadixString(16).padLeft(2, '0')).join()}',
   _ => value,
 };
-
-String _base(String type) {
-  final bracket = type.indexOf('[');
-  return bracket < 0 ? type : type.substring(0, bracket);
-}
 
 String _date(DateTime at) {
   final local = at.toLocal();

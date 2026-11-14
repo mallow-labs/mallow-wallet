@@ -172,6 +172,93 @@ void main() {
     );
   }
 
+  group('hasCorePermanentDelegate', () {
+    const permanentPlugins = [
+      'permanent_freeze_delegate',
+      'permanent_transfer_delegate',
+      'permanent_burn_delegate',
+    ];
+    DigitalAsset coreAsset({Map<String, dynamic> plugins = const {}}) =>
+        DigitalAsset.fromJson({
+          'id': mint,
+          'interface': 'MplCoreAsset',
+          'grouping': [
+            {'group_key': 'collection', 'group_value': collectionMint},
+          ],
+          'plugins': plugins,
+        });
+    DigitalAsset coreCollection({Map<String, dynamic> plugins = const {}}) =>
+        DigitalAsset.fromJson({
+          'id': collectionMint,
+          'interface': 'MplCoreCollection',
+          'plugins': plugins,
+        });
+    Map<String, dynamic> pluginOf(String plugin) => {
+      plugin: {
+        'data': {'frozen': false},
+        'authority': {'type': 'UpdateAuthority'},
+      },
+    };
+
+    for (final plugin in permanentPlugins) {
+      test('$plugin on a Core asset', () async {
+        final p = await checkWith(
+          coreAsset(plugins: pluginOf(plugin)),
+          collection: coreCollection(),
+        );
+        expect(p.hasCorePermanentDelegate, isTrue);
+      });
+
+      test('$plugin on its collection', () async {
+        final p = await checkWith(
+          coreAsset(),
+          collection: coreCollection(plugins: pluginOf(plugin)),
+        );
+        expect(p.hasCorePermanentDelegate, isTrue);
+      });
+    }
+
+    test('false without one, and it changes no permission', () async {
+      final clean = await checkWith(
+        coreAsset(plugins: pluginOf('freeze_delegate')),
+        collection: coreCollection(),
+      );
+      expect(clean.hasCorePermanentDelegate, isFalse);
+
+      final flagged = await checkWith(
+        coreAsset(plugins: pluginOf('permanent_burn_delegate')),
+        collection: coreCollection(),
+      );
+      expect(flagged.canTrade, clean.canTrade);
+    });
+
+    test('false when the collection cannot be read', () async {
+      when(mockDas.getAsset(collectionMint)).thenThrow(Exception('down'));
+      final p = await checkWith(coreAsset());
+      expect(p.hasCorePermanentDelegate, isFalse);
+    });
+
+    test(
+      'false for a standard an auction does not leave in the wallet',
+      () async {
+        final p = await checkWith(
+          DigitalAsset.fromJson({
+            'id': mint,
+            'interface': 'V1_NFT',
+            'plugins': pluginOf('permanent_burn_delegate'),
+          }),
+        );
+        expect(p.hasCorePermanentDelegate, isFalse);
+      },
+    );
+
+    test('false when the read fails', () async {
+      when(mockDas.getAsset(mint)).thenThrow(Exception('down'));
+      final p = await service.checkPermissions(mint);
+      expect(p.hasCorePermanentDelegate, isFalse);
+    });
+  });
+
   group('Bubblegum v2 permissions', () {
     test('unresolved flags block list, transfer, burn and trade', () async {
       final p = await checkWith(

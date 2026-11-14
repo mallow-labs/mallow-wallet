@@ -25,15 +25,49 @@ class RecipientSuggestion {
   final String? displayName;
   final String? imageUrl;
 
-  /// What the row shows. The backend matches on display name and twitter handle
-  /// as well as username, so a result with no username is a real match and is
-  /// labelled by whatever it does have.
-  String get label => username ?? displayName ?? truncateAddress(address);
+  /// A username is unique and only its owner can hold it. A display name is free
+  /// text that anyone can set to anyone else's handle, with or without the `@`,
+  /// and the backend returns both for the same search. So the two never share a
+  /// format: only a username is ever written with an `@`.
+  String? get _handle => username?.isEmpty ?? true ? null : username;
 
-  /// What replaces the field's text once this row is picked. Only a real
-  /// username gets the `@` — prefixing a display name with one would read as a
-  /// handle that doesn't exist. A profile with neither falls back to the **full**
-  /// address, never [label]'s truncation, which is not a resolvable address.
-  String get fieldText =>
-      username != null ? '@$username' : (displayName ?? address);
+  /// [displayName] as a row may show it, or null when nothing is left: without
+  /// any `@` or its lookalikes, and without the invisible characters that could
+  /// slip one past that or reorder the text around it.
+  String? get _cleanDisplayName {
+    final cleaned = displayName
+        ?.replaceAll(_handleMimicry, '')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    return cleaned == null || cleaned.isEmpty ? null : cleaned;
+  }
+
+  /// Format and control characters, plus `@` in its plain, fullwidth and small
+  /// forms.
+  static final _handleMimicry = RegExp(
+    r'[\p{Cf}\p{Cc}@\uFF20\uFE6B]',
+    unicode: true,
+  );
+
+  /// Whether the row is named by a display name, which it must mark as such so
+  /// that it cannot pass for the account that owns the same text as a username.
+  bool get isDisplayNameOnly => _handle == null && _cleanDisplayName != null;
+
+  /// What the row shows: `@username`, else the cleaned display name, else the
+  /// truncated address.
+  String get label {
+    final handle = _handle;
+    if (handle != null) return '@$handle';
+    return _cleanDisplayName ?? truncateAddress(address);
+  }
+
+  /// What replaces the field's text once this row is picked: a real `@username`,
+  /// or else the **full** address. Never a display name, which would put text
+  /// the profile's owner chose into the recipient field, where it reads as the
+  /// resolved recipient. Never [label]'s truncation, which is not a resolvable
+  /// address.
+  String get fieldText {
+    final handle = _handle;
+    return handle != null ? '@$handle' : address;
+  }
 }

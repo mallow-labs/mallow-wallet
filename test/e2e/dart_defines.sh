@@ -77,8 +77,7 @@ E2E_MOCK_URL="http://10.0.2.2:$MOCK_PORT"
 # to `production`: it keeps `isDevnet` true, so the suite never builds an app
 # that believes it is production. What it switches is inert here — the mock
 # ignores the `?network=devnet` the RPC URL picks up (JSON-RPC dispatches on
-# the body), WEB3AUTH_CLIENT_ID is unset so `sapphire_devnet` is never used,
-# and ASSET_CDN_BASE_URL is unset so the store CDN is empty either way.
+# the body), and ASSET_CDN_BASE_URL is unset so the store CDN is empty either way.
 # shellcheck disable=SC2034  # consumed by the sourcing script, not by this one
 E2E_DART_DEFINES="\
 --dart-define=ENV=development \

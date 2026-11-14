@@ -27,14 +27,24 @@ import '../../sell/services/trade_eligibility.dart';
 ///   - cNFT (Bubblegum v1 and v2) → always secondary. The marketplace program
 ///     sells every compressed leaf at the secondary rate, whatever the leaf's
 ///     `primarySaleHappened` says.
-///   - Core → `owner != collection.updateAuthority` when the parent
-///     collection asset is supplied, else `owner != asset.updateAuthority`.
+///   - Core → primary only when the owner is the update authority (the
+///     parent collection's when supplied, else the asset's) and that authority
+///     signed VerifiedCreators on either one.
 ///   - CoreCollection → always false (primary).
 ///
 /// [collection] is the fetched parent-collection asset; supply it only for
 /// Core or Bubblegum v2 assets that carry a `collectionKey`. Non-Solana standards (EVM/Tezos)
 /// never reach the Solana listing flows and default to primary (false).
-bool isSecondaryMarketOf(DigitalAsset asset, {DigitalAsset? collection}) {
+///
+/// 🛑 Returns `null` — unknown — for a Core asset that belongs to a collection
+/// when that collection is not supplied (its read failed). The program takes
+/// the update authority of such an asset from the collection, and counts a
+/// creator signature on the collection as well as one on the asset. Judged
+/// from the asset alone, a piece whose only signature sits on its collection
+/// reads as secondary while the program settles it as primary. Callers must
+/// not turn `null` into either answer: read the collection again, or show no
+/// fee and proceeds figures at all.
+bool? isSecondaryMarketOf(DigitalAsset asset, {DigitalAsset? collection}) {
   switch (asset.tokenStandard) {
     case TokenStandard.nft:
       return asset.primarySaleHappened;
@@ -43,10 +53,11 @@ bool isSecondaryMarketOf(DigitalAsset asset, {DigitalAsset? collection}) {
     case TokenStandard.cnftV2:
       return true;
     case TokenStandard.core:
-      if (collection != null) {
-        return asset.owner != collection.updateAuthority;
-      }
-      return asset.owner != asset.updateAuthority;
+      if (asset.collectionKey != null && collection == null) return null;
+      final authority = collection?.updateAuthority ?? asset.updateAuthority;
+      if (authority == null || asset.owner != authority) return true;
+      return !asset.verifiedCreators.contains(authority) &&
+          !(collection?.verifiedCreators.contains(authority) ?? false);
     case TokenStandard.coreCollection:
     case TokenStandard.objkt:
     case TokenStandard.native:
@@ -199,11 +210,15 @@ ResolvedListingEconomics resolveListingEconomics({
 /// Everything the review step needs about a mint, resolved from DAS + the
 /// artwork API + the on-chain marketplace config in one pass. Shared by both
 /// listing blocs and by their `_onStarted` and select-artwork handlers.
+///
+/// `isSecondaryMarket` is `null` when the sale could not be classified (see
+/// [isSecondaryMarketOf]). A caller then shows no fee or proceeds figures and
+/// no direct-proceeds toggle, since both depend on the answer.
 typedef ListingContextData = ({
   DigitalAsset? asset,
   TradeEligibility tradeEligibility,
   ArtworkDetails? detail,
-  bool isSecondaryMarket,
+  bool? isSecondaryMarket,
   bool isVerifiedSeller,
   String? updateAuthority,
   List<ArtworkRoyaltySplit> royaltyShares,
@@ -211,6 +226,28 @@ typedef ListingContextData = ({
   int primaryFeeBps,
   int secondaryFeeBps,
 });
+
+/// Reads the parent collection of a Core or Bubblegum v2 asset, up to
+/// [attempts] times. Null when every read fails.
+///
+/// The sale classification of a grouped Core asset cannot be worked out
+/// without it ([isSecondaryMarketOf] answers "unknown"), so one transient
+/// failure is worth a second request before the caller gives up on showing
+/// fees and proceeds.
+Future<DigitalAsset?> readParentCollection(
+  DasApiService dasApi,
+  String collectionKey, {
+  int attempts = 2,
+}) async {
+  for (var attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return await dasApi.getAsset(collectionKey);
+    } catch (_) {
+      // Tried again while attempts remain, then reported as missing.
+    }
+  }
+  return null;
+}
 
 /// Fetch and resolve the listing context for [mint]. All network calls
 /// degrade gracefully: a rejected DAS/detail future resolves to null (hidden
@@ -240,11 +277,14 @@ Future<ListingContextData> resolveListingContext({
         (asset.tokenStandard == TokenStandard.core ||
             asset.tokenStandard == TokenStandard.cnftV2) &&
         asset.collectionKey != null) {
-      try {
-        return await dasApi.getAsset(asset.collectionKey!);
-      } catch (_) {
-        return null;
-      }
+      return readParentCollection(
+        dasApi,
+        asset.collectionKey!,
+        // A Core sale cannot be classified without its collection, so that
+        // read gets a second try. A Bubblegum v2 leaf is always secondary;
+        // without its parent it is reported as unverified, as before.
+        attempts: asset.tokenStandard == TokenStandard.core ? 2 : 1,
+      );
     }
     return null;
   });
@@ -254,6 +294,8 @@ Future<ListingContextData> resolveListingContext({
   final detail = await detailFuture;
   final collection = await collectionFuture;
 
+  // Null when a grouped Core asset's collection could not be read: unknown,
+  // passed on as such.
   final isSecondary = asset != null
       ? isSecondaryMarketOf(asset, collection: collection)
       : false;

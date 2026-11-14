@@ -79,7 +79,7 @@ class _EditProfilesScreenState extends State<EditProfilesScreen> {
     // EditProfileScreen edits the active session's profile, so activate this
     // profile before opening the edit flow.
     await sl<SessionManager>().switchToProfile(group);
-    // switchToProfile only re-points the signer and emits; the /v0/login that
+    // switchToProfile only re-points the signer and emits; the /v2/session that
     // refreshes AuthService.currentUser runs fire-and-forget via the
     // wallet-change listener. EditProfileScreen reads currentUser synchronously
     // in initState to decide edit-vs-create, so await the login here first —

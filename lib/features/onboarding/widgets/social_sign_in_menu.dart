@@ -2,10 +2,14 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:mallow_wallet/core/crypto/exceptions.dart';
 import 'package:mallow_wallet/core/services/social_auth_service.dart';
+import 'package:mallow_wallet/core/social_vault/social_identity.dart';
+import 'package:mallow_wallet/core/social_vault/social_vault_service.dart';
 import 'package:mallow_wallet/core/services/wallet_repository.dart'
     show DuplicateWalletException;
 import 'package:mallow_wallet/shared/theme/mallow_theme.dart';
+import 'package:mallow_wallet/shared/utils/social_wallet_copy.dart';
 import 'package:mallow_wallet/shared/widgets/app_snack_bar.dart';
 import 'package:mallow_wallet/shared/widgets/mallow_button.dart';
 import 'package:mallow_wallet/shared/widgets/sheet_drag_handle.dart';
@@ -15,6 +19,11 @@ import 'package:url_launcher/url_launcher.dart';
 /// Google / Apple social-sign-in buttons plus their in-flight state machine
 /// (spinner, mutual disable, dismissal-blocking [PopScope]), with the
 /// per-screen [title] and [otherOptions] slotted around them.
+///
+/// Those buttons always make (or open) a social vault wallet, never one from
+/// the older sign-in. The sheet deliberately says nothing about that older
+/// sign-in: it does not apply to a new wallet, and restoring an older one
+/// goes through support.
 ///
 /// The state machine lives here once so the two entry points (create + import)
 /// can't drift, and the in-flight flag is cleared in a `finally`-style fallout
@@ -99,8 +108,7 @@ class _SocialSignInMenuState extends State<SocialSignInMenu> {
       final result = await signIn();
       if (!mounted) return;
       if (result != null) {
-        // Hand the result back to the caller, which creates the account.
-        Navigator.pop(context, result);
+        _close(result);
         return;
       }
       // Null means the user cancelled — `SocialAuthService` swallows only that
@@ -112,6 +120,15 @@ class _SocialSignInMenuState extends State<SocialSignInMenu> {
       error =
           'This wallet was already added with a recovery phrase, private key '
           'or hardware wallet. Use that account instead.';
+    } on SocialVaultUnlockException catch (e) {
+      error = socialVaultUnlockMessage(e);
+    } on SocialAccountMismatchException catch (e) {
+      // A second, silent sign-in in the same flow answered as another
+      // account. The message names the account and says nothing changed.
+      error = e.message;
+    } on SocialIdentityException {
+      error =
+          'This sign-in option is not available in this version of the app.';
     } catch (e) {
       // Logged, never rendered: the thrown reason can carry SDK/config
       // internals that mean nothing to the user.
@@ -124,6 +141,27 @@ class _SocialSignInMenuState extends State<SocialSignInMenu> {
     setState(() => _loadingProvider = null);
     if (error != null) {
       AppSnackBar.show(context, error, type: AppSnackBarType.error);
+    }
+  }
+
+  /// Close this sheet with [result]: this sheet, and nothing else.
+  ///
+  /// A sign-in publishes its result before it returns here, and the app
+  /// answers that by replacing the screen the sheet was opened from. The
+  /// sheet goes with that screen, but it stays mounted until the transition
+  /// to the new one has ended. `Navigator.pop` closes whatever is on top,
+  /// and by then that is the new screen: the only page the app has, so
+  /// popping it left the app showing nothing at all.
+  void _close(SocialAuthResult result) {
+    final route = ModalRoute.of(context);
+    // Already on its way out. The navigator finishes that on its own.
+    if (route == null || !route.isActive) return;
+    final navigator = Navigator.of(context);
+    if (route.isCurrent) {
+      navigator.pop(result);
+    } else {
+      // Something sits on top of the sheet: take the sheet out from under it.
+      navigator.removeRoute(route);
     }
   }
 
@@ -199,7 +237,7 @@ class _SocialSignInMenuState extends State<SocialSignInMenu> {
                           const SizedBox(height: 12),
                           _appleButton(busy),
                         ]),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 16),
                   // Divider with "or"
                   Row(
                     children: [
@@ -256,4 +294,31 @@ class _SocialSignInMenuState extends State<SocialSignInMenu> {
       ),
     );
   }
+}
+
+/// Why a social wallet cannot be opened or created on this device, in words
+/// that say what to do about it.
+String socialVaultUnlockMessage(SocialVaultUnlockException e) {
+  if (e.platformStoreFull) {
+    return 'This phone’s Google backup already holds as many mallow keys as '
+        'it can. Remove sign-in keys you no longer use, or use a device that '
+        'can add a passkey.';
+  }
+  if (e.platformTooOld) return androidTooOldForSocialWalletMessage;
+  if (e.creating) {
+    return 'Set a screen lock on this device first. Your wallet’s key is kept '
+        'with end-to-end encryption, which needs one.';
+  }
+  if (e.hasPasskeySlots && !e.passkeysSupportedHere) {
+    return 'This wallet opens with a passkey, which needs iOS 18 or later or '
+        'Android 9 or later. Update this device, or sign in on the device you '
+        'created the wallet on.';
+  }
+  if (e.hasPasskeySlots) {
+    return 'No passkey for this wallet was found here. Use a device where you '
+        'saved one, or open the wallet on the device you created it on.';
+  }
+  return 'This wallet can only be opened on the device you created it on, or '
+      'one that shares its backup. Open it there and add a passkey under '
+      'Settings, Sign-in keys.';
 }

@@ -56,7 +56,6 @@ class Config {
   /// | It switches | Non-production | Production |
   /// | --- | --- | --- |
   /// | [solanaRpcUrl] | `?network=devnet` appended | no cluster parameter |
-  /// | [web3AuthNetwork] | `sapphire_devnet` | `sapphire_mainnet` |
   /// | [storeCdnBaseUrl] | `/store/dev` | `/store` |
   /// | `explorerUrl` | `?cluster=devnet` appended | no cluster parameter |
   ///
@@ -66,18 +65,11 @@ class Config {
   /// development build adds local and private `https` hosts as well, so a
   /// developer can point it at their own copy of the web app.
   ///
-  /// 🛑 [web3AuthNetwork] is **part of the social key derivation**: the same
-  /// social account yields a *different address* on each network. That is why
-  /// an unset variable must not silently pick a network — a build that guessed
-  /// devnet would hand a user one set of addresses and a correctly-configured
-  /// build another, with no error in between.
-  ///
   /// Defaulting to `production` rather than throwing is deliberate (and rather
   /// than to `development`, which is what this used to do). An unconfigured
-  /// build is then the *ordinary* build — mainnet, the real key derivation, the
-  /// real store — so nothing about it is a special case a reader has to know
-  /// about. Internal and CI builds select the other tiers explicitly; see
-  /// `.env.example`.
+  /// build is then the *ordinary* build — mainnet and the real store — so
+  /// nothing about it is a special case a reader has to know about. Internal
+  /// and CI builds select the other tiers explicitly; see `.env.example`.
   static Environment get environment {
     final env = _env(
       'ENV',
@@ -311,6 +303,17 @@ class Config {
   static String get programLabelsUrl => _env(
     'PROGRAM_LABELS_URL',
     const String.fromEnvironment('PROGRAM_LABELS_URL'),
+  ).trim();
+
+  /// Full URL of the published list of well-known dApp sites the browser's
+  /// address bar suggests (see `parseBrowserSites`).
+  ///
+  /// Empty (the default) disables the fetch. The address bar then suggests
+  /// the list bundled with the app, plus the user's own bookmarks and typed
+  /// sites.
+  static String get browserSitesUrl => _env(
+    'BROWSER_SITES_URL',
+    const String.fromEnvironment('BROWSER_SITES_URL'),
   ).trim();
 
   /// Reown Cloud project id for WalletConnect, created as a wallet project.
@@ -580,10 +583,10 @@ class Config {
   /// Mainnet-pinned Solana JSON-RPC, independent of the app environment, set
   /// with `--dart-define=SOLANA_MAINNET_RPC_URL`.
   ///
-  /// Two consumers pin here rather than following [solanaRpcUrl]: `.sol` name
-  /// resolution (`SnsResolver` — SNS registry accounts exist only on mainnet)
-  /// and `SolanaRpcService.mainnet`, because native staking can only delegate
-  /// to mallow's mainnet validator. Pointed at devnet, both fail *quietly* —
+  /// Two consumers pin here rather than following [solanaRpcUrl]: Solana name
+  /// resolution (`SnsResolver`, `SkrResolver` — the registries exist only on
+  /// mainnet) and `SolanaRpcService.mainnet`, because native staking can only
+  /// delegate to mallow's mainnet validator. Pointed at devnet, both fail *quietly* —
   /// an unregistered domain and an empty stake list are ordinary answers, not
   /// errors — which is why this is its own variable and not an alias.
   ///
@@ -599,13 +602,31 @@ class Config {
     return value.isNotEmpty ? value : 'https://api.mainnet-beta.solana.com';
   }
 
+  /// Solana JSON-RPC for the in-app browser's transaction reviews only, set
+  /// with `--dart-define=SOLANA_SIMULATION_URL`. Blank by default.
+  ///
+  /// A review makes its reads one after another (lookup tables, then the
+  /// simulation with an account read and a DAS batch), so it pays the distance
+  /// to its endpoint several times over. This lets those reads go to an
+  /// endpoint near the user, such as an edge worker in front of a DAS-capable
+  /// provider, while everything else keeps [solanaRpcUrl]. It must serve
+  /// `simulateTransaction`, `getMultipleAccounts`, `getFeeForMessage` and the
+  /// DAS `getAssetBatch`, and honour `?network=devnet` as [solanaRpcUrl] does.
+  /// List its host in `FIRST_PARTY_HOSTS` if it checks the client-id header.
+  ///
+  /// Unset, reviews read where they always did. Set, a review that cannot
+  /// reach it falls back to that same path, so a misconfigured value costs
+  /// time, never the review.
+  static String get solanaSimulationUrl => _env(
+    'SOLANA_SIMULATION_URL',
+    const String.fromEnvironment('SOLANA_SIMULATION_URL'),
+  );
+
   /// CAIP-2 chain id for the active Solana cluster, kept in lock-step with
   /// [solanaRpcUrl]: dev/staging run on devnet, production on mainnet-beta.
   ///
-  /// It existed to scope Reown AppKit's remote sign requests to the cluster the
-  /// app builds on. Social signing is local now (Web3Auth), so nothing reads
-  /// this today — it is kept for the next caller that needs a CAIP-2 id, and
-  /// must keep tracking [solanaRpcUrl]'s cluster if one appears.
+  /// The login challenge accepts it as a name for the cluster the app builds
+  /// on, so it must keep tracking [solanaRpcUrl]'s cluster.
   static String get solanaChainId => switch (environment) {
     Environment.development => 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
     Environment.staging => 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
@@ -767,29 +788,53 @@ class Config {
   // ---------------------------------------------------------------------------
 
   // ---------------------------------------------------------------------------
-  // Web3Auth / MetaMask Embedded Wallets (social sign-in)
+  // Social sign-in (social vault)
   // ---------------------------------------------------------------------------
 
-  /// Web3Auth client ID for MetaMask Embedded Wallets social sign-in.
+  /// Google OAuth client id of the deployment's **web** application, from
+  /// `--dart-define=GOOGLE_SERVER_CLIENT_ID`.
   ///
-  /// Get one at: https://dashboard.web3auth.io
-  static String get web3AuthClientId => _env(
-    'WEB3AUTH_CLIENT_ID',
-    const String.fromEnvironment('WEB3AUTH_CLIENT_ID'),
+  /// Android's Credential Manager issues the Google ID token for this
+  /// audience, and the backend accepts it from there; iOS passes it too.
+  /// Unset, "Continue with Google" reports that it is not configured.
+  static String get googleServerClientId => _env(
+    'GOOGLE_SERVER_CLIENT_ID',
+    const String.fromEnvironment('GOOGLE_SERVER_CLIENT_ID'),
   );
 
-  /// Web3Auth network name, kept in lock-step with [environment]: dev/staging
-  /// on sapphire_devnet, production on sapphire_mainnet.
+  /// Google OAuth client id of the **iOS** application, from
+  /// `--dart-define=GOOGLE_IOS_CLIENT_ID`. The iOS build also turns it into
+  /// the reversed-client-id URL scheme Google's SDK requires
+  /// (`ios/scripts/google_sign_in_plist.sh`). Unused on Android.
+  static String get googleIosClientId => _env(
+    'GOOGLE_IOS_CLIENT_ID',
+    const String.fromEnvironment('GOOGLE_IOS_CLIENT_ID'),
+  );
+
+  /// Sign in with Apple **Services ID**, from
+  /// `--dart-define=APPLE_SERVICES_ID`. Android has no native Apple sign-in
+  /// and runs Apple's web flow, which identifies the app by this id; iOS uses
+  /// the native sheet and does not read it. The Services ID must be grouped
+  /// with the iOS App ID, or the same person gets a different Apple identity
+  /// on Android than on iOS — and a different wallet.
+  static String get appleServicesId => _env(
+    'APPLE_SERVICES_ID',
+    const String.fromEnvironment('APPLE_SERVICES_ID'),
+  );
+
+  /// WebAuthn relying-party id for social-vault passkeys, from
+  /// `--dart-define=PASSKEY_RP_ID` — a bare domain, e.g. `example.com`.
   ///
-  /// Plain string, not the SDK enum, so this file stays SDK-free; the mapping
-  /// lives in `SocialAuthService`. The network is part of the key derivation —
-  /// switching it later changes every social address, so it must never change
-  /// for an environment once live.
-  static String get web3AuthNetwork => switch (environment) {
-    Environment.development => 'sapphire_devnet',
-    Environment.staging => 'sapphire_devnet',
-    Environment.production => 'sapphire_mainnet',
-  };
+  /// It must be a domain the app is associated with (the iOS
+  /// `webcredentials:` entitlement and the domain's `apple-app-site-association`
+  /// file; Android's `assetlinks.json` with `get_login_creds`), and the same
+  /// one the web client uses, or passkeys made in one cannot open the vault in
+  /// the other. Unset, no passkeys are offered and social wallets rely on the
+  /// platform slot alone.
+  static String get passkeyRpId => _env(
+    'PASSKEY_RP_ID',
+    const String.fromEnvironment('PASSKEY_RP_ID'),
+  ).trim();
 
   // ---------------------------------------------------------------------------
   // IPFS pinning (NFT mint flow)

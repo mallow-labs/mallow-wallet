@@ -2,9 +2,9 @@
 #
 # Every build variable the app reads must be documented in .env.example.
 #
-# ENV escaped documentation entirely: it selected the Solana cluster AND the
-# Web3Auth network that social key derivation depends on, and .env.example never
-# named it, so a fork that filled in every documented key still shipped a
+# ENV escaped documentation entirely: it selected the Solana cluster AND, at
+# the time, the network that social key derivation depended on, and
+# .env.example never named it, so a fork that filled in every documented key still shipped a
 # permanently-devnet build. Nothing errored — devnet answers are well formed.
 #
 # 🛑 The match spans a line break on purpose. Two calls in this repo wrap:

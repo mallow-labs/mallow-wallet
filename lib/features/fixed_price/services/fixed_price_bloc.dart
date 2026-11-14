@@ -131,6 +131,7 @@ class FixedPriceState extends Equatable {
     this.userPubkey = '',
     this.entryFromArtworkDetail = false,
     this.isSecondaryMarket = false,
+    this.saleMarketUnknown = false,
     this.showVerifiedSellerOptions = false,
     this.selectedArtwork,
     this.listingEligibilityError,
@@ -165,6 +166,12 @@ class FixedPriceState extends Equatable {
   /// the verified update authority). Drives the proceeds split logic and
   /// hides the verified-seller-only options.
   final bool isSecondaryMarket;
+
+  /// True when the sale could not be classified as primary or secondary (the
+  /// collection of a Core asset could not be read). [isSecondaryMarket] means
+  /// nothing then, so the review step shows no proceeds rows and no
+  /// direct-proceeds toggle instead of figures for the wrong class.
+  final bool saleMarketUnknown;
 
   /// Webapp parity: `(onChainAsset != null && !isSecondaryMarket(...)) ||
   /// isApprovedCreator(user)` (`ListingContext`). For now we
@@ -227,6 +234,7 @@ class FixedPriceState extends Equatable {
     String? userPubkey,
     bool? entryFromArtworkDetail,
     bool? isSecondaryMarket,
+    bool? saleMarketUnknown,
     bool? showVerifiedSellerOptions,
     Object? selectedArtwork = _sentinel,
     Object? listingEligibilityError = _sentinel,
@@ -251,6 +259,7 @@ class FixedPriceState extends Equatable {
     entryFromArtworkDetail:
         entryFromArtworkDetail ?? this.entryFromArtworkDetail,
     isSecondaryMarket: isSecondaryMarket ?? this.isSecondaryMarket,
+    saleMarketUnknown: saleMarketUnknown ?? this.saleMarketUnknown,
     showVerifiedSellerOptions:
         showVerifiedSellerOptions ?? this.showVerifiedSellerOptions,
     listingEligibilityError: identical(listingEligibilityError, _sentinel)
@@ -288,6 +297,7 @@ class FixedPriceState extends Equatable {
     userPubkey,
     entryFromArtworkDetail,
     isSecondaryMarket,
+    saleMarketUnknown,
     showVerifiedSellerOptions,
     selectedArtwork,
     listingEligibilityError,
@@ -400,16 +410,18 @@ class FixedPriceState extends Equatable {
   /// webapp `ProceedsInfo`'s `showDirectProceedsOption`: only on a primary
   /// sale with creator shares where the seller isn't the first creator (the
   /// split is a no-op otherwise).
-  bool get showDirectProceedsOption => showDirectProceedsOptionOf(
-    isSecondary: isSecondaryMarket,
-    seller: userPubkey,
-    shares: royaltyShares,
-  );
+  bool get showDirectProceedsOption =>
+      !saleMarketUnknown &&
+      showDirectProceedsOptionOf(
+        isSecondary: isSecondaryMarket,
+        seller: userPubkey,
+        shares: royaltyShares,
+      );
 
   /// Pre-computed proceeds rows for the review step. Empty when no seller
   /// is set (i.e. before the bloc has hydrated).
   List<ProceedsSplit> get proceedsSplits {
-    if (userPubkey.isEmpty) return const [];
+    if (userPubkey.isEmpty || saleMarketUnknown) return const [];
     return computeProceedsSplits(
       seller: userPubkey,
       priceRaw: price,
@@ -617,7 +629,8 @@ class FixedPriceBloc extends Bloc<FixedPriceEvent, FixedPriceState> {
     emit(
       state.copyWith(
         listingEligibilityError: ctx.tradeEligibility.message,
-        isSecondaryMarket: ctx.isSecondaryMarket,
+        isSecondaryMarket: ctx.isSecondaryMarket ?? false,
+        saleMarketUnknown: ctx.isSecondaryMarket == null,
         showVerifiedSellerOptions: ctx.isVerifiedSeller,
         royaltyShares: ctx.royaltyShares,
         royaltyBps: ctx.royaltyBps,
@@ -734,7 +747,10 @@ class FixedPriceBloc extends Bloc<FixedPriceEvent, FixedPriceState> {
       sink: sink,
       tracker: _txTracker,
       txsBase64: txs,
-      usdValue: 0.0,
+      // The NFT leaves the wallet's control at a price whoever is signing just
+      // chose, so that price says nothing about what is at stake. Valued as
+      // unknown, step-up auth prompts at any threshold, as for a direct transfer.
+      usdValue: null,
       flow: const FlowKey.solana(AppFlow.fixedPriceCreate),
       stageFor: (index, total, ledger) {
         if (ledger) return kLedgerSigningStage;

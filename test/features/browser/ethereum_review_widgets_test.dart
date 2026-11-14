@@ -236,10 +236,20 @@ void main() {
       expect(find.text('Transfer 25,000 USDC'), findsOneWidget);
       final card = find.byType(ReviewRiskCard);
       expect(card, findsOneWidget);
-      final recipient = tester.widget<ReviewAddress>(
-        find.descendant(of: card, matching: find.byType(ReviewAddress)),
+      // From, to and the token contract, in that order.
+      expect(
+        tester
+            .widgetList<ReviewAddress>(
+              find.descendant(of: card, matching: find.byType(ReviewAddress)),
+            )
+            .map((chip) => chip.address),
+        [_me.toLowerCase(), _spender, _usdc],
       );
-      expect(recipient.address, _spender);
+      expect(
+        find.descendant(of: card, matching: find.text('USDC contract')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('is not this wallet'), findsNothing);
       // The review shows the expiry in the device's time zone, so the
       // expected text is that instant rendered locally, not its UTC form.
       final expires = DateTime.utc(2030).toLocal();
@@ -438,7 +448,7 @@ void main() {
     );
   });
 
-  testWidgets('generic typed data lists its fields and signs on a tap', (
+  testWidgets('generic typed data lists its fields and signs only on a hold', (
     tester,
   ) async {
     var approved = 0;
@@ -494,7 +504,17 @@ void main() {
       'message': {...data.message, 'weight': '1000000000000000000'},
     });
     expect(decimal.digest, data.digest);
+    expect(find.byKey(const Key('unrecognised-typed-data')), findsOneWidget);
     await tester.tap(find.byKey(const Key('approve-signing')));
+    await tester.pump();
+    expect(approved, 0, reason: 'unrecognised data is not signed on a tap');
+    final hold = await tester.startGesture(
+      tester.getCenter(find.byKey(const Key('approve-signing'))),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 1300));
+    await hold.up();
+    await tester.pump();
     expect(approved, 1);
   });
 

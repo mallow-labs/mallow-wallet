@@ -15,11 +15,16 @@ class SecretRow extends StatelessWidget {
     required this.title,
     required this.addresses,
     required this.onTap,
+    this.titleBadge,
     super.key,
   });
 
   final Widget leading;
   final String title;
+
+  /// Shown right after [title], on its line — the wallet-type badge of the
+  /// account a secret belongs to, when it has one.
+  final Widget? titleBadge;
   final List<String> addresses;
   final VoidCallback onTap;
 
@@ -42,11 +47,18 @@ class SecretRow extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    title,
-                    style: MallowTheme.uiMeta,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          title,
+                          style: MallowTheme.uiMeta,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      ?titleBadge,
+                    ],
                   ),
                   if (addresses.isNotEmpty) ...[
                     const SizedBox(height: 4),

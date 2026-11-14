@@ -2240,4 +2240,131 @@ void main() {
       expect(decoded.accounts.single.beneficiary, isNull);
     });
   });
+
+  group('token reads', () {
+    const token = '0x2222222222222222222222222222222222222222';
+    final transfer =
+        '0xa9059cbb${_bob.substring(2).toLowerCase().padLeft(64, '0')}'
+        '${'1'.padLeft(64, '0')}';
+    // ABI-encoded string "TKN".
+    final symbol =
+        '0x${'20'.padLeft(64, '0')}${'3'.padLeft(64, '0')}'
+        '${'544b4e'.padRight(64, '0')}';
+
+    EthereumDappTransactionRequest request(String to, String data) =>
+        EthereumDappTransactionRequest.parse({
+          'to': to,
+          'data': data,
+        }, account: _cow);
+
+    List<String> reads() => [
+      for (final (method, params) in calls)
+        if (method == 'eth_call')
+          ((params.first! as Map)['data'] as String).substring(0, 10),
+    ];
+
+    setUp(() {
+      rpc['eth_call'] = (params) =>
+          (params.first! as Map)['data'] == '0x313ce567'
+          ? '0x${'12'.padLeft(64, '0')}'
+          : symbol;
+      simulate = (to, data, value) async => EvmSimulationResult(
+        changes: [
+          EvmAssetChange(
+            assetType: 'ERC20',
+            changeType: 'TRANSFER',
+            from: _cow.toLowerCase(),
+            to: _bob.toLowerCase(),
+            contractAddress: token,
+            rawAmount: '1',
+          ),
+        ],
+      );
+    });
+
+    test('of a token\'s own call go out with the simulation', () async {
+      final simulation = Completer<EvmSimulationResult>();
+      simulate = (to, data, value) => simulation.future;
+      final prepared = adapter().prepareTransaction(
+        request: request(token, transfer),
+        walletId: 'w',
+        address: _cow,
+        origin: 'https://example.org',
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(reads(), unorderedEquals(['0x313ce567', '0x95d89b41']));
+      simulation.complete(
+        EvmSimulationResult(
+          changes: [
+            EvmAssetChange(
+              assetType: 'ERC20',
+              changeType: 'TRANSFER',
+              from: _cow.toLowerCase(),
+              to: _bob.toLowerCase(),
+              contractAddress: token,
+              rawAmount: '1',
+            ),
+          ],
+        ),
+      );
+      final review = (await prepared).review;
+      expect(reads(), hasLength(2), reason: 'not read again after it');
+      expect(
+        review.funds.firstWhere((f) => f.asset.id == token).asset.decimals,
+        18,
+      );
+      expect(review.tokenMetadata[token]?.symbol, 'TKN');
+    });
+
+    test('are not made for a call that does not name a token', () async {
+      final simulation = Completer<EvmSimulationResult>();
+      simulate = (to, data, value) => simulation.future;
+      final prepared = adapter().prepareTransaction(
+        request: request(_spender, '0x12345678'),
+        walletId: 'w',
+        address: _cow,
+        origin: 'https://example.org',
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(reads(), isEmpty);
+      simulation.complete(const EvmSimulationResult(changes: []));
+      await prepared;
+    });
+
+    test('are kept for the next review through the same node', () async {
+      final ethereum = adapter();
+      for (var i = 0; i < 2; i++) {
+        await ethereum.prepareTransaction(
+          request: request(token, transfer),
+          walletId: 'w',
+          address: _cow,
+          origin: 'https://example.org',
+        );
+      }
+      expect(reads(), hasLength(2));
+    });
+
+    test('that found no decimals are made again', () async {
+      rpc['eth_call'] = (params) =>
+          (params.first! as Map)['data'] == '0x313ce567'
+          ? throw StateError('reverted')
+          : symbol;
+      final ethereum = adapter();
+      for (var i = 0; i < 2; i++) {
+        final review = (await ethereum.prepareTransaction(
+          request: request(token, transfer),
+          walletId: 'w',
+          address: _cow,
+          origin: 'https://example.org',
+        )).review;
+        expect(
+          review.warnings,
+          contains(
+            'Token precision could not be verified. Raw amounts are shown.',
+          ),
+        );
+      }
+      expect(reads().where((r) => r == '0x313ce567'), hasLength(2));
+    });
+  });
 }

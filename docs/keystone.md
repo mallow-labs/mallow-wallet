@@ -10,7 +10,7 @@ mallow can hold Solana and Ethereum wallets whose keys live on a [Keystone](http
 | Import | Scan any code the device shows from **Connect Software Wallet**, and as many as needed: the app reads whatever Solana accounts and Ethereum key each one carries and adds them to one picker. All three Solana paths are accepted; Ethereum is accepted in the BIP-44 standard layout (see [Ethereum](#ethereum)). |
 | Signing | Every Keystone Solana transaction signs through `WalletManager.signCompiledTx` → `KeystoneSignService`, and every Ethereum transaction through `WalletManager.signEthereumTransaction` → `KeystoneSignService`. Client-built SOL/SPL sends, marketplace, mint, staking and swaps use `TransactionExecutor` → `TransactionPipeline.signAndBroadcast` → `signSendConfirm`; the in-app browser calls `signCompiledTx` directly with its pinned wallet. |
 | Login | The backend's ownership proof: the device signs the challenge text verbatim, as Seed Vault does. An Ethereum row signs it as an EIP-191 personal message. |
-| Browser | Solana: transactions and `solana:signMessage`. The device signs a site's message bytes as given, showing a `\xffsolana offchain` message structurally and anything else as UTF-8 or hex. Ethereum: EIP-1559 transactions, `personal_sign` and `eth_signTypedData_v4`. |
+| Browser | Solana: transactions, `solana:signMessage`, `solana:signOffchainMessage` and `solana:signIn`. The device signs a site's message bytes as given, showing a `\xffsolana offchain` message structurally and anything else as UTF-8 or hex. Ethereum: EIP-1559 transactions, `personal_sign` and `eth_signTypedData_v4`. |
 
 ## Connecting a Keystone
 

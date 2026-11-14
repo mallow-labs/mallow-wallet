@@ -24,6 +24,7 @@ import '../../artwork/services/artwork_edited_signal.dart';
 import '../../artwork/services/artwork_hidden_signal.dart';
 import '../../artwork/services/artwork_removal_signal.dart';
 import '../../curations/services/curations_refresh_signal.dart';
+import '../../moderation/services/moderation_filter.dart';
 import '../../portfolio/services/portfolio_bloc.dart';
 import '../data/user_profile_repository.dart';
 import '../models/cached_profile_data.dart';
@@ -186,8 +187,15 @@ sealed class UserProfileState with _$UserProfileState {
 /// BLoC for the user profile screen.
 @injectable
 class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
-  UserProfileBloc(this._repository, this._curationRepository, this._authService)
-    : super(const UserProfileState.initial()) {
+  UserProfileBloc(
+    this._repository,
+    this._curationRepository,
+    this._authService, {
+    // Tests pass a filter over fake stores. Kept out of the generated
+    // construction, which uses the app's.
+    @ignoreParam ModerationFilter Function()? moderation,
+  }) : _moderation = moderation ?? ModerationFilter.current,
+       super(const UserProfileState.initial()) {
     on<UserProfileLoad>(_onLoad);
     on<UserProfileLoadByUsername>(_onLoadByUsername);
     on<UserProfileChangeTab>(_onChangeTab);
@@ -202,6 +210,12 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
     on<UserProfileRefreshCurations>(_onRefreshCurations);
     on<UserProfileArtworkRemoved>(_onArtworkRemoved);
     on<UserProfileArtworkHidden>(_onArtworkHidden);
+
+    // The repository filters each page of someone else's profile. This covers
+    // the lists already on screen when the viewer blocks an account or
+    // reports something from a route pushed on top of the profile.
+    _moderationChanges = _moderation().changes
+      ..addListener(_onModerationChanged);
 
     // Curation mutations (create/rename/visibility/add/remove artwork/delete)
     // fire the app-wide curations signal — refetch the curation groups so an
@@ -251,6 +265,52 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
   final UserProfileRepository _repository;
   final CurationRepository _curationRepository;
   final AuthService _authService;
+  final ModerationFilter Function() _moderation;
+  late final Listenable _moderationChanges;
+
+  /// Has someone else's profile filtered again, through the events that
+  /// already rebuild its lists:
+  /// - when a loaded artwork is hidden now, "load more" drops it from the
+  ///   loaded pages before it appends the next one ([_dropHidden]), so the
+  ///   grid keeps its place and the page it loads makes up for what it lost;
+  /// - the curation groups are fetched again when one of them was reported.
+  ///
+  /// The viewer's own profile is left alone.
+  void _onModerationChanged() {
+    if (isClosed) return;
+    final current = state;
+    if (current is! UserProfileLoaded || _isOwn(current.profile)) return;
+    final moderation = _moderation();
+    final hidden = _hiddenOn(current.profile, moderation);
+    if ([
+      _allArtworks,
+      _allOwnedArtworks,
+      _allListedArtworks,
+    ].any((list) => list.any(hidden))) {
+      add(const UserProfileEvent.loadMoreArtworks());
+    }
+    final reportedCuration = _allGroups.any(
+      (g) =>
+          g.type == ArtGroupType.curation && moderation.hidesCuration(id: g.id),
+    );
+    if (reportedCuration) add(const UserProfileEvent.refreshCurations());
+  }
+
+  bool _isOwn(UserProfile profile) => _computeIsOwnProfile(
+    ownerAddress: profile.address,
+    linkedAddresses: profile.linkedAddresses,
+  );
+
+  /// Whether an artwork on [profile]'s page is hidden. The profile's own
+  /// addresses do not count there: the repository applies the same rule to
+  /// each fetch.
+  bool Function(PortfolioArtwork) _hiddenOn(
+    UserProfile profile,
+    ModerationFilter moderation,
+  ) {
+    final except = [profile.address, ...profile.linkedAddresses];
+    return (a) => moderation.hidesMint(a.mintAccount, except: except);
+  }
 
   StreamSubscription<void>? _curationsSignalSub;
   StreamSubscription<String>? _editedSignalSub;
@@ -272,6 +332,7 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
     _editedSignalSub?.cancel();
     _removalSignalSub?.cancel();
     _hiddenSignalSub?.cancel();
+    _moderationChanges.removeListener(_onModerationChanged);
     unawaited(_transientErrors.close());
     return super.close();
   }
@@ -820,9 +881,17 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
         // (private included) under the viewed profile.
         ownerAddress: ownerAddress,
       );
+      // A curation the viewer reported stays out of someone else's Curations
+      // tab. Their own tab lists every curation they have.
+      final moderation = _moderation();
       return (
         groups: CurationRepository.curationsToGroups(
-          curations,
+          isOwnProfile
+              ? curations
+              : moderation.visible(
+                  curations,
+                  (c) => moderation.hidesCuration(id: c.id),
+                ),
           creatorName: creatorName,
         ),
         error: null,
@@ -1159,6 +1228,46 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
     );
   }
 
+  /// Drops, from the loaded artwork pages of someone else's profile, what the
+  /// viewer has blocked or reported since they were fetched: artworks by a
+  /// blocked account in the Created, Owned and Listed lists, and reported
+  /// artworks. Returns the state to carry on from; emits only when something
+  /// was dropped.
+  ///
+  /// Nothing is dropped on the viewer's own profile, and the profile's own
+  /// addresses do not count on its page (the repository applies the same rule
+  /// to each fetch). The viewer-owned slice is the viewer's, so it stays.
+  UserProfileLoaded _dropHidden(
+    UserProfileLoaded current,
+    Emitter<UserProfileState> emit,
+  ) {
+    final profile = current.profile;
+    if (_isOwn(profile)) return current;
+    final hidden = _hiddenOn(profile, _moderation());
+    bool keep(PortfolioArtwork a) => !hidden(a);
+
+    final before =
+        _allArtworks.length +
+        _allOwnedArtworks.length +
+        _allListedArtworks.length;
+    _allArtworks = _allArtworks.where(keep).toList();
+    _allOwnedArtworks = _allOwnedArtworks.where(keep).toList();
+    _allListedArtworks = _allListedArtworks.where(keep).toList();
+    final after =
+        _allArtworks.length +
+        _allOwnedArtworks.length +
+        _allListedArtworks.length;
+    if (after == before) return current;
+
+    final next = current.copyWith(
+      artworks: current.artworks?.where(keep).toList(),
+      ownedArtworks: current.ownedArtworks?.where(keep).toList(),
+      listedArtworks: current.listedArtworks?.where(keep).toList(),
+    );
+    emit(next);
+    return next;
+  }
+
   /// Optimistic hide/unhide: flip the matching artwork's badge across every
   /// profile list it may appear in (Created / Owned / the viewer-owned slice)
   /// plus the backing slices, so the corner badge updates immediately. The item
@@ -1296,8 +1405,11 @@ class UserProfileBloc extends Bloc<UserProfileEvent, UserProfileState> {
     UserProfileLoadMoreArtworks event,
     Emitter<UserProfileState> emit,
   ) async {
-    final currentState = state;
-    if (currentState is! UserProfileLoaded) return;
+    final loaded = state;
+    if (loaded is! UserProfileLoaded) return;
+    // Before anything is appended: what is already loaded may hold content
+    // the viewer has blocked or reported since (see [_onModerationChanged]).
+    final currentState = _dropHidden(loaded, emit);
 
     final addresses = _profileQueryAddresses(currentState.profile);
 

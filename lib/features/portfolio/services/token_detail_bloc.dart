@@ -293,9 +293,10 @@ class TokenDetailBloc extends Bloc<TokenDetailEvent, TokenDetailState> {
   }
 
   /// The wallets whose cached balances make up the displayed holding on
-  /// [chain]: the profile-wide set when a Profile session aggregates its
-  /// portfolio, otherwise the session's active Solana wallet — or its first
-  /// Solana wallet when the selection sits on another chain.
+  /// [chain]: every session wallet on that chain (the set the tokens tab
+  /// summed), falling back to the active Solana wallet — or the session's
+  /// first Solana wallet when the selection sits on another chain — only when
+  /// the session has no Solana wallets loaded.
   ///
   /// Also the scope [_historyAddresses] reads the History tab over, so the tab
   /// and the balance above it always describe the same wallets.
@@ -324,8 +325,8 @@ class TokenDetailBloc extends Bloc<TokenDetailEvent, TokenDetailState> {
       case Chain.solana:
         break;
     }
-    final profile = _aggregator.profilePortfolioAddresses();
-    if (profile != null && profile.isNotEmpty) return profile;
+    final session = _aggregator.portfolioSolanaAddresses();
+    if (session != null && session.isNotEmpty) return session;
     // 🛑 The globally-selected wallet is not guaranteed to be a Solana one —
     // an Ethereum/Tezos flow re-points it (`SessionManager.selectSourceWallet`)
     // and an account may simply have one selected. Falling back to the
@@ -449,11 +450,10 @@ class TokenDetailBloc extends Bloc<TokenDetailEvent, TokenDetailState> {
   /// The wallets whose transfer history backs [token]'s History tab.
   ///
   /// Scoped to **the token's own chain**, and within it the **same scope the
-  /// tokens tab summed the displayed row over** ([_balanceAddresses]) — a
-  /// Profile session's linked wallets, else the session's own active wallet on
-  /// that chain. Reading a narrower set than the balance above it is what left
-  /// the tab permanently empty for a Profile holding the token on a wallet
-  /// other than the active signer.
+  /// tokens tab summed the displayed row over** ([_balanceAddresses]) — every
+  /// session wallet on that chain. Reading a narrower set than the balance
+  /// above it is what left the tab permanently empty for a session holding the
+  /// token on a wallet other than the active signer.
   ///
   /// Only the token's chain, because `GET /v2/transfers` interprets the `mint`
   /// in that chain's terms: wallets on any other chain can only ever return

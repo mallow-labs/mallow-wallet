@@ -4,6 +4,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/widgets/mallow_button.dart';
 import '../../../shared/widgets/mallow_svg_icon.dart';
+import '../../../shared/widgets/permission_disclosure.dart';
 import '../../../shared/widgets/permission_settings_sheet.dart';
 
 /// Fullscreen QR scanner used by the send screen. Renders a black chrome for
@@ -54,17 +55,20 @@ class SendQrScannerView extends StatelessWidget {
       // Without an errorBuilder a denied camera permission renders as a black
       // rectangle, which reads as a broken scanner. Surface the reason and a
       // route back to the OS setting instead.
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          final window = scanWindowFor(constraints.biggest);
-          return MobileScanner(
-            onDetect: onDetect,
-            scanWindow: window,
-            overlayBuilder: (context, _) => _ScanWindowOverlay(window: window),
-            errorBuilder: (context, error) =>
-                _ScannerError(error: error, offersPaste: offersPaste),
-          );
-        },
+      body: CameraDisclosureGate(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final window = scanWindowFor(constraints.biggest);
+            return MobileScanner(
+              onDetect: onDetect,
+              scanWindow: window,
+              overlayBuilder: (context, _) =>
+                  _ScanWindowOverlay(window: window),
+              errorBuilder: (context, error) =>
+                  _ScannerError(error: error, offersPaste: offersPaste),
+            );
+          },
+        ),
       ),
     );
   }

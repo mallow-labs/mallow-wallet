@@ -107,7 +107,11 @@ class MockBackendTest(unittest.TestCase):
         # worse than no fixture: the screen renders its ERROR view and a
         # careless test reads that as empty.
         self.assertEqual(
-            (200, {"result": {"user": {}}}), self.post("/v0/login", {})
+            (200, {"result": {"address": "", "expiresAt": None}}),
+            self.post("/v2/session", {}),
+        )
+        self.assertEqual(
+            (200, {"result": {"user": {}}}), self.get("/v0/currentUser")
         )
         self.assertEqual((200, {"result": []}), self.get("/v2/evm/balances"))
         self.assertEqual(
@@ -173,7 +177,7 @@ class MockBackendTest(unittest.TestCase):
             self.post("/v2/wallet/portfolio", {}),
         )
         # Untouched routes still fall back to the default scenario.
-        self.assertEqual((200, {"result": {"user": {}}}), self.post("/v0/login", {}))
+        self.assertEqual((200, {"result": {"user": {}}}), self.get("/v0/currentUser"))
         # rpc-keyed route wins over the built-in verb.
         self.assertEqual(777, self.rpc("getBalance", ["addr"])["result"]["value"])
         # Route-level status override.
@@ -200,7 +204,7 @@ class MockBackendTest(unittest.TestCase):
         self.assertFalse(body["ok"])
         self.assertIn("unknown scenario: nope", body["error"])
         # And the previous scenario is untouched.
-        self.assertEqual((200, {"result": {"user": {}}}), self.post("/v0/login", {}))
+        self.assertEqual((200, {"result": {"user": {}}}), self.get("/v0/currentUser"))
 
     def test_scenarios_are_rediscovered_without_a_restart(self):
         late = os.path.join(mock_backend.FIXTURES_DIR, "selftest_late")
@@ -285,13 +289,13 @@ class MockBackendTest(unittest.TestCase):
     # --- recorded requests ----------------------------------------------
 
     def test_requests_are_recorded_and_reset_clears_them(self):
-        self.post("/v0/login", {"hello": "world"})
+        self.post("/v2/session", {"hello": "world"})
         self.rpc("getHealth")
         status, recorded = self.get("/__test__/requests")
         self.assertEqual(200, status)
         paths = [entry["path"] for entry in recorded]
-        self.assertIn("/v0/login", paths)
-        login = next(e for e in recorded if e["path"] == "/v0/login")
+        self.assertIn("/v2/session", paths)
+        login = next(e for e in recorded if e["path"] == "/v2/session")
         self.assertEqual({"hello": "world"}, login["body"])
         self.assertIsNone(login["rpc"])
         self.assertIn("getHealth", [entry["rpc"] for entry in recorded])

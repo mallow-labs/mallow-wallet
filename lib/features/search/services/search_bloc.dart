@@ -14,6 +14,7 @@ import 'package:mallow_api/mallow_api.dart' show $ExploreFilterCopyWith;
 import '../../../core/result/result.dart';
 import '../../../core/services/preferences_service.dart';
 import '../../../di.dart';
+import '../../moderation/services/moderation_filter.dart';
 import '../../portfolio/services/portfolio_bloc.dart';
 import '../data/search_repository.dart';
 import '../models/recently_viewed_item.dart';
@@ -141,13 +142,21 @@ sealed class SearchState with _$SearchState {
 /// [_SearchExecute] event dispatched after the timer fires.
 @injectable
 class SearchBloc extends Bloc<SearchEvent, SearchState> {
-  SearchBloc(this._repository)
-    : super(
-        SearchState.initial(
-          recentSearches: sl<PreferencesService>().recentSearches,
-          recentlyViewed: sl<PreferencesService>().recentlyViewed,
-        ),
-      ) {
+  SearchBloc(
+    this._repository, {
+    // Tests pass a filter over fake stores. Kept out of the generated
+    // construction, which uses the app's.
+    @ignoreParam ModerationFilter Function()? moderation,
+  }) : _moderation = moderation ?? ModerationFilter.current,
+       super(
+         SearchState.initial(
+           recentSearches: sl<PreferencesService>().recentSearches,
+           recentlyViewed: _visibleRecentlyViewed(
+             (moderation ?? ModerationFilter.current)(),
+             sl<PreferencesService>().recentlyViewed,
+           ),
+         ),
+       ) {
     on<SearchQueryChanged>(_onQueryChanged);
     on<SearchClear>(_onClear);
     on<_SearchExecute>(_onExecute);
@@ -161,9 +170,47 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     on<SearchRecentSearchTapped>(_onRecentSearchTapped);
     on<SearchClearRecentSearches>(_onClearRecentSearches);
     on<SearchClearRecentlyViewed>(_onClearRecentlyViewed);
+
+    // The repository filters each fetch. This covers what is already on
+    // screen when the viewer blocks an account or reports something from a
+    // route pushed on top of the results.
+    _moderationChanges = _moderation().changes
+      ..addListener(_onModerationChanged);
   }
 
   final SearchRepository _repository;
+  final ModerationFilter Function() _moderation;
+  late final Listenable _moderationChanges;
+
+  /// Has what is on screen filtered again, through the event that already
+  /// rebuilds it:
+  /// - the landing page is re-read from storage (an empty query; unlike
+  ///   [SearchClear] it leaves a drilldown's first page, which loads under
+  ///   this same state, alone);
+  /// - text results are searched again, which filters them in the repository
+  ///   ([_SearchExecute]; it keeps the current results up until the new ones
+  ///   land);
+  /// - a drilldown that holds something hidden now takes "load more", which
+  ///   drops it from the loaded pages before appending the next one
+  ///   ([_dropHidden]). The list keeps its place, and the page it loads makes
+  ///   up for what it lost.
+  void _onModerationChanged() {
+    if (isClosed) return;
+    final current = state;
+    switch (current) {
+      case SearchInitial():
+        add(const SearchEvent.queryChanged(''));
+      case SearchLoaded(:final query):
+        if (query == _currentQuery) add(SearchEvent.execute(query));
+      case SearchFilterResults() || SearchArtworkResults():
+        if (_holdsHidden(current)) {
+          add(const SearchEvent.loadMoreFilterResults());
+        }
+      case SearchLoading() || SearchError() || SearchFilterLoading():
+        // Nothing loaded yet: the fetch in flight is filtered when it lands.
+        break;
+    }
+  }
 
   Timer? _debounceTimer;
   String _currentQuery = '';
@@ -187,13 +234,101 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
   /// persisted values (recent searches and recently viewed content).
   SearchState get _landingState => SearchState.initial(
     recentSearches: _prefs.recentSearches,
-    recentlyViewed: _prefs.recentlyViewed,
+    recentlyViewed: _visibleRecentlyViewed(
+      _moderation(),
+      _prefs.recentlyViewed,
+    ),
   );
 
   @override
   Future<void> close() {
     _debounceTimer?.cancel();
+    _moderationChanges.removeListener(_onModerationChanged);
     return super.close();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Blocked and reported content
+  // ---------------------------------------------------------------------------
+
+  /// The viewer's own history, minus what they have since blocked or
+  /// reported. The stored history is left alone: an unblock brings the row
+  /// back.
+  static List<RecentlyViewedItem> _visibleRecentlyViewed(
+    ModerationFilter moderation,
+    List<RecentlyViewedItem> items,
+  ) => moderation.visible(
+    items,
+    (item) => switch (item.type) {
+      RecentlyViewedType.user => moderation.hidesAddress(item.user?.address),
+      RecentlyViewedType.artwork => moderation.hidesMint(
+        item.artwork?.mintAccount ?? '',
+      ),
+      RecentlyViewedType.collection => moderation.hidesAddress(
+        item.collection?.curatorAddress,
+      ),
+      RecentlyViewedType.curation => moderation.hidesCuration(
+        id: item.curation?.id,
+        owner: item.curation?.ownerAddress,
+      ),
+      RecentlyViewedType.token => false,
+    },
+  );
+
+  /// The non-artwork drilldown rows, minus reported ones. Only an exhibition
+  /// row carries an identifier (its slug, in [FilterResultItem.mintAccount]);
+  /// the curation rows are filtered in the repository, where their owner is.
+  ///
+  /// Applied here and not in the repository because these lists read "is
+  /// there more" off the page length, which must be the unfiltered one.
+  static List<FilterResultItem> _visibleFilterItems(
+    ModerationFilter moderation,
+    SearchFilterType filterType,
+    List<FilterResultItem> items,
+  ) => filterType != SearchFilterType.exhibitions
+      ? items
+      : moderation.visible(
+          items,
+          (item) => moderation.hidesCuration(slug: item.mintAccount),
+        );
+
+  /// [current] without what the viewer has blocked or reported since its
+  /// pages were fetched. The same instance when nothing is hidden, or when
+  /// [current] is not a drilldown.
+  SearchState _withoutHidden(SearchState current) {
+    final moderation = _moderation();
+    switch (current) {
+      case SearchFilterResults():
+        final visible = _visibleFilterItems(
+          moderation,
+          current.filterType,
+          current.items,
+        );
+        return visible.length == current.items.length
+            ? current
+            : current.copyWith(items: visible);
+      case SearchArtworkResults():
+        final visible = moderation.visible(
+          current.artworks,
+          (a) => moderation.hidesMint(a.mintAccount),
+        );
+        return visible.length == current.artworks.length
+            ? current
+            : current.copyWith(artworks: visible);
+      default:
+        return current;
+    }
+  }
+
+  bool _holdsHidden(SearchState current) =>
+      !identical(_withoutHidden(current), current);
+
+  /// Applies [_withoutHidden] to the state on screen and returns the state to
+  /// carry on from. Emits only when something was dropped.
+  SearchState _dropHidden(SearchState current, Emitter<SearchState> emit) {
+    final next = _withoutHidden(current);
+    if (!identical(next, current)) emit(next);
+    return next;
   }
 
   // ---------------------------------------------------------------------------
@@ -320,7 +455,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
         emit(
           SearchState.filterResults(
             filterType: event.filterType,
-            items: value,
+            items: _visibleFilterItems(_moderation(), event.filterType, value),
             currentPage: 0,
             hasMore: value.length >= 40,
           ),
@@ -376,12 +511,14 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     SearchLoadMoreFilterResults event,
     Emitter<SearchState> emit,
   ) async {
-    if (state is SearchArtworkResults) {
+    // Before anything is appended: what is already loaded may hold content
+    // the viewer has blocked or reported since (see [_onModerationChanged]).
+    final current = _dropHidden(state, emit);
+    if (current is SearchArtworkResults) {
       await _loadMoreArtworks(emit);
       return;
     }
 
-    final current = state;
     if (current is! SearchFilterResults ||
         current.isLoadingMore ||
         !current.hasMore) {
@@ -403,7 +540,10 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
         emit(
           SearchState.filterResults(
             filterType: current.filterType,
-            items: [...current.items, ...value],
+            items: [
+              ...current.items,
+              ..._visibleFilterItems(_moderation(), current.filterType, value),
+            ],
             currentPage: nextPage,
             hasMore: value.length >= 40,
           ),
@@ -526,12 +666,13 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
         emit(
           SearchState.artworkResults(
             target: target,
-            artworks: value,
-            currentPage: 0,
+            artworks: value.artworks,
+            // The last page read: pages the filter emptied were skipped.
+            currentPage: value.page,
             filter: filter,
             sort: sort,
             artworkViewMode: artworkViewMode,
-            hasMore: value.length >= 40,
+            hasMore: value.hasMore,
           ),
         );
       case ResultFailure(:final error):
@@ -575,11 +716,16 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
 
     switch (result) {
       case ResultSuccess(:final value):
+        final artworks = [...latest.artworks, ...value.artworks];
         emit(
           latest.copyWith(
-            artworks: [...latest.artworks, ...value],
-            currentPage: nextPage,
-            hasMore: value.length >= 40,
+            artworks: artworks,
+            currentPage: value.page,
+            // A list still empty after a fetch that already read past the
+            // filtered pages ends here. It cannot be scrolled, so the only
+            // thing left to ask for more would be the screen itself, with no
+            // bound on how long it keeps asking.
+            hasMore: value.hasMore && artworks.isNotEmpty,
             isLoadingMore: false,
           ),
         );

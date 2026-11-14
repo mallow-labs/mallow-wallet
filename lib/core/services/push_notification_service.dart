@@ -7,10 +7,13 @@ import 'package:flutter/widgets.dart';
 import 'package:injectable/injectable.dart';
 
 import '../../di.dart';
+import '../../shared/utils/chain.dart' show apiOwnerAddress;
 import '../../shared/utils/notification_link.dart';
 import '../../shared/widgets/in_app_push_banner.dart';
 import '../../shared/widgets/permission_settings_sheet.dart';
 import '../config/environment.dart';
+import '../models/account.dart';
+import '../network/auth_service.dart';
 import '../router/app_router.dart';
 import 'preferences_service.dart';
 import 'wallet_repository.dart';
@@ -51,10 +54,20 @@ class PushNotificationService {
   String? _currentToken;
   bool _initialized = false;
 
-  /// Fingerprint of the last `token + addresses` set successfully synced, so a
-  /// revision bump that did not change the wallet set (a rename, a reorder, a
-  /// wallet switch) costs nothing.
+  /// Fingerprint of the last `token + addresses` set successfully synced with
+  /// every address proven, so a revision bump that did not change the wallet set
+  /// (a rename, a reorder, a wallet switch) costs nothing.
   String? _syncedFingerprint;
+
+  /// How many wallets one sync may sign for, and how many failures it tolerates:
+  /// each attempt takes up to two calls to the rate-limited challenge routes,
+  /// and a sync must not spend the budget the user's own sign-ins need.
+  static const _maxWalletsSignedPerSync = 4;
+
+  /// How many proofs one sync carries. About 300 bytes each, which keeps the
+  /// request's `Cookie` header small on top of the session's own
+  /// (themselves capped, by `AuthService.maxSharedWalletProofs`).
+  static const _maxProofsPerSync = 8;
 
   Timer? _syncDebounce;
 
@@ -222,9 +235,11 @@ class PushNotificationService {
   /// Push the device's current wallet set to the backend.
   ///
   /// The stored mapping is `token -> addresses on this device`. It has no
-  /// account, profile, session or signature in it: a device holding wallets
-  /// with nobody signed in still needs push for them, and a wallet the user
-  /// removed must stop receiving push whether or not anyone is logged in.
+  /// account, profile or session in it: a device holding wallets with nobody
+  /// signed in still needs push for them, and a wallet the user removed must
+  /// stop receiving push whether or not anyone is logged in. A wallet's proof,
+  /// once a sync has carried one, is what lets its pushes carry their content
+  /// ([_proofCookies]).
   ///
   /// Sends the whole set every time and lets the server replace what it had.
   /// A delta protocol drifts permanently the moment one call is lost, and the
@@ -233,21 +248,99 @@ class PushNotificationService {
   /// View-only wallets are excluded: those are addresses the user is watching,
   /// not holding, and their notifications belong to whoever owns the key.
   Future<void> syncAddresses() async {
-    if (!_prefs.pushNotificationsEnabled) return;
+    final unproven = await _syncCurrentWallets();
+    if (unproven.isEmpty) return;
+
+    // After the sync above, so nothing here can hold up a wallet's removal.
+    final proofs = await _proofCookies(unproven);
+    if (proofs.isEmpty) return;
+
+    // Everything is read again: the proofs may have taken several round trips,
+    // and posting what was read before them could undo a newer sync.
+    final stillUnproven = await _syncCurrentWallets(
+      proofCookie: proofs.values.join('; '),
+    );
+    await _discardRefusedProofs({
+      for (final address in stillUnproven) address: ?proofs[address],
+    });
+  }
+
+  /// A proof the backend was sent and still reports unproven was refused. Left
+  /// stored it would be resent until it expires, so the next sync signs afresh.
+  Future<void> _discardRefusedProofs(Map<String, String> refused) async {
+    try {
+      for (final MapEntry(key: address, value: cookie) in refused.entries) {
+        await sl<AuthService>().discardWalletProof(address, cookie);
+      }
+    } catch (e) {
+      debugPrint('[PushNotification] Discarding a wallet proof failed: $e');
+    }
+  }
+
+  /// Post the current preference, token and wallets. Returns what the backend
+  /// says is still unproven.
+  Future<List<String>> _syncCurrentWallets({String? proofCookie}) async {
+    if (!_prefs.pushNotificationsEnabled) return const [];
 
     final token = _currentToken ?? await _messaging.getToken();
-    if (token == null) return;
+    if (token == null) return const [];
     _currentToken = token;
 
     final addresses =
-        (await _wallets.getAllWallets())
-            .where((w) => w.canSign && w.address.isNotEmpty)
-            .map((w) => w.address)
-            .toSet()
-            .toList()
+        (await _signableWallets()).map((w) => w.address).toSet().toList()
           ..sort();
 
-    await _syncToBackend(token, addresses);
+    return _syncToBackend(token, addresses, proofCookie: proofCookie);
+  }
+
+  Future<Iterable<WalletInfo>> _signableWallets() async =>
+      (await _wallets.getAllWallets()).where(
+        (w) => w.canSign && w.address.isNotEmpty,
+      );
+
+  /// `Cookie` header fragments with proofs for some of [unproven], for one sync,
+  /// keyed by the address as the backend writes it.
+  ///
+  /// An address is public, so the backend only lets a device's pushes say what
+  /// they are about once a sync has carried that wallet's proof. Without one a
+  /// push only says there is a notification. A proof already on disk is used;
+  /// otherwise a wallet whose key this app holds signs for one, unprompted.
+  /// Hardware wallets never sign here, since their proof needs an approval on the
+  /// device.
+  ///
+  /// These go on this request alone and the backend keeps what it has seen, so a
+  /// device with many wallets delivers a few per sync and finishes over several.
+  Future<Map<String, String>> _proofCookies(List<String> unproven) async {
+    if (!sl.isRegistered<AuthService>()) return const {};
+    final auth = sl<AuthService>();
+    final remaining = unproven.toSet();
+    final cookies = <String, String>{};
+    var signed = 0;
+    var failed = 0;
+    try {
+      for (final wallet in await _signableWallets()) {
+        if (cookies.length == _maxProofsPerSync) break;
+        final ownerAddress = apiOwnerAddress(wallet.address);
+        if (!remaining.remove(ownerAddress)) continue;
+        try {
+          var cookie = await auth.storedWalletProofCookie(wallet.address);
+          if (cookie == null &&
+              !wallet.walletType.isHardware &&
+              signed < _maxWalletsSignedPerSync &&
+              failed < _maxWalletsSignedPerSync) {
+            cookie = await auth.signWalletProofCookie(wallet.address);
+            if (cookie != null) signed++;
+          }
+          if (cookie != null) cookies[ownerAddress] = cookie;
+        } catch (e) {
+          failed++;
+          debugPrint('[PushNotification] Wallet proof failed: $e');
+        }
+      }
+    } catch (e) {
+      debugPrint('[PushNotification] Wallet proofs failed: $e');
+    }
+    return cookies;
   }
 
   /// Stop this device receiving push, without touching the wallets on it.
@@ -329,14 +422,22 @@ class PushNotificationService {
   /// Replace this token's address set on the backend.
   ///
   /// Skips the call when nothing changed since the last confirmed sync, and
-  /// records the fingerprint only on success so a failure is retried by the
-  /// next trigger rather than being treated as done.
-  Future<void> _syncToBackend(String token, List<String> addresses) async {
+  /// records the fingerprint only on success with no address left unproven, so
+  /// a failure or a missing proof is retried by the next trigger rather than
+  /// being treated as done.
+  ///
+  /// Returns the addresses the backend holds no proof for. Empty when the call
+  /// was skipped or failed, so a failure sends no proofs after it.
+  Future<List<String>> _syncToBackend(
+    String token,
+    List<String> addresses, {
+    String? proofCookie,
+  }) async {
     final fingerprint = '$token|${addresses.join(',')}';
-    if (fingerprint == _syncedFingerprint) return;
+    if (fingerprint == _syncedFingerprint) return const [];
 
     try {
-      await _dio.post<Map<String, dynamic>>(
+      final response = await _dio.post<Map<String, dynamic>>(
         '${Config.apiBaseUrl}/v1/deviceToken/sync',
         data: {
           'token': token,
@@ -345,11 +446,23 @@ class PushNotificationService {
               : 'android',
           'addresses': addresses,
         },
+        options: proofCookie == null
+            ? null
+            : Options(headers: {'Cookie': proofCookie}),
       );
-      _syncedFingerprint = fingerprint;
-      debugPrint('[PushNotification] Synced ${addresses.length} addresses');
+      final result = response.data?['result'] as Map<String, dynamic>?;
+      final unproven = (result?['unproven'] as List<dynamic>? ?? const [])
+          .whereType<String>()
+          .toList();
+      _syncedFingerprint = unproven.isEmpty ? fingerprint : null;
+      debugPrint(
+        '[PushNotification] Synced ${addresses.length} addresses, '
+        '${unproven.length} unproven',
+      );
+      return unproven;
     } on DioException catch (e) {
       debugPrint('[PushNotification] Address sync failed: ${e.message}');
+      return const [];
     }
   }
 }

@@ -119,7 +119,7 @@ void main() {
     when(
       () => tokenRepo.getCachedBalances(any()),
     ).thenAnswer((_) async => const <TokenBalance>[]);
-    when(aggregator.profilePortfolioAddresses).thenReturn(null);
+    when(aggregator.portfolioSolanaAddresses).thenReturn(null);
     when(aggregator.sessionSolanaAddresses).thenReturn([_addr]);
     // Default: a Solana-only session. The EVM/Tezos groups opt in.
     when(aggregator.sessionEthereumAddresses).thenReturn(const []);
@@ -288,7 +288,7 @@ void main() {
       setUp: () {
         stubFreshLoad();
         when(
-          aggregator.profilePortfolioAddresses,
+          aggregator.portfolioSolanaAddresses,
         ).thenReturn([_addr, _siblingAddr]);
       },
       build: buildBloc,
@@ -330,7 +330,7 @@ void main() {
       'second page would drop rows the first one showed',
       setUp: () {
         when(
-          aggregator.profilePortfolioAddresses,
+          aggregator.portfolioSolanaAddresses,
         ).thenReturn([_addr, _siblingAddr]);
         when(
           () => transfers.fetchTransfers(
@@ -445,7 +445,7 @@ void main() {
       setUp: () {
         stubFreshLoad();
         when(
-          aggregator.profilePortfolioAddresses,
+          aggregator.portfolioSolanaAddresses,
         ).thenReturn([_addr, _siblingAddr]);
       },
       build: buildBloc,
@@ -728,7 +728,7 @@ void main() {
       'aggregated — narrowing to the signer would drop the rest of the position',
       setUp: () {
         when(
-          aggregator.profilePortfolioAddresses,
+          aggregator.portfolioSolanaAddresses,
         ).thenReturn([_addr, _siblingAddr]);
         when(
           () => tokenRepo.getCachedBalances(_addr),

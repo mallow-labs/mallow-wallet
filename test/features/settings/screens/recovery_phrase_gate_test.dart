@@ -65,6 +65,10 @@ void main() {
       () => storage.loadMnemonicForSeedPhrase(any()),
     ).thenAnswer((_) async => 'abandon abandon about');
     when(() => storage.loadMnemonic()).thenAnswer((_) async => null);
+    when(() => storage.loadFailedPinAttempts()).thenAnswer((_) async => 0);
+    when(() => storage.loadPinCooldownUntil()).thenAnswer((_) async => null);
+    when(() => storage.storeFailedPinAttempts(any())).thenAnswer((_) async {});
+    when(() => storage.clearPinLockout()).thenAnswer((_) async {});
   });
 
   tearDown(() {

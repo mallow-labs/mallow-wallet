@@ -4,6 +4,7 @@ import 'package:mallow_api/mallow_api.dart' as api;
 import '../../../di.dart';
 import '../../../shared/widgets/app_snack_bar.dart';
 import '../../../shared/widgets/confirm_sheet.dart';
+import '../../artwork/services/active_wallet_verification.dart';
 import '../../artwork/services/artwork_removal_signal.dart';
 import '../../profile/widgets/profile_required_sheet.dart';
 import '../models/moderation_models.dart';
@@ -18,10 +19,11 @@ const String _reportConfirmation =
 
 /// Reports an artwork, then hides it from the reporter's own view.
 ///
-/// The hide is **viewer-side only**. It fires the app-wide
-/// [ArtworkRemovalSignal] — every mounted artwork grid (profile, collection,
-/// curation, portfolio group) already drops the mint on that signal — and
-/// records it in [ModerationHideStore] so surfaces can filter it out. It does
+/// The hide is **viewer-side only**. It records the mint in
+/// [ModerationHideStore], which `ModerationFilter` reads: every list of other
+/// people's artworks drops it, on screen now and on every later fetch. It also
+/// fires the app-wide [ArtworkRemovalSignal], which the grids that do not go
+/// through the filter (the portfolio and its groups) drop the mint on. It does
 /// **not** call `/v0/hide`: that route is owner-scoped, gated on a `wallet-sig`
 /// cookie proving you own the item, and 403s on someone else's artwork.
 ///
@@ -47,17 +49,22 @@ Future<bool> runReportArtworkFlow(
   return true;
 }
 
-/// Reports a curation, then suppresses it locally. The caller is responsible
-/// for leaving the curation screen if the report was filed from inside it —
-/// there is no app-wide curation-removal signal to piggyback on.
+/// Reports a curation, then suppresses it locally: the lists that show
+/// curations drop it through `ModerationFilter`. The caller is responsible
+/// for leaving the curation screen if the report was filed from inside it.
 ///
 /// [curationSlug] — **the exhibition slug, not the curation id.** The
 /// moderation alert links the reported curation as `mallow.art/e/<slug>`, and
 /// an id there produces a dead link in the triage card.
+///
+/// [curationId] is the id the same curation goes by in lists. Search, home and
+/// a profile's Curations tab carry the id and not the slug, so without it the
+/// reported curation would stay in all three.
 Future<bool> runReportCurationFlow(
   BuildContext context, {
   required String curationSlug,
   required String screen,
+  String? curationId,
 }) async {
   final outcome = await _report(
     context,
@@ -67,7 +74,11 @@ Future<bool> runReportCurationFlow(
   );
   if (outcome == null) return false;
 
-  sl<ModerationHideStore>().hide(api.ReportTargetType.curation, curationSlug);
+  sl<ModerationHideStore>().hide(
+    api.ReportTargetType.curation,
+    curationSlug,
+    alias: curationId,
+  );
   if (context.mounted) AppSnackBar.show(context, _reportConfirmation);
   return true;
 }
@@ -151,6 +162,8 @@ Future<bool> runBlockUserFlow(
   );
   if (confirmed != true || !context.mounted) return false;
 
+  if (!await _verifiedForSignedWrite(context)) return false;
+  if (!context.mounted) return false;
   final ok = await sl<BlockStore>().block(address);
   if (!context.mounted) return ok;
   AppSnackBar.show(
@@ -167,6 +180,8 @@ Future<bool> runUnblockUserFlow(
   required String address,
   required String label,
 }) async {
+  if (!await _verifiedForSignedWrite(context)) return false;
+  if (!context.mounted) return false;
   final ok = await sl<BlockStore>().unblock(address);
   if (!context.mounted) return ok;
   AppSnackBar.show(
@@ -177,4 +192,17 @@ Future<bool> runUnblockUserFlow(
     type: ok ? AppSnackBarType.info : AppSnackBarType.error,
   );
   return ok;
+}
+
+/// The block routes take a signed login, so the active wallet proves itself
+/// before the write ([ensureActiveWalletVerified]). This is a tap, so it may
+/// prompt — notably the re-login a social wallet with a missing key needs,
+/// which the 401 re-sign skips. False after showing why when it could not.
+Future<bool> _verifiedForSignedWrite(BuildContext context) async {
+  final error = await ensureActiveWalletVerified();
+  if (error == null) return true;
+  if (context.mounted) {
+    AppSnackBar.show(context, error, type: AppSnackBarType.error);
+  }
+  return false;
 }

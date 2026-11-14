@@ -36,6 +36,9 @@ Widget? _buildArtworkActionSheet({
   /// store build with `kShowNftCommerce` off.
   required ValueChanged<ArtworkDetails> onCancelListing,
   required ValueChanged<ArtworkDetails> onPlaceBid,
+
+  /// Warns on the bid and buy sheets, see [ArtworkPermissions.hasCorePermanentDelegate].
+  required bool hasCorePermanentDelegate,
   required void Function({bool reclaim}) onCancelAuction,
   required VoidCallback onSettleAuction,
   required VoidCallback onAuctionEnded,
@@ -82,6 +85,7 @@ Widget? _buildArtworkActionSheet({
         userOwnOffer: userOwnOffer,
         canMakeOffer: canMakeOffer,
         block: block,
+        showPermanentDelegateWarning: hasCorePermanentDelegate,
       ),
     ArtworkOpenSeaBuyAction(:final block) => OpenSeaListingSheet(
       artwork: artwork,
@@ -97,6 +101,7 @@ Widget? _buildArtworkActionSheet({
       checkListedBalance: false,
       isLoading: isMarketLoading,
       block: block,
+      showPermanentDelegateWarning: hasCorePermanentDelegate,
     ),
     ArtworkBuyEditionAction(:final block) => ArtworkBuyEditionSheet(
       artwork: artwork,
@@ -150,6 +155,7 @@ Widget? _buildArtworkActionSheet({
       currentBidderUsername: bidderUsername,
       isCurrentUserHighestBidder: isHighestBidder,
       unknownCurrency: unknownCurrency,
+      showPermanentDelegateWarning: hasCorePermanentDelegate,
       onPlaceBid: () => onPlaceBid(artwork),
       onAuctionEnded: onAuctionEnded,
       isLoading: isMarketLoading,

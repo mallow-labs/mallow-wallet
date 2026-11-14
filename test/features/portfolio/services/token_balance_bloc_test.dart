@@ -72,7 +72,7 @@ void main() {
 
     // Default: single-signer path. The aggregator is consulted only when an
     // instance opts in via `aggregateAcrossSession` (the header/tokens tab).
-    when(mockAggregator.profilePortfolioAddresses()).thenReturn(null);
+    when(mockAggregator.portfolioSolanaAddresses()).thenReturn(null);
 
     when(
       mockWalletManager.getAddress(),
@@ -500,7 +500,7 @@ void main() {
         'fetches every profile wallet and sums the portfolio',
         setUp: () {
           when(
-            mockAggregator.profilePortfolioAddresses(),
+            mockAggregator.portfolioSolanaAddresses(),
           ).thenReturn([walletA, walletB]);
           when(
             mockRepository.getTokenBalances(walletA),
@@ -543,9 +543,7 @@ void main() {
       blocTest<TokenBalanceBloc, TokenBalanceState>(
         'reads the linked wallet when the profile has one Solana wallet',
         setUp: () {
-          when(
-            mockAggregator.profilePortfolioAddresses(),
-          ).thenReturn([walletA]);
+          when(mockAggregator.portfolioSolanaAddresses()).thenReturn([walletA]);
           when(
             mockRepository.getTokenBalances(walletA),
           ).thenAnswer((_) async => testTokens);
@@ -586,7 +584,7 @@ void main() {
           // wallet — which in a Profile session may be one the profile never
           // linked (switchToProfile leaves the previous selection in place
           // when the profile holds no signable wallet).
-          when(mockAggregator.profilePortfolioAddresses()).thenReturn(null);
+          when(mockAggregator.portfolioSolanaAddresses()).thenReturn(null);
           when(
             mockAggregator.sessionSolanaAddresses(),
           ).thenReturn(const [walletA]);

@@ -85,6 +85,7 @@ class PreferencesService {
   static const _kLoggedInTrackedAt = 'pref_analytics_logged_in_at';
   static const _kTokenMetadataCache = 'pref_token_metadata_cache';
   static const _kProgramLabelCache = 'pref_program_label_cache';
+  static const _kBrowserSitesCache = 'pref_browser_sites_cache';
   static const _kSwapSlippageBps = 'pref_swap_slippage_bps';
   static const _kPriorityFeeLamports = 'pref_priority_fee_lamports';
   static const _kSwapPriorityFeeLamports = 'pref_swap_priority_fee_lamports';
@@ -205,6 +206,14 @@ class PreferencesService {
   Future<void> setProgramLabelCache(String json) =>
       _prefs.setString(_kProgramLabelCache, json);
 
+  /// `{fetchedAt: epochMillis, list: {version: 1, sites: [...]}}`: the last
+  /// list of suggested browser sites fetched, and when. Public data, kept so
+  /// a launch inside the TTL needs no request.
+  String? get browserSitesCache => _prefs.getString(_kBrowserSitesCache);
+
+  Future<void> setBrowserSitesCache(String json) =>
+      _prefs.setString(_kBrowserSitesCache, json);
+
   // ── Theme ─────────────────────────────────────────────────────────────────
 
   ThemeMode get themeMode => themeNotifier.value;
@@ -227,6 +236,32 @@ class PreferencesService {
 
   Future<void> setHasPromptedForPushPermission(bool value) =>
       _prefs.setBool(_kHasPromptedForPushPermission, value);
+
+  // ── Google and Apple wallets ────────────────────────────────────────────
+
+  /// Account ids already shown the one-time notice about the older Google or
+  /// Apple sign-in (what the mark on the wallet's icon means, and how the
+  /// wallet is recovered now). Once per wallet, never repeated.
+  Set<String> get legacySocialNoticeShown =>
+      (_prefs.getStringList(_kLegacySocialNoticeShown) ?? const []).toSet();
+
+  Future<void> markLegacySocialNoticeShown(String accountId) =>
+      _prefs.setStringList(_kLegacySocialNoticeShown, [
+        ...legacySocialNoticeShown,
+        accountId,
+      ]);
+
+  /// Social vault ids whose owner acknowledged that, without a passkey, the wallet
+  /// opens only where the platform backup reaches (offered only on devices
+  /// that cannot add a passkey). Silences the durability banner for them.
+  Set<String> get socialVaultPlatformOnlyAcknowledged =>
+      (_prefs.getStringList(_kSocialVaultPlatformOnlyAck) ?? const []).toSet();
+
+  Future<void> acknowledgeSocialVaultPlatformOnly(String vaultId) =>
+      _prefs.setStringList(_kSocialVaultPlatformOnlyAck, [
+        ...socialVaultPlatformOnlyAcknowledged,
+        vaultId,
+      ]);
 
   // ── Profile Group Order ─────────────────────────────────────────────────
 
@@ -565,6 +600,9 @@ class PreferencesService {
 
   static const _kBrowserSearchEngine = 'pref_browser_search_engine';
   static const _kBrowserEthereumWalletId = 'pref_browser_ethereum_wallet_id';
+  static const _kSocialVaultPlatformOnlyAck =
+      'pref_social_vault_platform_only_ack';
+  static const _kLegacySocialNoticeShown = 'pref_legacy_social_notice_shown';
 
   /// The in-app browser's search engine, by name; null until one is picked.
   String? get browserSearchEngine => _prefs.getString(_kBrowserSearchEngine);

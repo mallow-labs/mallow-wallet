@@ -1007,7 +1007,7 @@ Future<void> _openWatchAddressScreen(WidgetTester tester) async {
     label: 'watch-address screen',
     rounds: 150,
   );
-  expect(find.text('Address or .sol/.eth domain'), findsOneWidget);
+  expect(find.text('Address or .sns/.skr/.eth domain'), findsOneWidget);
 }
 
 Future<void> _enterWatchAddress(WidgetTester tester, String address) async {

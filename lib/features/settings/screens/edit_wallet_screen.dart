@@ -10,12 +10,14 @@ import '../../../core/security/reauth_gate.dart';
 import '../../../core/services/wallet_repository.dart';
 import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
+import '../../../shared/utils/social_wallet_copy.dart';
 import '../../../shared/widgets/app_snack_bar.dart';
 import '../../../shared/widgets/confirm_sheet.dart';
 import '../../../shared/widgets/mallow_button.dart';
 import '../../../shared/widgets/mallow_pill_field.dart';
 import '../../../shared/widgets/mallow_section_label.dart';
 import '../../../shared/widgets/mallow_svg_icon.dart';
+import '../../../shared/widgets/social_provider_icon.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
 import '../../accounts/services/account_wallet_bloc.dart';
 import '../../home/widgets/drawer_signal.dart';
@@ -124,11 +126,15 @@ class _EditWalletScreenState extends State<EditWalletScreen> {
               'device. Make sure you have a copy of the private key — it '
               'cannot be recovered from the app.';
         case WalletType.social:
-          // The stored key goes too, but signing in with the same account
-          // derives it again — there is no phrase to back up here.
+          // The stored key goes too. Signing in with the same account
+          // reopens a social vault and stores it again; a wallet with no
+          // vault is told what brings it back instead.
+          final aftermath = socialRemovalAftermath(
+            legacy: wallet.isLegacySocialWallet,
+            hasVault: wallet.socialVaultId != null,
+          );
           return 'This wallet and its stored key will be removed from this '
-              'device. You can add it back by signing in with the same '
-              'account again.';
+              'device. $aftermath';
         case WalletType.ledger:
           // Nothing signable is stored here; the row is a pointer to the
           // device.
@@ -287,6 +293,10 @@ class _EditWalletScreenState extends State<EditWalletScreen> {
                   if (_wallet?.walletType == WalletType.seedVault) ...[
                     const SizedBox(height: 24),
                     ManageInSeedVaultRow(addresses: [_wallet!.address]),
+                  ],
+                  if (_wallet?.isLegacySocialWallet ?? false) ...[
+                    const SizedBox(height: 24),
+                    LegacySocialNote(provider: _wallet!.socialProvider),
                   ],
                   const Spacer(),
                   SizedBox(

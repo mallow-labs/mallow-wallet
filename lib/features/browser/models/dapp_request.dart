@@ -42,8 +42,9 @@ class DappFrameContext {
 /// is what `solana:signMessage` promises: the site verifies the signature over
 /// the exact bytes it sent.
 ///
-/// Ledger wraps messages in its off-chain format, so its signature would not
-/// match. Keystone signs the bytes as given; the device shows a `\xffsolana
+/// A Ledger's Solana app signs only messages in the off-chain format, so it
+/// cannot sign a site's raw bytes; it answers `solana:signOffchainMessage`
+/// instead (see [solanaSignsOffchainMessages]). Keystone signs the bytes as given; the device shows a `\xffsolana
 /// offchain` message structurally and anything else as UTF-8 or hex.
 bool solanaSignsDappMessagesVerbatim(WalletType type) => switch (type) {
   WalletType.hd ||
@@ -52,6 +53,20 @@ bool solanaSignsDappMessagesVerbatim(WalletType type) => switch (type) {
   WalletType.seedVault ||
   WalletType.keystone => true,
   WalletType.ledger || WalletType.viewOnly => false,
+};
+
+/// Whether a Solana wallet of [type] can answer `solana:signOffchainMessage`.
+/// The wallet builds those bytes itself, in the off-chain format, so a Ledger
+/// can sign them where it cannot sign a site's raw message. Its Solana app
+/// needs version 1.14 or later for the version 1 format.
+bool solanaSignsOffchainMessages(WalletType type) => switch (type) {
+  WalletType.hd ||
+  WalletType.importedKey ||
+  WalletType.social ||
+  WalletType.seedVault ||
+  WalletType.keystone ||
+  WalletType.ledger => true,
+  WalletType.viewOnly => false,
 };
 
 class DappWallet {
@@ -73,6 +88,12 @@ class DappWallet {
   /// EIP-712 typed data (Ethereum only). A Ledger signs transactions and
   /// personal messages but has no typed-data path here.
   final bool canSignTypedData;
+
+  /// Solana off-chain messages (`solana:signOffchainMessage`); see
+  /// [solanaSignsOffchainMessages]. Follows [type], which a wallet id never
+  /// changes, so the pinned copy of a request cannot drift from it.
+  bool get canSignOffchainMessages =>
+      canSign && type != null && solanaSignsOffchainMessages(type!);
   final List<String> chains;
 
   /// Picks the signing copy only (local key, Ledger, other external signer).

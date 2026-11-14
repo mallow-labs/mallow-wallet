@@ -15,6 +15,7 @@ import '../../../shared/utils/notification_link.dart';
 import '../../../shared/utils/time_utils.dart';
 import '../../../shared/widgets/mallow_refresh_indicator.dart';
 import '../../../shared/widgets/mallow_svg_icon.dart';
+import '../../../shared/widgets/permission_disclosure.dart';
 import '../../../shared/widgets/state_viewer.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
 import '../services/notifications_bloc.dart';
@@ -49,7 +50,11 @@ class _NotificationsViewState extends State<_NotificationsView> {
   @override
   void initState() {
     super.initState();
-    _checkPushPermission();
+    // After the first frame: the first visit opens a sheet, which needs the
+    // route this screen is building into.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _checkPushPermission();
+    });
   }
 
   Future<void> _checkPushPermission() async {
@@ -61,9 +66,17 @@ class _NotificationsViewState extends State<_NotificationsView> {
 
       AuthorizationStatus status;
       if (!prefs.hasPromptedForPushPermission) {
-        // First visit: trigger the OS permission dialog.
-        status = await pushService.requestPermission();
+        // First visit: say what notifications are for, then show the OS
+        // dialog only if the user wants them. Either answer spends this
+        // prompt; the banner below stays as the way to turn them on later.
+        final proceed = await showPermissionDisclosure(
+          context,
+          PermissionDisclosure.notifications,
+        );
         await prefs.setHasPromptedForPushPermission(true);
+        status = proceed
+            ? await pushService.requestPermission()
+            : AuthorizationStatus.notDetermined;
       } else {
         final settings = await FirebaseMessaging.instance
             .getNotificationSettings();

@@ -220,4 +220,116 @@ void main() {
       },
     );
   }
+
+  group('a Core asset in a collection', () {
+    const creator = 'creator';
+
+    Map<String, dynamic> coreAsset() => {
+      'id': 'leaf',
+      'interface': 'MplCoreAsset',
+      'ownership': {'owner': creator, 'frozen': false},
+      'authorities': [
+        {
+          'address': creator,
+          'scopes': ['full'],
+        },
+      ],
+      'grouping': [
+        {'group_key': 'collection', 'group_value': 'parent'},
+      ],
+    };
+
+    // The only creator signature sits on the collection, as it does for a
+    // piece minted into a signed collection.
+    DigitalAsset signedCollection() => DigitalAsset.fromJson({
+      'id': 'parent',
+      'interface': 'MplCoreCollection',
+      'authorities': [
+        {
+          'address': creator,
+          'scopes': ['full'],
+        },
+      ],
+      'plugins': {
+        'verified_creators': {
+          'data': {
+            'signatures': [
+              {'address': creator, 'verified': true},
+            ],
+          },
+        },
+      },
+    });
+
+    ({_Das das, _Artworks artworks, _Config config}) mocks() {
+      final das = _Das();
+      final artworks = _Artworks();
+      final config = _Config();
+      when(() => config.get()).thenAnswer((_) async => fees);
+      when(
+        () => artworks.getArtworkDetail('leaf'),
+      ).thenAnswer((_) async => detail(standard: 'core'));
+      when(
+        () => das.getAsset('leaf'),
+      ).thenAnswer((_) async => DigitalAsset.fromJson(coreAsset()));
+      return (das: das, artworks: artworks, config: config);
+    }
+
+    test('is primary when the collection read answers', () async {
+      final m = mocks();
+      when(
+        () => m.das.getAsset('parent'),
+      ).thenAnswer((_) async => signedCollection());
+
+      final result = await resolveListingContext(
+        mint: 'leaf',
+        sellerPubkey: creator,
+        dasApi: m.das,
+        artworkRepo: m.artworks,
+        marketplaceConfig: m.config,
+      );
+
+      expect(result.isSecondaryMarket, isFalse);
+      verify(() => m.das.getAsset('parent')).called(1);
+    });
+
+    test('one failed collection read is tried again', () async {
+      final m = mocks();
+      var reads = 0;
+      when(() => m.das.getAsset('parent')).thenAnswer((_) async {
+        if (reads++ == 0) throw StateError('offline');
+        return signedCollection();
+      });
+
+      final result = await resolveListingContext(
+        mint: 'leaf',
+        sellerPubkey: creator,
+        dasApi: m.das,
+        artworkRepo: m.artworks,
+        marketplaceConfig: m.config,
+      );
+
+      expect(result.isSecondaryMarket, isFalse);
+      expect(reads, 2);
+    });
+
+    // Judged from the asset alone this piece reads as secondary, while the
+    // program settles it as primary. Neither answer may be shown.
+    test('is unclassified, not secondary, when the collection cannot be '
+        'read', () async {
+      final m = mocks();
+      when(() => m.das.getAsset('parent')).thenThrow(StateError('offline'));
+
+      final result = await resolveListingContext(
+        mint: 'leaf',
+        sellerPubkey: creator,
+        dasApi: m.das,
+        artworkRepo: m.artworks,
+        marketplaceConfig: m.config,
+      );
+
+      expect(result.isSecondaryMarket, isNull);
+      verify(() => m.das.getAsset('parent')).called(2);
+    });
+  });
 }

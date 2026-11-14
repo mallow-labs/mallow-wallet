@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../../../../core/config/store_build.dart';
 import '../../../../shared/theme/mallow_theme.dart';
 import '../../../../shared/widgets/mallow_button.dart';
+import '../../../market/widgets/place_bid_sheet.dart';
+import '../../../send/widgets/send_sheet_widgets.dart';
 import '../../services/artwork_bloc.dart';
 import 'artwork_auction_live_panel.dart';
 import 'artwork_funding_source.dart';
@@ -28,6 +30,7 @@ class ArtworkAuctionBidSheet extends StatelessWidget {
     this.isLoading = false,
     this.onAuctionEnded,
     this.unknownCurrency = false,
+    this.showPermanentDelegateWarning = false,
     super.key,
   });
 
@@ -56,6 +59,10 @@ class ArtworkAuctionBidSheet extends StatelessWidget {
   /// exact failure this blocks — see [ArtworkBuyBlock.unknownCurrency].
   final bool unknownCurrency;
 
+  /// Shows [kCoreAuctionPermanentDelegateWarning]. It only informs: bidding
+  /// stays available whatever this says.
+  final bool showPermanentDelegateWarning;
+
   @override
   Widget build(BuildContext context) {
     return ArtworkAuctionLivePanel(
@@ -83,17 +90,30 @@ class ArtworkAuctionBidSheet extends StatelessWidget {
 
         return Padding(
           padding: const EdgeInsets.only(top: MallowTheme.spacingMd),
-          // Bids are funded in the auction's `bidMint`, not the listing
-          // currency (which is null for auctions).
-          child: ArtworkFundingSource(
-            currencyMint: artwork.auctionMetadata?.bidMint ?? artwork.currency,
-            builder: (context, switching) => MallowButton(
-              label: label,
-              enabled: canBid && !switching,
-              isLoading: isLoading,
-              onPressed: canBid ? onPlaceBid : null,
-              isFullWidth: true,
-            ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (showPermanentDelegateWarning) ...[
+                const SendWarningNotice(
+                  message: kCoreAuctionPermanentDelegateWarning,
+                ),
+                const SizedBox(height: MallowTheme.spacingMd),
+              ],
+              // Bids are funded in the auction's `bidMint`, not the listing
+              // currency (which is null for auctions).
+              ArtworkFundingSource(
+                currencyMint:
+                    artwork.auctionMetadata?.bidMint ?? artwork.currency,
+                builder: (context, switching) => MallowButton(
+                  label: label,
+                  enabled: canBid && !switching,
+                  isLoading: isLoading,
+                  onPressed: canBid ? onPlaceBid : null,
+                  isFullWidth: true,
+                ),
+              ),
+            ],
           ),
         );
       },

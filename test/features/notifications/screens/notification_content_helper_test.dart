@@ -44,6 +44,24 @@ void main() {
       expect(contents.message, '@collector purchased "Sunset" for 2 SOL');
     });
 
+    test('artwork sold tells the seller what they received', () {
+      final contents = NotificationContentHelper.getContents(
+        api.NotificationType.artworkSold,
+        {
+          'nft': _nft(),
+          'price': 2000000000,
+          'sellerReceived': 1900000000,
+          'currencyMint': _solMint,
+          'buyer': 'ADDR1234567890',
+          'buyerUser': _user('collector'),
+        },
+      );
+      expect(
+        contents.message,
+        '@collector purchased "Sunset" and you received 1.9 SOL',
+      );
+    });
+
     test('auction won, new bid and offers all carry their amount', () {
       String? messageFor(
         api.NotificationType type,

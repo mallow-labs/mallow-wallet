@@ -1216,17 +1216,17 @@ class WalletManager {
   /// Run [load], recovering a social row's missing key once before retrying.
   ///
   /// A social row's stored key can be absent after a keystore wipe or a DB
-  /// restore onto a fresh install. The keys are deterministic per identity, so
-  /// one interactive re-login re-stores every row of the account and [load]
-  /// succeeds on the retry. The re-login can prompt, so this must only ever be
-  /// called from the platform thread.
+  /// restore onto a fresh install. A vault wallet's keys come back by
+  /// reopening its social vault, which re-stores every row of the account, and
+  /// [load] succeeds on the retry. Reopening can prompt (a sign-in, a
+  /// passkey), so this must only ever be called from the platform thread.
   ///
-  /// A social row with no account has nothing to re-login against, and a row
-  /// whose identity derives a different address is a pre-migration wallet whose
-  /// key never existed on device — both fail loud rather than sign with a key
-  /// that is not the row's ([recoverKeysForAccount] raises
-  /// [LegacySocialWalletException] for the mismatch). Non-social rows pass
-  /// straight through.
+  /// A social row with no account has nothing to reopen; a wallet from the
+  /// older sign-in has no vault, and this app cannot re-create its key
+  /// ([LegacySocialKeyUnavailableException], which says how to bring it
+  /// back); and a vault that opens to a different wallet is refused. All fail
+  /// loud rather than sign with a key that is not the row's. Non-social rows
+  /// pass straight through.
   Future<T> _withSocialKeyRecovery<T>(
     db.Wallet row,
     Future<T> Function() load,
@@ -1688,23 +1688,8 @@ class WalletManager {
   }
 
   /// Delete every wallet from storage (the storage half of a factory reset).
-  ///
-  /// Also resets the social-auth SDK so any Google/Apple session it still
-  /// holds is logged out; the next sign-in starts from a fresh account
-  /// chooser rather than silently reusing the wiped identity.
-  ///
-  /// Best-effort like [WalletRepository.resetAll]: a failing social reset is
-  /// recorded, not thrown, so the secrets and database still go.
-  Future<List<EraseFailure>> deleteWallet() async {
-    final failures = <EraseFailure>[];
-    try {
-      await GetIt.instance<SocialAuthService>().reset();
-    } catch (e) {
-      failures.add(EraseFailure('social.reset', e.runtimeType.toString()));
-    }
-    failures.addAll(await _walletRepo.resetAll());
-    return failures;
-  }
+  /// Best-effort, like the [WalletRepository.resetAll] it runs.
+  Future<List<EraseFailure>> deleteWallet() => _walletRepo.resetAll();
 
   /// Remove a single wallet.
   ///
@@ -1781,14 +1766,15 @@ class WalletManager {
     return row == null ? null : WalletType.fromDbString(row.walletType);
   }
 
-  /// Whether signing for [address] would first have to run the interactive
-  /// Web3Auth re-login — i.e. it is a social wallet whose key is not on this
-  /// device (wiped keystore, restored database, or a pre-migration row whose
-  /// key never existed locally).
+  /// Whether signing for [address] would first have to recover its key —
+  /// i.e. it is a social wallet whose key is not on this device (a wiped
+  /// keystore, or a restored database).
   ///
   /// Every social signing entry point loads its key through
-  /// [_withSocialKeyRecovery], which answers a missing key by opening an OAuth
-  /// browser tab. Callers that sign from a background path — see
+  /// [_withSocialKeyRecovery], which answers a missing key by reopening the
+  /// wallet's social vault (possibly with a sign-in sheet or a passkey
+  /// prompt), or by failing for a wallet that has none. Callers that sign
+  /// from a background path — see
   /// `AuthService._verifySignatureIfPossible` — must consult this first and
   /// defer, rather than ambush the user with a login they never asked for. A
   /// social wallet that answers false signs silently, exactly like an

@@ -26,6 +26,7 @@
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
 		9E2D3B2C0E7F4A1B8C9D2701 /* TimezoneChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E2D3B2C0E7F4A1B8C9D2702 /* TimezoneChannel.swift */; };
+		AE2D3B2C0E7F4A1B8C9D2701 /* SocialVaultSlotChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE2D3B2C0E7F4A1B8C9D2702 /* SocialVaultSlotChannel.swift */; };
 		9F1A2B3C4D5E6F7A8B9C0D02 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 9F1A2B3C4D5E6F7A8B9C0D01 /* PrivacyInfo.xcprivacy */; };
 		AA9952329BCF7A43CA7BBB06 /* Pods_RunnerTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = DB15BA999EA6659DE23D9129 /* Pods_RunnerTests.framework */; };
 		B11C0C57A8E14C18AB000001 /* IosChromecastPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = B11C0C57A8E14C18AB000002 /* IosChromecastPlugin.swift */; };
@@ -108,6 +109,7 @@
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		9DFD383EFA0867AF5D78172B /* Pods_Runner.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Runner.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		9E2D3B2C0E7F4A1B8C9D2702 /* TimezoneChannel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TimezoneChannel.swift; sourceTree = "<group>"; };
+		AE2D3B2C0E7F4A1B8C9D2702 /* SocialVaultSlotChannel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SocialVaultSlotChannel.swift; sourceTree = "<group>"; };
 		9F1A2B3C4D5E6F7A8B9C0D01 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		A4BE9947963AAFCBD90606F5 /* Pods-Runner.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.profile.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.profile.xcconfig"; sourceTree = "<group>"; };
 		A58831C230FF09251E884D3F /* Pods-Runner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.release.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"; sourceTree = "<group>"; };
@@ -212,6 +214,7 @@
 				7E2D3B2C0E7F4A1B8C9D2802 /* BrowserInsetsChannel.swift */,
 				8E2D3B2C0E7F4A1B8C9D2702 /* MnemonicVaultChannel.swift */,
 				9E2D3B2C0E7F4A1B8C9D2702 /* TimezoneChannel.swift */,
+				AE2D3B2C0E7F4A1B8C9D2702 /* SocialVaultSlotChannel.swift */,
 			);
 			path = Runner;
 			sourceTree = "<group>";
@@ -309,6 +312,7 @@
 				9705A1C41CF9048500538489 /* Embed Frameworks */,
 				B92B7EEFC095601EB44F0F45 /* Embed App Extensions */,
 				3B06AD1E1E4923F5004D2608 /* Thin Binary */,
+				AE2D3B2C0E7F4A1B8C9D2703 /* Google Sign-In URL Scheme */,
 				F7AD4A8C63DFEFED5B2F5B64 /* [CP] Embed Pods Frameworks */,
 				D9A2C71DB07CCC3DBADB3B5F /* [CP] Copy Pods Resources */,
 				5519FA0E2DCAFE0E0000B0CA /* Re-sign Frameworks */,
@@ -401,6 +405,21 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		AE2D3B2C0E7F4A1B8C9D2703 /* Google Sign-In URL Scheme */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Google Sign-In URL Scheme";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "/bin/sh \"$SRCROOT/scripts/google_sign_in_plist.sh\"\n";
+		};
 		3B06AD1E1E4923F5004D2608 /* Thin Binary */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
@@ -559,6 +578,7 @@
 				7E2D3B2C0E7F4A1B8C9D2801 /* BrowserInsetsChannel.swift in Sources */,
 				8E2D3B2C0E7F4A1B8C9D2701 /* MnemonicVaultChannel.swift in Sources */,
 				9E2D3B2C0E7F4A1B8C9D2701 /* TimezoneChannel.swift in Sources */,
+				AE2D3B2C0E7F4A1B8C9D2701 /* SocialVaultSlotChannel.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

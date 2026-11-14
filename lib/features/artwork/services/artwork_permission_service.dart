@@ -178,6 +178,10 @@ class ArtworkPermissionService {
           asset,
           collection: collectionAsset,
         ).royaltyBps,
+        hasCorePermanentDelegate:
+            asset.tokenStandard == TokenStandard.core &&
+            (asset.hasPermanentDelegate ||
+                (collectionAsset?.hasPermanentDelegate ?? false)),
       );
     } catch (_) {
       return const UnresolvedArtworkPermissions();

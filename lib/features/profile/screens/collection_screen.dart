@@ -62,6 +62,7 @@ import '../../cast/services/cast_actions.dart';
 import '../../cast/services/cast_bloc.dart';
 import '../../mint/pickers/category_picker_sheet.dart';
 import '../../portfolio/screens/portfolio_group_screen.dart';
+import '../../moderation/services/moderation_filter.dart';
 import '../../portfolio/services/portfolio_bloc.dart';
 import '../../portfolio/widgets/all_art_detail.dart';
 import '../../portfolio/widgets/all_art_masonry.dart';
@@ -152,6 +153,16 @@ class _CollectionScreenState extends State<CollectionScreen> {
   /// and the viewer-owned slice the instant it leaves the wallet. See
   /// [initState].
   StreamSubscription<String>? _removalSignalSub;
+
+  /// Fires when the viewer blocks an account or reports something. See
+  /// [initState].
+  late final Listenable _moderationChanges;
+
+  void _onModerationChanged() {
+    if (!mounted) return;
+    final moderation = ModerationFilter.current();
+    _bloc.removeWhere((a) => moderation.hidesMint(a.mintAccount));
+  }
 
   /// Optimistic hide/unhide: flips an artwork's badge in the paged list the
   /// instant the `/v0/hide` write returns. See [initState].
@@ -290,6 +301,12 @@ class _CollectionScreenState extends State<CollectionScreen> {
       });
     }
 
+    // A block or a report made from a route on top of this one: drop what it
+    // hides from the paged list. The viewer-owned slice is the viewer's own
+    // and stays. The repository filters every later page itself.
+    _moderationChanges = ModerationFilter.current().changes
+      ..addListener(_onModerationChanged);
+
     // Optimistic hide/unhide — flip the badge on the matching tile.
     if (sl.isRegistered<ArtworkHiddenSignal>()) {
       _hiddenSignalSub = sl<ArtworkHiddenSignal>().stream.listen((change) {
@@ -306,6 +323,7 @@ class _CollectionScreenState extends State<CollectionScreen> {
   void dispose() {
     _editedSignalSub?.cancel();
     _removalSignalSub?.cancel();
+    _moderationChanges.removeListener(_onModerationChanged);
     _hiddenSignalSub?.cancel();
     _paginationListener.detach();
     _scrollController.dispose();
@@ -379,18 +397,21 @@ class _CollectionScreenState extends State<CollectionScreen> {
   /// One page of this collection, shared by [_bloc] and the creator branch of
   /// [_downloadArtworks] so a bulk download walks the same rows the list shows.
   Future<PaginatedPage<PortfolioArtwork>> _fetchCollectionPage(int page) async {
-    final items = await sl<UserProfileRepository>().getCollectionArtworks(
+    final result = await sl<UserProfileRepository>().getCollectionArtworksPage(
       widget.group.id,
       page: page,
     );
-    // Endpoint has no hasMore flag; an empty page means we're done. The
-    // previous bespoke logic did the same — keep parity.
     return PaginatedPage(
       // The v1 preview render doesn't carry collectionName — backfill it
       // from the collection this screen is showing so downstream surfaces
       // (context-menu sheet) can label the artwork.
-      items: [for (final a in items) a.withCollectionName(widget.group.name)],
-      hasMore: items.isNotEmpty,
+      items: [
+        for (final a in result.items) a.withCollectionName(widget.group.name),
+      ],
+      // The repository's answer, not `items.isNotEmpty`: blocked and reported
+      // artworks are dropped from the page, and a page left empty by that is
+      // not the end of the collection.
+      hasMore: result.hasMore,
     );
   }
 

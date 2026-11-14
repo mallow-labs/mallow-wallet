@@ -94,14 +94,27 @@ class BrowserSigningService {
     if (request.chain == ethereumMainnet)
       return _executeEthereum(context, request);
     if (!request.wallet.canSign) return _reviewViewOnly(context, request);
-    if (request.method == 'signMessage') {
-      final review = _adapter.prepareMessage(
-        bytes: request.payloads.single,
-        origin: request.context.canonicalOrigin,
-        address: request.wallet.address,
-        walletId: request.wallet.id,
-        chain: request.chain,
-      );
+    if (const [
+      'signMessage',
+      'signOffchainMessage',
+      'signIn',
+    ].contains(request.method)) {
+      final signIn = request.method == 'signIn';
+      final offchain = _isOffchainMessage(request);
+      final review =
+          (offchain
+          ? _adapter.prepareOffchainMessage
+          : _adapter.prepareMessage)(
+            bytes: request.payloads.single,
+            origin: request.context.canonicalOrigin,
+            address: request.wallet.address,
+            walletId: request.wallet.id,
+            chain: request.chain,
+          );
+      // The coordinator wrote the message to the sign-in grammar; anything
+      // the sign-in card cannot show in full is not signed as a sign-in.
+      if (signIn && review.signInFields.isEmpty)
+        throw const DappException(-32602, 'Invalid sign-in request.');
       if (!context.mounted)
         throw const DappException(4001, 'Request cancelled.');
       final approved = await _showReview(
@@ -132,6 +145,8 @@ class BrowserSigningService {
       return {
         'signature': base64Encode(signature),
         'publicKey': request.wallet.address,
+        // The site verifies against the bytes the wallet built.
+        if (offchain || signIn) 'signedMessage': base64Encode(review.bytes),
       };
     }
     if (!const [
@@ -154,7 +169,12 @@ class BrowserSigningService {
         expiry.clock.reviewed(batch.review.simulatedAt);
         return batch;
       }),
-      signable: () async => _unsimulatedBatch(request),
+      // A batch too large to simulate has no review to wait for: what its
+      // bytes ask for is read at once, and approving that takes the hold. An
+      // approval before it would be the one way to sign unread, on a tap.
+      signable: count > kMaxSimulatedSolanaBatch
+          ? null
+          : () async => _unsimulatedBatch(request),
       title: title,
       approveLabel: approveLabel,
       expiry: expiry,
@@ -645,7 +665,11 @@ class BrowserSigningService {
     } catch (error) {
       if (route.isActive) {
         failure.value = type == WalletType.ledger
-            ? ledgerSigningFailure(error, chain: _chainOf(request))
+            ? ledgerSigningFailure(
+                error,
+                chain: _chainOf(request),
+                offchainMessage: _isOffchainMessage(request),
+              )
             : error is DappException
             ? error.message
             : 'Your Keystone did not sign this. Nothing was signed.';
@@ -936,6 +960,13 @@ class BrowserSigningService {
       );
   }
 
+  /// Whether [request] signs a Solana off-chain message the coordinator
+  /// built: `signOffchainMessage`, or a sign-in that asked for one.
+  static bool _isOffchainMessage(DappSigningRequest request) =>
+      request.method == 'signOffchainMessage' ||
+      (request.method == 'signIn' &&
+          request.options['offchainMessage'] == true);
+
   static Chain _chainOf(DappSigningRequest request) =>
       request.chain == tezosMainnet
       ? Chain.tezos
@@ -1054,7 +1085,9 @@ class BrowserSigningService {
   /// approves the transaction as [signable] makes it, without the simulation.
   /// Such an approval comes back with `reviewed` false, and its caller must
   /// then treat the value as unknown. Without [signable] the placeholder
-  /// offers only Close, as a view-only review does.
+  /// offers only Close, as a view-only review does. The placeholder's
+  /// Approve works only while the review is still on its way: from the moment
+  /// [prepare] returns, approval goes through the review's own controls.
   ///
   /// `approval` fails with [rejection] when the user rejects, and with the
   /// error of a failed [prepare]; the sheet then says why until it is closed.
@@ -1101,6 +1134,11 @@ class BrowserSigningService {
                 onApprove: signable == null
                     ? null
                     : () {
+                        // Once the answer is in, this button is on its way
+                        // out and the review decides how it is approved: a
+                        // simulation that failed or could not run takes a
+                        // hold, never the tap that was aimed at this.
+                        if (state.value is! _Preparing<T>) return;
                         approvedEarly = true;
                         approve();
                       },
@@ -1343,11 +1381,25 @@ double? estimateEthereumOutgoingUsd(
 /// What to tell the user when their Ledger did not sign a website's request.
 /// Status words are the [chain] app's: for Ethereum, 0x6985 is a rejection on
 /// the device, 0x6A84 a message too large for its memory, 0x6D00 / 0x6E00 a
-/// missing or outdated app.
+/// missing or outdated app. For a Solana [offchainMessage], 0x6A81 is a
+/// header the app cannot read (the version 1 format needs app 1.14 or later)
+/// and 0x6A83 a message too large for it.
 @visibleForTesting
-String ledgerSigningFailure(Object error, {Chain chain = Chain.ethereum}) {
+String ledgerSigningFailure(
+  Object error, {
+  Chain chain = Chain.ethereum,
+  bool offchainMessage = false,
+}) {
   if (chain == Chain.solana) {
     if (error is LedgerDeviceException) {
+      if (offchainMessage) {
+        switch (error.errorCode) {
+          case 0x6A81:
+            return 'Update the Solana app on your Ledger to version 1.14 or later in Ledger Live, then try again. Nothing was signed.';
+          case 0x6A83:
+            return 'This message is too large for your Ledger to review. Nothing was signed.';
+        }
+      }
       switch (error.errorCode) {
         case 0x6985:
         case 0x6982:

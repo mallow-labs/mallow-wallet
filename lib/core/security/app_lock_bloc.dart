@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:freezed_annotation/freezed_annotation.dart';
 import 'package:injectable/injectable.dart';
@@ -5,6 +7,7 @@ import 'package:injectable/injectable.dart';
 import '../database/database.dart';
 import '../observability/app_logger.dart';
 import 'biometric_auth.dart';
+import 'pin_attempt_verifier.dart';
 import 'secure_storage.dart';
 
 part 'app_lock_bloc.freezed.dart';
@@ -26,7 +29,8 @@ sealed class AppLockEvent with _$AppLockEvent {
   const factory AppLockEvent.unlockWithBiometric() =
       AppLockEventUnlockWithBiometric;
 
-  /// Lock the app (e.g., when backgrounded).
+  /// Lock the app (e.g., when backgrounded). While already locked, re-check a
+  /// running cooldown instead: the clock may have moved since it was armed.
   const factory AppLockEvent.lock() = AppLockEventLock;
 
   /// Enable biometric unlock.
@@ -106,7 +110,7 @@ class AppLockBloc extends Bloc<AppLockEvent, AppLockState> {
   final BiometricAuthService _biometricAuth;
   final MallowDatabase _db;
 
-  static const _maxFailedAttempts = 5;
+  late final _pinAttempts = PinAttemptVerifier(_storage);
 
   /// Where a failed read lands: locked, with the PIN pad up.
   ///
@@ -215,7 +219,7 @@ class AppLockBloc extends Bloc<AppLockEvent, AppLockState> {
         final DateTime? cooldownUntil;
         if (persistedCooldown != null &&
             persistedCooldown.isAfter(DateTime.now())) {
-          cooldownUntil = persistedCooldown;
+          cooldownUntil = await _pinAttempts.boundCooldown(persistedCooldown);
         } else {
           cooldownUntil = null;
           if (persistedCooldown != null) {
@@ -257,15 +261,6 @@ class AppLockBloc extends Bloc<AppLockEvent, AppLockState> {
     emit(const AppLockState.unlocked(hasPin: true));
   }
 
-  /// Progressive cooldown durations after reaching max failed attempts.
-  static const _cooldownDurations = [
-    Duration(seconds: 30),
-    Duration(seconds: 60),
-    Duration(minutes: 5),
-    Duration(minutes: 15),
-    Duration(minutes: 30),
-  ];
-
   Future<void> _onUnlockWithPin(
     AppLockEventUnlockWithPin event,
     Emitter<AppLockState> emit,
@@ -274,77 +269,55 @@ class AppLockBloc extends Bloc<AppLockEvent, AppLockState> {
     if (currentState is! AppLockStateLocked) return;
 
     // Reject attempts during cooldown without incrementing counter
-    if (currentState.cooldownUntil != null &&
-        DateTime.now().isBefore(currentState.cooldownUntil!)) {
-      emit(currentState.copyWith(wrongPinAttempt: true));
+    final heldCooldown = currentState.cooldownUntil;
+    if (heldCooldown != null && DateTime.now().isBefore(heldCooldown)) {
+      emit(
+        currentState.copyWith(
+          wrongPinAttempt: true,
+          cooldownUntil: await _pinAttempts.boundCooldown(heldCooldown),
+        ),
+      );
       return;
     }
 
     // Biometric-only mode: PIN entry is not a valid unlock path.
     if (!currentState.hasPin) return;
 
-    final bool verified;
-    try {
-      verified = await _storage.verifyPin(event.pin);
-    } catch (e) {
-      // The stored hash could not be read — the vault reports an unreadable
-      // item as an error. Refuse the attempt without counting it: the PIN may
-      // well be right, so escalating the cooldown ladder for a store glitch
-      // would punish the user for it. `wrongPinAttempt` is the only signal
-      // this state carries, so it is what the lock screen shows.
-      AppLogger.error('AppLockBloc', 'could not read the stored PIN', e);
-      emit(currentState.copyWith(wrongPinAttempt: true));
-      return;
-    }
-
-    if (verified) {
-      // Successful unlock — reset everything, including persisted lockout.
-      // A refused clear must not hold the unlock hostage; the worst it leaves
-      // behind is a stale counter.
-      await _bestEffort('clear the PIN lockout', _storage.clearPinLockout);
-      emit(
-        AppLockState.unlocked(
-          biometricEnabled: currentState.biometricEnabled,
-          hasPin: currentState.hasPin,
-        ),
-      );
-    } else {
-      final newFailedAttempts = currentState.failedAttempts + 1;
-      // Best-effort for the same reason as above: a failed counter write must
-      // not skip the emit below and leave the lock screen holding a full,
-      // unanswered PIN entry.
-      await _bestEffort(
-        'store the failed-PIN counter',
-        () => _storage.storeFailedPinAttempts(newFailedAttempts),
-      );
-
-      if (newFailedAttempts >= _maxFailedAttempts) {
-        // Calculate which cooldown tier we're in
-        final lockoutRound =
-            (newFailedAttempts - _maxFailedAttempts) ~/ _maxFailedAttempts;
-        final tierIndex = lockoutRound.clamp(0, _cooldownDurations.length - 1);
-        final cooldown = _cooldownDurations[tierIndex];
-        final cooldownUntil = DateTime.now().add(cooldown);
-        await _bestEffort(
-          'store the PIN cooldown',
-          () => _storage.storePinCooldownUntil(cooldownUntil),
+    final result = await _pinAttempts.verifyForUnlock(
+      event.pin,
+      knownFailedAttempts: currentState.failedAttempts,
+    );
+    switch (result) {
+      case PinVerified():
+        emit(
+          AppLockState.unlocked(
+            biometricEnabled: currentState.biometricEnabled,
+            hasPin: currentState.hasPin,
+          ),
         );
-
+      case PinRejected(:final failedAttempts, :final cooldownUntil):
         emit(
           currentState.copyWith(
             wrongPinAttempt: true,
-            failedAttempts: newFailedAttempts,
+            failedAttempts: failedAttempts,
             cooldownUntil: cooldownUntil,
           ),
         );
-      } else {
+      case PinCoolingDown(:final failedAttempts, :final until):
+        // A re-auth prompt in the session before this lock armed it.
         emit(
           currentState.copyWith(
             wrongPinAttempt: true,
-            failedAttempts: newFailedAttempts,
+            failedAttempts: failedAttempts,
+            cooldownUntil: until,
           ),
         );
-      }
+      case PinCheckUnavailable():
+        // Refused without counting: the PIN may well be right, so escalating
+        // the cooldown ladder for a store glitch would punish the user for it.
+        // `wrongPinAttempt` is the only signal this state carries, so it is
+        // what the lock screen shows.
+        emit(currentState.copyWith(wrongPinAttempt: true));
     }
   }
 
@@ -390,18 +363,58 @@ class AppLockBloc extends Bloc<AppLockEvent, AppLockState> {
     }
   }
 
-  void _onLock(AppLockEventLock event, Emitter<AppLockState> emit) {
+  Future<void> _onLock(
+    AppLockEventLock event,
+    Emitter<AppLockState> emit,
+  ) async {
     final currentState = state;
-    if (currentState is AppLockStateUnlocked) {
-      emit(
-        AppLockState.locked(
-          biometricEnabled: currentState.biometricEnabled,
-          hasPin: currentState.hasPin,
-          // See _onInit — start in the in-flight state so the lock screen
-          // shows the privacy blur instead of the PIN UI.
-          biometricAttempting: currentState.biometricEnabled,
-        ),
-      );
+    if (currentState is AppLockStateLocked) {
+      await _reboundHeldCooldown(currentState, emit);
+      return;
+    }
+    if (currentState is! AppLockStateUnlocked) return;
+    emit(
+      AppLockState.locked(
+        biometricEnabled: currentState.biometricEnabled,
+        hasPin: currentState.hasPin,
+        // See _onInit — start in the in-flight state so the lock screen
+        // shows the privacy blur instead of the PIN UI.
+        biometricAttempting: currentState.biometricEnabled,
+      ),
+    );
+
+    // Failures on a re-auth prompt during the session count against the same
+    // ladder, so the lock screen has to open already knowing about them. The
+    // lock itself is emitted first: it must not wait on a store read.
+    final failedAttempts = await _bestEffortRead(
+      'read the failed-PIN counter',
+      _storage.loadFailedPinAttempts,
+      0,
+    );
+    final cooldownUntil = await _pinAttempts.activeCooldown();
+    final latest = state;
+    if (latest is! AppLockStateLocked) return;
+    emit(
+      latest.copyWith(
+        failedAttempts: math.max(latest.failedAttempts, failedAttempts),
+        cooldownUntil: latest.cooldownUntil ?? cooldownUntil,
+      ),
+    );
+  }
+
+  /// A deadline in the state is not read back from the store, so a clock moved
+  /// back while the lock screen is up would otherwise leave the pad frozen until
+  /// the app is killed.
+  Future<void> _reboundHeldCooldown(
+    AppLockStateLocked locked,
+    Emitter<AppLockState> emit,
+  ) async {
+    final held = locked.cooldownUntil;
+    if (held == null || !DateTime.now().isBefore(held)) return;
+    final bounded = await _pinAttempts.boundCooldown(held);
+    final latest = state;
+    if (latest is AppLockStateLocked && latest.cooldownUntil == held) {
+      emit(latest.copyWith(cooldownUntil: bounded));
     }
   }
 
@@ -451,14 +464,13 @@ class AppLockBloc extends Bloc<AppLockEvent, AppLockState> {
     Emitter<AppLockState> emit,
   ) async {
     // Verify PIN before disabling
-    if (!await _storage.verifyPin(event.pin)) {
+    if (await _pinAttempts.verify(event.pin) is! PinVerified) {
       emit(const AppLockState.error('Incorrect PIN'));
       return;
     }
 
     await _storage.deletePin();
     await _storage.storeBiometricEnabled(false);
-    await _storage.clearPinLockout();
     emit(const AppLockState.noPinSet());
   }
 

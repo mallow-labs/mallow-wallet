@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../shared/theme/mallow_theme.dart';
+import '../../../shared/utils/social_wallet_copy.dart';
 import '../../../shared/widgets/app_snack_bar.dart';
 import '../../../shared/widgets/mallow_button.dart';
 import '../../../shared/widgets/mallow_svg_icon.dart';
+import '../../artwork/services/active_wallet_verification.dart';
 import '../services/account_deletion.dart';
 import '../widgets/settings_page_scaffold.dart';
 
@@ -18,7 +20,7 @@ import '../widgets/settings_page_scaffold.dart';
 ///
 /// The row that leads here is always shown, so the screen also owns the case
 /// where the signed-in address never set a username. That address still has a
-/// server record — every `/v0/login` upserts one — so the delete is offered and
+/// server record — every `/v2/session` upserts one — so the delete is offered and
 /// runs for real; only the heading changes. The one case with nothing to call
 /// is a signed-out session: the route would 401, so the screen asks for a
 /// sign-in rather than claiming there is nothing there. Reset app is never the
@@ -37,9 +39,39 @@ class _DeleteAccountScreenState extends State<DeleteAccountScreen> {
   final ({bool signedIn, String? username}) _profile = deletableProfile();
   bool _deleting = false;
 
+  /// Whether the signed-in wallet has an encrypted backup (a social vault)
+  /// that outlives the profile. Looked up once; false until it answers.
+  bool _hasWalletBackup = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadWalletBackup();
+  }
+
+  Future<void> _loadWalletBackup() async {
+    try {
+      final has = await profileHasWalletBackup();
+      if (mounted && has) setState(() => _hasWalletBackup = true);
+    } catch (_) {
+      // The line is a disclosure; a failed lookup must not block the delete.
+    }
+  }
+
   Future<void> _delete() async {
     if (_deleting) return;
     setState(() => _deleting = true);
+
+    // The delete takes a signed login. Proving the wallet on this tap is what
+    // gives a social wallet missing its key its re-login; the 401 re-sign
+    // skips it, and the delete would only fail.
+    final verifyError = await ensureActiveWalletVerified();
+    if (!mounted) return;
+    if (verifyError != null) {
+      setState(() => _deleting = false);
+      AppSnackBar.show(context, verifyError, type: AppSnackBarType.error);
+      return;
+    }
 
     final outcome = await deleteMallowAccount();
     if (!mounted) return;
@@ -135,13 +167,27 @@ class _DeleteAccountScreenState extends State<DeleteAccountScreen> {
                     const _Section(
                       title: 'What stays',
                       items: [
-                        'Your wallets and recovery phrase — they never leave '
-                            'this device and are not touched',
+                        'Your wallets and recovery phrases on this device',
                         'Your artworks',
                         'Your on-chain history',
                         'Your listings and offers',
                       ],
                     ),
+                    // Only for a profile signed in with a wallet that has
+                    // sign-in keys (a social vault wallet): the backup is
+                    // server-side data this delete leaves in place, so the
+                    // screen says so and where it is deleted. A wallet from
+                    // the older sign-in has no such backup.
+                    if (_hasWalletBackup) ...[
+                      const SizedBox(height: 20),
+                      Text(
+                        profileDeletionKeepsBackupMessage,
+                        key: const ValueKey('profile-deletion-keeps-backup'),
+                        style: MallowTheme.uiBody.copyWith(
+                          color: colors.textPrimary,
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 20),
                     Divider(color: colors.dividerLight),
                     const SizedBox(height: 16),

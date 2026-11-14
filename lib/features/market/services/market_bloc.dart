@@ -1515,10 +1515,13 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
   /// plugin: Helius DAS does not merge collection plugins into
   /// `getAsset(mint)`, so a Core asset whose Royalties plugin lives on its
   /// collection returns empty creators here while the backend's settlement
-  /// (`fetch_core_royalty_creators`) still pays those collection creators. A
-  /// collection-fetch failure degrades to asset-only computation. Returns
-  /// false (toggle hidden) on any lookup failure — a safe default that leaves
-  /// the offer accepting with its `disablePrimarySplit` default.
+  /// (`fetch_core_royalty_creators`) still pays those collection creators.
+  /// The collection is read twice before giving up. Without it a grouped Core
+  /// sale cannot be classified, so the gate answers with no toggle and no
+  /// royalties: the sheet then shows the simulated proceeds or none, never an
+  /// estimate built on a guessed fee. Returns false (toggle hidden) on any
+  /// lookup failure — a safe default that leaves the offer accepting with its
+  /// `disablePrimarySplit` default.
   ///
   /// [asset] short-circuits the `getAsset` when the eligibility gate already
   /// read it for this same mint.
@@ -1551,13 +1554,24 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
           (resolved.tokenStandard == TokenStandard.core ||
               resolved.tokenStandard == TokenStandard.cnftV2) &&
           resolved.collectionKey != null) {
-        try {
-          collection = await _dasApi.getAsset(resolved.collectionKey!);
-        } catch (_) {
-          // Non-fatal: fall back to asset-only classification + royalties.
-        }
+        collection = await readParentCollection(
+          _dasApi,
+          resolved.collectionKey!,
+          // Only a Core sale's class depends on it (see the listing context).
+          attempts: resolved.tokenStandard == TokenStandard.core ? 2 : 1,
+        );
       }
       final isSecondary = isSecondaryMarketOf(resolved, collection: collection);
+      // Unknown: keep the seller so the accept still goes ahead, and leave
+      // the royalties out so nothing is estimated from them.
+      if (isSecondary == null) {
+        return (
+          showOption: false,
+          seller: seller,
+          isSecondary: false,
+          royalties: null,
+        );
+      }
       final royalties = resolveOnChainRoyalties(
         resolved,
         collection: collection,
@@ -1969,6 +1983,17 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
     );
   }
 
+  /// Flows that give up an NFT for whatever this transaction names, or for
+  /// nothing. That amount is the counter-consideration (or zero), not the NFT's
+  /// worth, so step-up auth treats these as unknown value and prompts at any
+  /// threshold, as for a direct transfer. Cancels, settles and refunds are not
+  /// here: they recover a position rather than give one up.
+  static const _nftDisposalFlows = {
+    AppFlow.offerAccept,
+    AppFlow.fixedPriceUpdate,
+    AppFlow.nftBurn,
+  };
+
   Future<void> _onConfirmAndSign(
     MarketConfirmAndSign event,
     Emitter<MarketState> emit,
@@ -1982,12 +2007,13 @@ class MarketBloc extends Bloc<MarketEvent, MarketState> {
 
     final outflowMint = prep.totalCost.effectiveCurrencyMint;
     final outflowRaw = prep.totalCost.rawAmount;
-    final usdOutflow =
-        outflowRaw == 0 ||
-            prep.actionType == 'withdraw-bid-refund' ||
-            prep.actionType == 'release-sol-bid-refund' ||
-            prep.actionType == 'release-bid-refund' ||
-            prep.actionType == 'recover-bid-refund-deposit'
+    final usdOutflow = _nftDisposalFlows.contains(prep.flow)
+        ? null
+        : outflowRaw == 0 ||
+              prep.actionType == 'withdraw-bid-refund' ||
+              prep.actionType == 'release-sol-bid-refund' ||
+              prep.actionType == 'release-bid-refund' ||
+              prep.actionType == 'recover-bid-refund-deposit'
         ? 0.0
         : _priceService.usdValueOfRaw(outflowRaw, outflowMint);
 

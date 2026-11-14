@@ -15,6 +15,7 @@ import '../../../core/utils/price_formatter.dart';
 import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/utils/address_utils.dart';
+import '../../../shared/utils/social_wallet_copy.dart';
 import '../../../shared/widgets/account_avatar.dart';
 import '../../../shared/widgets/app_snack_bar.dart';
 import '../../../shared/widgets/confirm_sheet.dart';
@@ -22,6 +23,7 @@ import '../../../shared/widgets/mallow_button.dart';
 import '../../../shared/widgets/mallow_pill_field.dart';
 import '../../../shared/widgets/mallow_section_label.dart';
 import '../../../shared/widgets/mallow_toggle.dart';
+import '../../../shared/widgets/social_provider_icon.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
 import '../../accounts/services/account_wallet_bloc.dart';
 import '../../home/widgets/drawer_signal.dart';
@@ -70,11 +72,16 @@ Future<String> accountRemovalMessage(
           'recovered from the app.';
     }
     if (_allOfType(account, WalletType.social)) {
-      // The stored keys go too, but signing in with the same account derives
-      // them again — there is no phrase to back up here.
+      // The stored keys go too. Signing in with the same account reopens a
+      // social vault and stores them again (the vault and its platform backup
+      // are not touched by a removal); an account with no vault is told what
+      // brings it back instead.
+      final aftermath = socialRemovalAftermath(
+        legacy: account.isLegacySocial,
+        hasVault: account.wallets.any((w) => w.socialVaultId != null),
+      );
       return 'This account and its stored keys will be removed from this '
-          'device. You can add it back by signing in with the same account '
-          'again.';
+          'device. $aftermath';
     }
     if (_allOfType(account, WalletType.ledger)) {
       // Nothing signable is stored here; the rows point at the device.
@@ -673,6 +680,14 @@ class _EditAccountScreenState extends State<EditAccountScreen> {
                             _ToggleAddressesSection(
                               rows: _chainRows(),
                               onToggle: _onToggleChain,
+                            ),
+                          ],
+                          if (_account?.isLegacySocial ?? false) ...[
+                            const SizedBox(height: 24),
+                            LegacySocialNote(
+                              provider: _account!.wallets
+                                  .firstWhere((w) => w.isLegacySocialWallet)
+                                  .socialProvider,
                             ),
                           ],
                           if (_account?.kind == AccountKind.seedVault) ...[

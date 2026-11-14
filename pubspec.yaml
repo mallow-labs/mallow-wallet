@@ -1,7 +1,7 @@
 name: mallow_wallet
 description: "mallow wallet - Art-first mobile wallet for Solana, Ethereum, and Tezos"
 publish_to: 'none'
-version: 0.18.0+24
+version: 0.19.0+29
 
 environment:
   # Floors track pubspec.lock's resolved `sdks:` block. app_settings 8.x pulled
@@ -94,8 +94,24 @@ dependencies:
   # Analytics & Error Tracking
   sentry_flutter: ^9.10.0
 
-  # Social Auth (MetaMask Embedded Wallets)
-  web3auth_flutter: ^7.0.0
+  # Social sign-in: Google and Apple identify the user; the wallet itself is
+  # a social vault (lib/core/social_vault/) the backend cannot open. Only the
+  # providers' ID tokens are used — never an access token.
+  google_sign_in: ^7.2.0
+  sign_in_with_apple: ^8.2.0
+  # Passkeys with the WebAuthn PRF extension, one way to unlock a social
+  # vault. The federated implementations are depended on directly, without
+  # the `passkeys` app-facing package: that package adds a diagnostics module
+  # (passkeys_doctor) that makes its own network calls and pins
+  # package_info_plus to a major this app is not on, and nothing here needs it.
+  passkeys_platform_interface: ^2.11.0
+  # Vendored, for one security change: upstream writes a passkey response it
+  # cannot parse to the system log and into the error it returns, and that
+  # response holds the PRF output that unlocks the vault. It also drops two
+  # unused permissions. packages/passkeys_android/README.md.
+  passkeys_android:
+    path: packages/passkeys_android
+  passkeys_darwin: ^0.4.8
 
   # Push Notifications
   firebase_core: ^4.5.0
@@ -226,6 +242,7 @@ flutter:
     - assets/icons/
     - assets/animations/
     - assets/data/public_suffix_list.dat
+    - assets/data/browser_sites.json
     - assets/model_viewer/
     - assets/fonts/
 

@@ -7,6 +7,7 @@ import '../../../core/models/account.dart';
 import '../../../core/observability/app_logger.dart';
 import '../../../core/router/app_router.dart';
 import '../../../core/security/biometric_auth.dart';
+import '../../../core/security/pin_attempt_verifier.dart';
 import '../../../core/security/secure_storage.dart';
 import '../../../core/services/wallet_repository.dart';
 import '../../../di.dart';
@@ -247,16 +248,12 @@ class _RecoveryPhraseScreenState extends State<RecoveryPhraseScreen>
     // PIN-only device would reveal the phrase against no challenge at all,
     // and on a biometric-only device the gate is reached precisely when that
     // read already failed once.
-    bool verified;
-    try {
-      verified = await storage.verifyPin(_pin);
-    } catch (e) {
-      // Unknown is not verified. The stored hash lives in the vault, which
-      // reports an item it cannot read as an error rather than as absent.
-      AppLogger.error('RecoveryPhrase', 'could not verify the PIN', e);
-      verified = false;
-    }
-    if (verified) {
+    //
+    // Unknown is not verified: the stored hash lives in the vault, which reports
+    // an item it cannot read as an error rather than as absent.
+    final result = await PinAttemptVerifier(storage).verify(_pin);
+    if (!mounted) return;
+    if (result is PinVerified) {
       await _loadMnemonicAndNavigate();
     } else {
       setState(() {

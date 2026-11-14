@@ -1508,7 +1508,7 @@ class PortfolioBloc extends Bloc<PortfolioEvent, PortfolioState>
   /// already on screen. Keep the cheap active-wallet check first (it short-
   /// circuits the common non-Ledger case), then widen to the profile's wallets.
   ///
-  /// `currentUser.addresses` is the login profile's wallet set from `/v0/login`
+  /// `currentUser.addresses` is the login profile's wallet set from `/v0/currentUser`
   /// — exactly the `ownerWallets` the backend resolves the gate against. Before
   /// login lands it is null, and the empty set holds no valid sig, so the CTA
   /// falls back to the active-wallet answer rather than being suppressed.

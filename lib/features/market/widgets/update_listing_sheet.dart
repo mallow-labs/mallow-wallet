@@ -64,8 +64,9 @@ typedef ProceedsSplitsForPrice = List<ProceedsSplit> Function(int priceRaw);
 /// they are setting a price or changing one — webapp parity, where
 /// `UpdateListingModal` and `ListArtwork` both render `ProceedsInfo`.
 ///
-/// Returns null when there's no signer or the lookups fail; the sheet then
-/// renders no breakdown rather than a guessed one.
+/// Returns null when there's no signer, the lookups fail, or the sale could
+/// not be classified as primary or secondary; the sheet then renders no
+/// breakdown rather than a guessed one.
 ///
 /// `disablePrimarySplit` is fixed at false: the market program has no
 /// update-time split flag, and `UpdateListingModal` hardcodes the same.
@@ -82,10 +83,12 @@ Future<ProceedsSplitsForPrice?> resolveUpdateListingProceeds(
       artworkRepo: sl<ArtworkRepository>(),
       marketplaceConfig: sl<MarketplaceConfigService>(),
     );
+    final isSecondary = context.isSecondaryMarket;
+    if (isSecondary == null) return null;
     return (int priceRaw) => computeProceedsSplits(
       seller: seller,
       priceRaw: priceRaw,
-      isSecondary: context.isSecondaryMarket,
+      isSecondary: isSecondary,
       royaltyShares: context.royaltyShares,
       royaltyBps: context.royaltyBps,
       primaryFeeBps: context.primaryFeeBps,

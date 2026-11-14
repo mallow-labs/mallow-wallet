@@ -18,6 +18,21 @@ const _dropKeystoneColumns = [
   'ALTER TABLE wallets DROP COLUMN master_fingerprint;',
 ];
 
+/// Undo the v24 step on a database created at the current schema.
+const _dropSocialVaultColumn = [
+  'ALTER TABLE wallets DROP COLUMN social_vault_id;',
+];
+
+/// Undo the v25 step on a database created at the current schema.
+const _dropLegacySocialColumn = [
+  'ALTER TABLE wallets DROP COLUMN legacy_social;',
+];
+
+/// Undo the v26 step on a database created at the current schema.
+const _dropSocialIdentityColumn = [
+  'ALTER TABLE wallets DROP COLUMN social_identity_id;',
+];
+
 void main() {
   late Directory tempDir;
   late File dbFile;
@@ -31,13 +46,14 @@ void main() {
     await tempDir.delete(recursive: true);
   });
 
-  /// Creates the current schema on [dbFile], inserts one wallet row, then
-  /// rewinds `user_version` to [version] (optionally undoing newer-schema
-  /// DDL via [downgradeStatements]) so the next open runs `onUpgrade` from
-  /// that version.
+  /// Creates the current schema on [dbFile], inserts one wallet row (plus
+  /// [extraWallets]), then rewinds `user_version` to [version] (optionally
+  /// undoing newer-schema DDL via [downgradeStatements]) so the next open runs
+  /// `onUpgrade` from that version.
   Future<void> seedDbAtVersion(
     int version, {
     List<String> downgradeStatements = const [],
+    List<WalletsCompanion> extraWallets = const [],
   }) async {
     final db = MallowDatabase.forTesting(NativeDatabase(dbFile));
     await db.upsertWalletEntry(
@@ -49,10 +65,32 @@ void main() {
         createdAt: 1700000000,
       ),
     );
+    for (final wallet in extraWallets) {
+      await db.upsertWalletEntry(wallet);
+    }
+    // Every version below 26 predates the sign-in identity of a vault link.
+    if (version >= 17 && version < 26) {
+      for (final statement in _dropSocialIdentityColumn) {
+        await db.customStatement(statement);
+      }
+    }
+    // Every version below 25 predates the older-sign-in mark. Dropped first:
+    // the column has to go before the vault id it is derived from does.
+    if (version >= 17 && version < 25) {
+      for (final statement in _dropLegacySocialColumn) {
+        await db.customStatement(statement);
+      }
+    }
     // Every stepwise version below 23 predates the Keystone columns; leaving
     // them in place would make the v23 step's ADD COLUMN collide.
     if (version >= 17 && version < 23) {
       for (final statement in _dropKeystoneColumns) {
+        await db.customStatement(statement);
+      }
+    }
+    // Likewise every version below 24 predates the social vault column.
+    if (version >= 17 && version < 24) {
+      for (final statement in _dropSocialVaultColumn) {
         await db.customStatement(statement);
       }
     }
@@ -106,6 +144,311 @@ void main() {
       );
     },
   );
+
+  test('upgrade from schema 23 adds the social vault link', () async {
+    await seedDbAtVersion(23);
+
+    final db = MallowDatabase.forTesting(NativeDatabase(dbFile));
+    addTearDown(db.close);
+
+    final wallets = await db.getAllWallets();
+    expect(wallets, hasLength(1), reason: 'wallet rows must survive');
+    expect(wallets.single.socialVaultId, isNull);
+
+    await db.setWalletsSocialVaultLink(['wallet-1'], 'vault-id');
+    expect((await db.getWalletById('wallet-1'))?.socialVaultId, 'vault-id');
+  });
+
+  group('upgrade to schema 25 marks wallets from the older sign-in', () {
+    WalletsCompanion social(String id, {String? vaultId}) =>
+        WalletsCompanion.insert(
+          id: id,
+          address: 'addr-$id',
+          name: 'Google Wallet',
+          walletType: 'social',
+          socialProvider: const Value('google'),
+          socialVaultId: Value(vaultId),
+          createdAt: 1700000000,
+        );
+
+    test('from 24: a social wallet without a vault is marked, one with a '
+        'vault and a non-social wallet are not', () async {
+      await seedDbAtVersion(
+        24,
+        extraWallets: [
+          social('older'),
+          social('vault', vaultId: 'vault-id'),
+          WalletsCompanion.insert(
+            id: 'imported',
+            address: 'addr-imported',
+            name: 'Imported',
+            walletType: 'imported_key',
+            createdAt: 1700000000,
+          ),
+        ],
+      );
+
+      final db = MallowDatabase.forTesting(NativeDatabase(dbFile));
+      addTearDown(db.close);
+
+      final marks = {
+        for (final w in await db.getAllWallets()) w.id: w.legacySocial,
+      };
+      expect(marks, {
+        'wallet-1': false,
+        'older': true,
+        'vault': false,
+        'imported': false,
+      });
+      // Nothing was lost on the way.
+      expect((await db.getWalletById('vault'))?.socialVaultId, 'vault-id');
+      expect((await db.getWalletById('older'))?.socialProvider, 'google');
+    });
+
+    test('from 23, the last released schema: every social wallet is one from '
+        'the older sign-in', () async {
+      // A release on schema 23 could not create a social vault, so the two
+      // steps together mark every social wallet it holds.
+      await seedDbAtVersion(23, extraWallets: [social('older')]);
+
+      final db = MallowDatabase.forTesting(NativeDatabase(dbFile));
+      addTearDown(db.close);
+
+      final older = await db.getWalletById('older');
+      expect(older?.legacySocial, isTrue);
+      expect(older?.socialVaultId, isNull);
+      expect((await db.getWalletById('wallet-1'))?.legacySocial, isFalse);
+    });
+
+    test('the mark is set once: a vault wallet that loses its vault id '
+        'afterwards stays unmarked', () async {
+      await seedDbAtVersion(
+        24,
+        extraWallets: [social('vault', vaultId: 'vault-id')],
+      );
+
+      final db = MallowDatabase.forTesting(NativeDatabase(dbFile));
+      addTearDown(db.close);
+
+      // What deleting the wallet's backup does to its rows.
+      await db.setWalletsSocialVaultLink(['vault'], null);
+      final unlinked = await db.getWalletById('vault');
+      expect(unlinked?.socialVaultId, isNull);
+      expect(unlinked?.legacySocial, isFalse);
+    });
+
+    test('a wallet created on the current schema is unmarked', () async {
+      final db = MallowDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      await db.upsertWalletEntry(social('fresh'));
+      expect((await db.getWalletById('fresh'))?.legacySocial, isFalse);
+    });
+  });
+
+  group('upgrade to schema 26 adds the sign-in identity of a vault link', () {
+    const identityId = '8ca57526739bfeac48d22f9d47d76f1a';
+
+    WalletsCompanion social(String id, {String? vaultId}) =>
+        WalletsCompanion.insert(
+          id: id,
+          address: 'addr-$id',
+          name: 'Google Wallet',
+          walletType: 'social',
+          socialProvider: const Value('google'),
+          socialVaultId: Value(vaultId),
+          createdAt: 1700000000,
+        );
+
+    test('from 25: every row survives, with no identity until its next '
+        'sign-in', () async {
+      await seedDbAtVersion(
+        25,
+        extraWallets: [
+          social('vault', vaultId: 'vault-id'),
+          social('older'),
+        ],
+      );
+      // What the v25 step had already done to the older-sign-in wallet.
+      // (The seed is created at the current schema, where nothing marks it.)
+
+      final db = MallowDatabase.forTesting(NativeDatabase(dbFile));
+      addTearDown(db.close);
+
+      final wallets = {for (final w in await db.getAllWallets()) w.id: w};
+      expect(wallets.keys, {'wallet-1', 'vault', 'older'});
+      expect(wallets.values.map((w) => w.socialIdentityId), everyElement(null));
+      expect(wallets['vault']!.socialVaultId, 'vault-id');
+      expect(wallets['vault']!.legacySocial, isFalse);
+
+      // The next sign-in records it, beside the link it belongs to.
+      await db.setWalletsSocialVaultLink(
+        ['vault'],
+        'vault-id',
+        identityId: identityId,
+      );
+      expect((await db.getWalletById('vault'))?.socialIdentityId, identityId);
+    });
+
+    test('from 23, the last released schema, through every step', () async {
+      await seedDbAtVersion(23, extraWallets: [social('older')]);
+
+      final db = MallowDatabase.forTesting(NativeDatabase(dbFile));
+      addTearDown(db.close);
+
+      final older = await db.getWalletById('older');
+      expect(older?.legacySocial, isTrue);
+      expect(older?.socialVaultId, isNull);
+      expect(older?.socialIdentityId, isNull);
+    });
+
+    test('a link written without an identity keeps the one recorded, and '
+        'unlinking drops it', () async {
+      final db = MallowDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(db.close);
+      await db.upsertWalletEntry(social('vault'));
+      await db.setWalletsSocialVaultLink(
+        ['vault'],
+        'vault-id',
+        identityId: identityId,
+      );
+      // Reopened from this device's own copy: no sign-in, so no identity to
+      // name. The recorded one stays.
+      await db.setWalletsSocialVaultLink(['vault'], 'vault-id');
+      expect((await db.getWalletById('vault'))?.socialIdentityId, identityId);
+
+      // Its backup was deleted.
+      await db.setWalletsSocialVaultLink(['vault'], null);
+      final unlinked = await db.getWalletById('vault');
+      expect(unlinked?.socialVaultId, isNull);
+      expect(unlinked?.socialIdentityId, isNull);
+      expect(unlinked?.legacySocial, isFalse);
+    });
+  });
+
+  // The upgrade steps are not one transaction and the schema version is written
+  // after the last of them, so a process killed part-way leaves some columns
+  // added and the version unchanged. The next launch runs the same steps
+  // again; a plain ADD COLUMN would fail there on every launch and the
+  // database would never open.
+  group('an upgrade interrupted part-way runs again', () {
+    WalletsCompanion social(String id) => WalletsCompanion.insert(
+      id: id,
+      address: 'addr-$id',
+      name: 'Google Wallet',
+      walletType: 'social',
+      socialProvider: const Value('google'),
+      createdAt: 1700000000,
+    );
+
+    const addVaultId = 'ALTER TABLE wallets ADD COLUMN social_vault_id TEXT;';
+    const addLegacyMark =
+        'ALTER TABLE wallets ADD COLUMN legacy_social INTEGER NOT NULL '
+        'DEFAULT 0;';
+    const addIdentityId =
+        'ALTER TABLE wallets ADD COLUMN social_identity_id TEXT;';
+
+    Future<MallowDatabase> expectUpgraded() async {
+      final db = MallowDatabase.forTesting(NativeDatabase(dbFile));
+      addTearDown(db.close);
+
+      final wallets = {for (final w in await db.getAllWallets()) w.id: w};
+      expect(wallets.keys, {'wallet-1', 'older'});
+      expect(wallets['older']!.legacySocial, isTrue);
+      expect(wallets['wallet-1']!.legacySocial, isFalse);
+      expect(wallets.values.map((w) => w.socialVaultId), everyElement(null));
+      expect(wallets.values.map((w) => w.socialIdentityId), everyElement(null));
+
+      // The columns are the real ones: a link written now reads back.
+      await db.setWalletsSocialVaultLink(
+        ['older'],
+        'vault-id',
+        identityId: 'identity-id',
+      );
+      final linked = await db.getWalletById('older');
+      expect(linked?.socialVaultId, 'vault-id');
+      expect(linked?.socialIdentityId, 'identity-id');
+
+      final version = await db.customSelect('PRAGMA user_version').getSingle();
+      expect(version.read<int>('user_version'), db.schemaVersion);
+      return db;
+    }
+
+    test('from 23, killed after the vault id column was added', () async {
+      await seedDbAtVersion(
+        23,
+        extraWallets: [social('older')],
+        downgradeStatements: [addVaultId],
+      );
+      await expectUpgraded();
+    });
+
+    test('from 23, killed after the older-sign-in column was added and '
+        'before its rows were marked', () async {
+      await seedDbAtVersion(
+        23,
+        extraWallets: [social('older')],
+        downgradeStatements: [addVaultId, addLegacyMark],
+      );
+      await expectUpgraded();
+    });
+
+    test('from 23, killed after every step and before the version was '
+        'written: the marks are the same the second time', () async {
+      await seedDbAtVersion(
+        23,
+        extraWallets: [social('older')],
+        downgradeStatements: [
+          addVaultId,
+          addLegacyMark,
+          "UPDATE wallets SET legacy_social = 1 WHERE wallet_type = 'social' "
+              'AND social_vault_id IS NULL;',
+          addIdentityId,
+        ],
+      );
+      await expectUpgraded();
+    });
+
+    test('from 22, killed between the two Keystone columns', () async {
+      await seedDbAtVersion(
+        22,
+        extraWallets: [social('older')],
+        downgradeStatements: [
+          'ALTER TABLE accounts ADD COLUMN master_fingerprint INTEGER;',
+        ],
+      );
+      final db = await expectUpgraded();
+      expect((await db.getWalletById('wallet-1'))?.masterFingerprint, isNull);
+    });
+
+    test('from 21, killed after the volume column was added', () async {
+      final seed = MallowDatabase.forTesting(NativeDatabase(dbFile));
+      await seed.upsertWalletEntry(
+        WalletsCompanion.insert(
+          id: 'wallet-1',
+          address: 'So1anaAddre55',
+          name: 'Account 01',
+          walletType: 'hd',
+          createdAt: 1700000000,
+        ),
+      );
+      // The table keeps its volume column, as if the step had already run.
+      for (final statement in [
+        ..._dropKeystoneColumns,
+        ..._dropSocialIdentityColumn,
+        ..._dropLegacySocialColumn,
+        ..._dropSocialVaultColumn,
+      ]) {
+        await seed.customStatement(statement);
+      }
+      await seed.customStatement('PRAGMA user_version = 21;');
+      await seed.close();
+
+      final db = MallowDatabase.forTesting(NativeDatabase(dbFile));
+      addTearDown(db.close);
+      expect(await db.getAllWallets(), hasLength(1));
+      expect(await db.getJupiterTokenListCacheTime(), isNull);
+    });
+  });
 
   test('upgrade from schema 19 adds pending_evm_transactions only', () async {
     await seedDbAtVersion(
@@ -212,7 +555,12 @@ void main() {
     await seed.customStatement(
       'ALTER TABLE cached_jupiter_token_list DROP COLUMN daily_volume;',
     );
-    for (final statement in _dropKeystoneColumns) {
+    for (final statement in [
+      ..._dropKeystoneColumns,
+      ..._dropSocialIdentityColumn,
+      ..._dropLegacySocialColumn,
+      ..._dropSocialVaultColumn,
+    ]) {
       await seed.customStatement(statement);
     }
     await seed.customStatement('PRAGMA user_version = 21;');

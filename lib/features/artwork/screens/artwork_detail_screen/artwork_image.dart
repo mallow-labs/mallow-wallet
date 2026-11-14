@@ -871,9 +871,10 @@ class _ArtworkImageState extends State<_ArtworkImage>
     _maybeInitVideo();
   }
 
-  /// Opens the page in a fullscreen viewer that takes every gesture, so drag-
-  /// and pinch-driven artworks work there even though the inline view leaves
-  /// drags to the page's scroll. The inline view is torn down while the
+  /// Opens the page in a fullscreen viewer. Touches that start on the painted
+  /// page already belong to the artwork inline (the screen scrolls from
+  /// outside its box), so this adds room, not gestures: the artwork gets the
+  /// whole screen instead of half of it. The inline view is torn down while the
   /// viewer covers it (see [ArtworkHtmlViewer]), so only one copy of the
   /// artwork runs, and its audio never plays twice. Unlike the webapp's
   /// iframe, the page reloads on the way in and out: a native view cannot
@@ -1793,7 +1794,6 @@ class _ArtworkHtmlFullscreenViewer extends StatelessWidget {
               child: ArtworkHtmlViewer(
                 sources: sources,
                 placeholder: placeholder,
-                interactive: true,
               ),
             ),
           ),

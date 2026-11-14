@@ -9,6 +9,7 @@ import 'package:solana/encoder.dart';
 import 'package:solana/solana.dart';
 import 'package:mallow_wallet/core/config/remote_config.dart';
 import 'package:mallow_wallet/core/models/simulation_review.dart';
+import 'package:mallow_wallet/shared/widgets/hold_to_approve_button.dart';
 import 'package:mallow_wallet/core/security/secure_storage.dart';
 import 'package:mallow_wallet/core/security/transaction_auth_gate.dart';
 import 'package:mallow_wallet/core/services/signing_copy.dart';
@@ -163,7 +164,17 @@ void main() {
         .then<Object?>((v) => v, onError: (Object e) => e);
     await _settle(tester);
     // A test's own chain may have expired the review, replacing the button.
-    if (rpc == null) expect(find.text('Sign and send'), findsOneWidget);
+    // While the simulation is pending the same action is a press-and-hold.
+    if (rpc == null) {
+      expect(
+        find.text('Sign and send').evaluate().length +
+            find
+                .text('Hold to sign and send without the review')
+                .evaluate()
+                .length,
+        1,
+      );
+    }
     return result;
   }
 
@@ -384,6 +395,40 @@ void main() {
       ).called(1);
     });
 
+    testWidgets('a tap does not approve before the result: it takes the '
+        'hold, and Reject is the primary action', (tester) async {
+      final result = await simulating(tester);
+      expect(find.byType(HoldToApproveButton), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('approve-signing-early')));
+      await _settle(tester);
+      // Released at once, and long after the arm delay: still nothing.
+      await tester.pump(const Duration(seconds: 2));
+      await tester.tap(find.byKey(const Key('approve-signing-early')));
+      await _settle(tester);
+
+      expect(find.byKey(const Key('review-pending')), findsOneWidget);
+      verifyNever(
+        () => adapter.describeTransaction(
+          transaction: any(named: 'transaction'),
+          walletId: any(named: 'walletId'),
+          address: any(named: 'address'),
+          origin: any(named: 'origin'),
+          chain: any(named: 'chain'),
+        ),
+      );
+      verifyNever(
+        () => adapter.signPrepared(
+          any(),
+          ensureActive: any(named: 'ensureActive'),
+          cancelled: any(named: 'cancelled'),
+        ),
+      );
+      await tester.tap(find.byKey(const Key('reject-signing')));
+      await _settle(tester);
+      expect(await result, isA<DappException>());
+    });
+
     testWidgets('approving early signs the transaction as received', (
       tester,
     ) async {
@@ -420,7 +465,12 @@ void main() {
         ),
       ).thenAnswer((_) async => TransactionAuthOutcome.allowed);
 
-      await tester.tap(find.byKey(const Key('approve-signing-early')));
+      final early = await tester.startGesture(
+        tester.getCenter(find.byKey(const Key('approve-signing-early'))),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump(const Duration(milliseconds: 1300));
+      await early.up();
       await _settle(tester);
       expect(await result, {'signature': id});
       verify(
@@ -438,6 +488,51 @@ void main() {
       expect(find.byType(BrowserSendSheet), findsNothing);
     });
 
+    testWidgets('a tap aimed at the early Approve as an unchecked review '
+        'lands approves nothing; the review takes the hold', (tester) async {
+      final result = await simulating(tester);
+      simulation.complete(
+        PreparedSolanaTransaction(
+          signed,
+          SimulationReview(
+            payloadDigest: 'digest',
+            origin: 'https://site.example',
+            walletId: 'w',
+            address: _address,
+            chain: 'solana:mainnet',
+            simulatedAt: DateTime.now().toUtc(),
+            execution: SimulationExecution.unavailable,
+            coverage: SimulationCoverage.unavailable,
+            error: 'Simulation is unavailable.',
+          ),
+        ),
+      );
+      // The answer is in, but no frame has replaced the placeholder yet.
+      await tester.idle();
+      expect(find.byKey(const Key('approve-signing-early')), findsOneWidget);
+      final early = await tester.startGesture(
+        tester.getCenter(find.byKey(const Key('approve-signing-early'))),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump(const Duration(milliseconds: 1300));
+      await early.up();
+      await _settle(tester);
+
+      expect(find.byKey(const Key('approve-signing-early')), findsNothing);
+      expect(find.text('Review carefully'), findsOneWidget);
+      expect(find.byType(HoldToApproveButton), findsOneWidget);
+      verifyNever(
+        () => adapter.signPrepared(
+          any(),
+          ensureActive: any(named: 'ensureActive'),
+          cancelled: any(named: 'cancelled'),
+        ),
+      );
+      await tester.tap(find.byKey(const Key('reject-signing')));
+      await _settle(tester);
+      expect(await result, isA<DappException>());
+    });
+
     testWidgets('a failure after an early approval lands on the sheet', (
       tester,
     ) async {
@@ -451,7 +546,12 @@ void main() {
           chain: any(named: 'chain'),
         ),
       ).thenThrow(const DappException(-32602, 'Invalid transaction.'));
-      await tester.tap(find.byKey(const Key('approve-signing-early')));
+      final early = await tester.startGesture(
+        tester.getCenter(find.byKey(const Key('approve-signing-early'))),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump(const Duration(milliseconds: 1300));
+      await early.up();
       await _settle(tester);
       expect(await result, isA<DappException>());
       expect(find.text('Transaction not sent'), findsOneWidget);

@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart' show DioException;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -7,6 +8,7 @@ import '../../../shared/widgets/mallow_button.dart';
 import '../../../shared/widgets/mallow_pill_field.dart';
 import '../../../shared/widgets/mallow_sheet.dart';
 import '../../../shared/widgets/sheet_drag_handle.dart';
+import '../../artwork/services/active_wallet_verification.dart';
 import '../data/user_profile_repository.dart';
 
 /// Bottom sheet that adds/verifies an email via OTP.
@@ -76,6 +78,17 @@ class _EmailOtpSheetState extends State<_EmailOtpSheet> {
       _busy = true;
       _error = null;
     });
+    // Both OTP routes take a signed login. Prove the wallet on the tap, so a
+    // social wallet missing its key gets its re-login, not a failed send.
+    final verifyError = await ensureActiveWalletVerified();
+    if (!mounted) return;
+    if (verifyError != null) {
+      setState(() {
+        _busy = false;
+        _error = verifyError;
+      });
+      return;
+    }
     try {
       await _repo.sendEmailOtp(email);
       if (!mounted) return;
@@ -103,6 +116,15 @@ class _EmailOtpSheetState extends State<_EmailOtpSheet> {
       _busy = true;
       _error = null;
     });
+    final verifyError = await ensureActiveWalletVerified();
+    if (!mounted) return;
+    if (verifyError != null) {
+      setState(() {
+        _busy = false;
+        _error = verifyError;
+      });
+      return;
+    }
     try {
       await _repo.verifyEmailOtp(code);
       if (!mounted) return;
@@ -120,11 +142,33 @@ class _EmailOtpSheetState extends State<_EmailOtpSheet> {
     setState(() => _step = _Step.enterEmail);
   }
 
+  /// The backend's own refusal text when it sent one (a wrong code, an
+  /// address already taken, a wait before asking again), since each tells
+  /// the user what to do next. The generic line is only for
+  /// a failure with no message (offline, a timeout).
   String _messageFor(Object e) {
+    if (e is DioException) {
+      final message = _refusalMessage(e.response?.data);
+      if (message != null) return message;
+    }
     final text = e.toString();
-    // Surface the backend's user-facing message when present.
     final match = RegExp(r'message: ([^,)}]+)').firstMatch(text);
     return match?.group(1)?.trim() ?? 'Something went wrong. Please try again.';
+  }
+
+  /// `error.message` (current envelope) or `err.message` (legacy).
+  static String? _refusalMessage(Object? body) {
+    if (body is! Map) return null;
+    for (final key in const ['error', 'err']) {
+      final error = body[key];
+      if (error is Map) {
+        final message = error['message'];
+        if (message is String && message.trim().isNotEmpty) {
+          return message.trim();
+        }
+      }
+    }
+    return null;
   }
 
   @override

@@ -214,6 +214,11 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
 
   /// On-chain permissions; null until the DAS lookup completes.
   ArtworkPermissions? _permissions;
+
+  /// Whether the last resolved on-chain read found a permanent delegate on a Core
+  /// asset or its collection. A listenable so a bid sheet already open picks up a
+  /// read that finishes late. A failed read leaves it alone.
+  final _corePermanentDelegate = ValueNotifier<bool>(false);
   String? _permissionsLoadKey;
   int _permissionsLoadGeneration = 0;
   ArtworkPermissions? _resolvedOptionsPermissions;
@@ -426,6 +431,7 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
   void dispose() {
     sl<SessionManager>().removeListener(_onPermissionSessionChanged);
     _optionsMenuState.dispose();
+    _corePermanentDelegate.dispose();
     _realtimeSub?.cancel();
     _transientErrorSub?.cancel();
     _auctionEndTimer?.cancel();
@@ -1023,6 +1029,7 @@ class _ArtworkDetailViewState extends State<_ArtworkDetailView> {
                         onUpdateListing: _onUpdateListing,
                         onCancelListing: _onCancelListing,
                         onPlaceBid: _onPlaceBid,
+                        hasCorePermanentDelegate: _corePermanentDelegate.value,
                         onCancelAuction: _onCancelAuction,
                         onSettleAuction: _onSettleAuction,
                         onAuctionEnded: _onAuctionEnded,

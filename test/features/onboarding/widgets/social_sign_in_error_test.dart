@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mallow_wallet/core/crypto/exceptions.dart';
 import 'package:mallow_wallet/core/services/social_auth_service.dart';
+import 'package:mallow_wallet/core/social_vault/social_vault_service.dart';
 import 'package:mallow_wallet/core/services/wallet_repository.dart'
     show DuplicateWalletException;
 import 'package:mallow_wallet/features/onboarding/widgets/social_sign_in_menu.dart';
@@ -8,7 +10,7 @@ import 'package:mallow_wallet/shared/theme/mallow_theme.dart';
 import 'package:mallow_wallet/shared/widgets/app_snack_bar.dart';
 import 'package:mallow_wallet/shared/widgets/mallow_button.dart';
 
-/// The social sheet is the only surface between a failed Web3Auth login and the
+/// The social sheet is the only surface between a failed social sign-in and the
 /// user: `SocialAuthService` rethrows every non-cancel failure precisely so the
 /// sheet can name a reason. Before this, the sheet caught and dropped them, so a
 /// missing client id, an offline device, or an address already held by an
@@ -79,7 +81,7 @@ void main() {
     await pumpMenu(
       tester,
       () async => throw StateError(
-        'WEB3AUTH_CLIENT_ID is not configured — social sign-in cannot start.',
+        'GOOGLE_SERVER_CLIENT_ID is not configured — sign-in cannot start.',
       ),
     );
 
@@ -88,7 +90,7 @@ void main() {
     expect(find.text(genericMessage), findsOneWidget);
     // The thrown reason carries build config and SDK internals, so it is
     // logged, never rendered.
-    expect(find.textContaining('WEB3AUTH_CLIENT_ID'), findsNothing);
+    expect(find.textContaining('GOOGLE_SERVER_CLIENT_ID'), findsNothing);
     expect(googleButton(tester).isLoading, isFalse);
   });
 
@@ -110,6 +112,30 @@ void main() {
     expect(find.text(genericMessage), findsNothing);
   });
 
+  testWidgets('a sign-in answered by another account names the account', (
+    tester,
+  ) async {
+    await pumpMenu(
+      tester,
+      () async => throw SocialAccountMismatchException(
+        provider: 'google',
+        expectedEmail: 'owner@example.test',
+      ),
+    );
+
+    await tapGoogle(tester);
+
+    expect(
+      find.text(
+        'This wallet belongs to owner@example.test. Sign in with that account '
+        'to use it. Nothing was changed.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text(genericMessage), findsNothing);
+    expect(googleButton(tester).isLoading, isFalse);
+  });
+
   testWidgets('a cancelled sign-in shows no error', (tester) async {
     // Null is cancellation only: `SocialAuthService._signIn` swallows the
     // browser/app abort and rethrows everything else.
@@ -120,5 +146,36 @@ void main() {
     expect(find.text(genericMessage), findsNothing);
     expect(find.text(duplicateMessage), findsNothing);
     expect(googleButton(tester).isLoading, isFalse);
+  });
+
+  group('a wallet that cannot be created on this device says why', () {
+    test('Android 8 is told it is the Android version, not sent to set a '
+        'screen lock', () {
+      final message = socialVaultUnlockMessage(
+        const SocialVaultUnlockException(
+          hasPasskeySlots: false,
+          passkeysSupportedHere: false,
+          creating: true,
+          platformTooOld: true,
+        ),
+      );
+      expect(
+        message,
+        'This Android version cannot back up a Google or Apple wallet. Use a '
+        'recovery phrase wallet, or a newer device.',
+      );
+      expect(message, isNot(contains('screen lock')));
+    });
+
+    test('a newer phone without a screen lock is told to set one', () {
+      final message = socialVaultUnlockMessage(
+        const SocialVaultUnlockException(
+          hasPasskeySlots: false,
+          passkeysSupportedHere: false,
+          creating: true,
+        ),
+      );
+      expect(message, contains('Set a screen lock on this device first'));
+    });
   });
 }

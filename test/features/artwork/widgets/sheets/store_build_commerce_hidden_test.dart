@@ -27,6 +27,7 @@ import 'package:mallow_wallet/features/artwork/widgets/sheets/artwork_unlisted_v
 import 'package:mallow_wallet/features/artwork/widgets/sheets/highest_offer_panel.dart';
 import 'package:mallow_wallet/features/portfolio/services/token_balance_bloc.dart';
 import 'package:mallow_wallet/shared/theme/mallow_theme.dart';
+import 'package:mallow_wallet/shared/widgets/mallow_sheet.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -284,6 +285,35 @@ void main() {
     expect(find.text('Gumball drop'), findsOneWidget);
     expect(find.text('This sale runs on the mallow web app.'), findsOneWidget);
     expect(find.text('View on mallow web'), findsNothing);
+  });
+
+  // With the outlink gone nothing in this sheet is full-width, so the frame
+  // has to span the screen by itself. The detail screen pins it inside
+  // AnimatedSheetReveal, whose tap barrier hands its child loose constraints.
+  testWidgets('external-listing sheet still spans the screen without the '
+      'outlink', (tester) async {
+    await pump(
+      tester,
+      const Stack(
+        children: [
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: AnimatedSheetReveal(
+              child: ArtworkExternalLinkSheet(listingType: ListingType.gumball),
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle(const Duration(milliseconds: 200));
+
+    expect(tester.getSize(find.byType(ArtworkSheetFrame)).width, 1200);
+    expect(
+      tester.getTopLeft(find.text('Gumball drop')).dx,
+      MallowTheme.spacing20,
+    );
   });
 
   group('raffle sheet', () {

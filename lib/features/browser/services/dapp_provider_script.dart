@@ -113,6 +113,8 @@ const mallowDappProviderScript = r'''
       'solana:signTransaction',
       'solana:signAndSendTransaction',
       ...(result.canSignMessages === true ? ['solana:signMessage'] : []),
+      ...(result.canSignOffchainMessages === true ? ['solana:signOffchainMessage'] : []),
+      ...(result.canSignMessages === true || result.canSignOffchainMessages === true ? ['solana:signIn'] : []),
     ];
     const same = (left, right) => left.length === right.length && left.every((value, index) => value === right[index]);
     if (previousAddress === result.publicKey && same(chains, result.chains) && same(account.features, features)) {
@@ -232,6 +234,7 @@ const mallowDappProviderScript = r'''
   };
   // A transaction-signing batch is one request, reviewed as a whole, up to
   // 100; the other batches are sent one request per input, up to 10.
+  const signInFields = ['domain', 'address', 'statement', 'uri', 'version', 'chainId', 'nonce', 'issuedAt', 'expirationTime', 'notBefore', 'requestId'];
   const batch = (inputs, max = 10) => { if (!inputs.length || inputs.length > max) throw new RangeError(`A batch must contain 1 to ${max} requests`); };
   // Pages extend the providers they find: Uniswap sets MetaMask's legacy
   // `autoRefreshOnNetworkChange` on `window.ethereum`, and a frozen provider
@@ -309,6 +312,57 @@ const mallowDappProviderScript = r'''
         batch(inputs);
         const results = [];
         for (const input of inputs) { const signedMessage = new Uint8Array(bytes(input.message)); const result = await request('signMessage', {message: encode(signedMessage), account: requireAccount(input.account)}); results.push({signedMessage, signature: decode(result.signature)}); }
+        return results;
+      }},
+      // Sign In With Solana. Connects when needed, then signs a message the
+      // native side writes from these fields; 1.1.0 adds `useOffchainMessage`,
+      // which wraps it in a version 1 off-chain message so a Ledger can sign.
+      'solana:signIn': {version: '1.1.0', signIn: async (...inputs) => {
+        batch(inputs);
+        const results = [];
+        for (const input of inputs) {
+          const params = {};
+          for (const key of signInFields) {
+            const value = input?.[key];
+            if (value === undefined) continue;
+            if (typeof value !== 'string') throw new TypeError(`${key} must be a string`);
+            params[key] = value;
+          }
+          if (input?.resources !== undefined) {
+            if (!Array.isArray(input.resources) || input.resources.some(resource => typeof resource !== 'string')) throw new TypeError('resources must be an array of strings');
+            params.resources = [...input.resources];
+          }
+          const offchain = input?.useOffchainMessage !== undefined;
+          if (offchain) {
+            if (input.useOffchainMessage?.messageVersion !== 1) throw new Error('Unsupported offchain message version');
+            params.useOffchainMessage = {messageVersion: 1};
+          }
+          const result = await request('signIn', params);
+          update(result);
+          results.push({
+            account,
+            signedMessage: decode(result.signedMessage),
+            signature: decode(result.signature),
+            signatureType: 'ed25519',
+            ...(offchain ? {signedMessageFormat: Object.freeze({kind: 'offchainMessage', messageVersion: 1})} : {}),
+          });
+        }
+        return results;
+      }},
+      // Version 1 of the Solana off-chain message format (sRFC 38). The
+      // native side builds the message from the text and signers, and returns
+      // the exact bytes it signed.
+      'solana:signOffchainMessage': {version: '1.0.0', supportedMessageVersions: Object.freeze([1]), signOffchainMessage: async (...inputs) => {
+        batch(inputs);
+        const results = [];
+        for (const input of inputs) {
+          if (input?.messageVersion !== 1) throw new Error('Unsupported offchain message version');
+          if (typeof input.message !== 'string') throw new TypeError('Expected a string message');
+          if (!Array.isArray(input.requiredSigners)) throw new TypeError('requiredSigners must be an array');
+          const requiredSigners = input.requiredSigners.map(signer => { if (bytes(signer).length !== 32) throw new TypeError('Signer keys must be 32 bytes'); return encode(signer); });
+          const result = await request('signOffchainMessage', {message: input.message, requiredSigners, account: requireAccount(input.account)});
+          results.push({signedOffchainMessage: decode(result.signedMessage), signature: decode(result.signature), signatureType: 'ed25519'});
+        }
         return results;
       }},
     }),

@@ -164,6 +164,41 @@ void main() {
   // amount they were never shown. Unlike the other blocks this one is
   // transient, so the label stays the normal call to action rather than
   // announcing a problem that is about to disappear.
+  group('permanent delegate warning', () {
+    Widget sheet({required bool warn, VoidCallback? onBuy}) => ArtworkBuySheet(
+      artwork: _artwork(),
+      onBuy: onBuy ?? () {},
+      onMakeOffer: () {},
+      onCancelOffer: () {},
+      showPermanentDelegateWarning: warn,
+    );
+
+    testWidgets('shows the warning and leaves Buy working', (tester) async {
+      var bought = 0;
+      await pump(tester, sheet(warn: true, onBuy: () => bought++));
+      expect(find.text(kCoreListingPermanentDelegateWarning), findsOneWidget);
+      await tester.tap(find.text('Buy'));
+      await tester.pump();
+      expect(bought, 1);
+    });
+
+    testWidgets('stays hidden without a permanent delegate', (tester) async {
+      await pump(tester, sheet(warn: false));
+      expect(find.text(kCoreListingPermanentDelegateWarning), findsNothing);
+    });
+
+    test('the copy says the purchase cannot be refunded', () {
+      expect(
+        kCoreListingPermanentDelegateWarning,
+        contains('burn, move or freeze it after you buy it'),
+      );
+      expect(
+        kCoreListingPermanentDelegateWarning,
+        contains("the purchase can't be refunded"),
+      );
+    });
+  });
+
   group('unresolved currency', () {
     testWidgets('the 1/1 Buy CTA renders disabled with no scare copy', (
       tester,

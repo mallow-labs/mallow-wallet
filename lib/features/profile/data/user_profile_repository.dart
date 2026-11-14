@@ -7,7 +7,9 @@ import 'package:mallow_api/mallow_api.dart' as api;
 import '../../../core/data/cache_freshness.dart';
 import '../../../core/database/database.dart';
 import '../../../core/utils/address_format.dart';
+import '../../../shared/pagination/pagination_bloc.dart' show PaginatedPage;
 import '../../../shared/utils/user_display.dart';
+import '../../moderation/services/moderation_filter.dart';
 import '../models/cached_profile_data.dart';
 import '../models/user_profile.dart';
 import '../../portfolio/data/portfolio_repository.dart';
@@ -18,6 +20,10 @@ import 'profile_image_uploader.dart';
 const _staleTtl = Duration(minutes: 5);
 
 /// Repository for fetching user profile data and managing follows.
+///
+/// The artwork and collection lists of someone else's profile, and the
+/// artworks of a collection, pass through [ModerationFilter]. The viewer's own
+/// profile is returned whole.
 @lazySingleton
 class UserProfileRepository {
   UserProfileRepository(
@@ -25,8 +31,13 @@ class UserProfileRepository {
     this._apiV2,
     this._db,
     this._portfolio,
-    this._uploader,
-  );
+    this._uploader, {
+    // Tests pass a filter over fake stores. Kept out of the generated
+    // construction, which uses the app's.
+    @ignoreParam ModerationFilter Function()? moderation,
+  }) : _moderation = moderation ?? ModerationFilter.current;
+
+  final ModerationFilter Function() _moderation;
 
   final api.MallowApiClient _api;
   final api.MallowApiV2Client _apiV2;
@@ -130,6 +141,13 @@ class UserProfileRepository {
   }
 
   /// Fetch user's created artworks (paginated).
+  ///
+  /// On someone else's profile, artworks by accounts the viewer blocked and
+  /// artworks the viewer reported are dropped. The profile's own addresses do
+  /// not count: its page shows its work (a blocked profile is behind its own
+  /// gate). A page the filter empties is skipped, so
+  /// [ProfileArtworksResult.nextPage] is the cursor after the last page read
+  /// (see [fetchPastFilteredPages]). `total` stays the server's count.
   Future<ProfileArtworksResult> getUserArtworks(
     List<String> addresses, {
     int page = 0,
@@ -156,20 +174,61 @@ class UserProfileRepository {
           tab != api.ApiProfileTab.collected && tab != api.ApiProfileTab.pinned,
     );
 
-    final response = await _api.getProfile(
-      api.ProfileRequest(
-        page: page,
-        tab: tab,
-        sort: sort,
-        filter: effectiveFilter,
-        profileUserAddresses: addresses,
-      ),
+    final moderation = _moderation();
+    // The viewer's own profile is theirs to see in full.
+    final own = addresses.any(moderation.isViewer);
+    var total = 0;
+    final result = await fetchPastFilteredPages<PortfolioArtwork>(
+      page: page,
+      startOfList: page == 0,
+      fetch: (current) async {
+        final response = await _api.getProfile(
+          api.ProfileRequest(
+            page: current,
+            tab: tab,
+            sort: sort,
+            filter: effectiveFilter,
+            profileUserAddresses: addresses,
+          ),
+        );
+        total = response.total;
+        var filteredOut = 0;
+        final artworks = _mapProfilePreviews(
+          response.result,
+          hides: (preview) {
+            if (own || !moderation.hidesPreview(preview, except: addresses)) {
+              return false;
+            }
+            filteredOut++;
+            return true;
+          },
+        );
+        return FilteredPage(
+          items: artworks,
+          nextPage: response.nextPage,
+          filteredOut: filteredOut,
+        );
+      },
     );
 
-    final artworks = response.result
+    return ProfileArtworksResult(
+      artworks: result.items,
+      total: total,
+      nextPage: result.nextPage,
+    );
+  }
+
+  /// Maps `NftPreview`-shaped rows to [PortfolioArtwork], dropping the ones
+  /// that fail to parse and the ones [hides] is true for.
+  List<PortfolioArtwork> _mapProfilePreviews(
+    List<Map<String, dynamic>> rows, {
+    required bool Function(api.NftPreview preview) hides,
+  }) {
+    return rows
         .map((json) {
           try {
             final preview = api.NftPreview.fromJson(json);
+            if (hides(preview)) return null;
             return PortfolioArtwork(
               mintAccount: preview.mintAccount,
               title: preview.name,
@@ -204,15 +263,11 @@ class UserProfileRepository {
         })
         .whereType<PortfolioArtwork>()
         .toList();
-
-    return ProfileArtworksResult(
-      artworks: artworks,
-      total: response.total,
-      nextPage: response.nextPage,
-    );
   }
 
-  /// Fetch user's collections.
+  /// Fetch user's collections. On someone else's profile, collections made by
+  /// an account the viewer blocked or reported are dropped; the profile's own
+  /// do not count, as in [getUserArtworks].
   Future<List<ArtGroup>> getUserCollections(
     List<String> addresses, {
     int page = 0,
@@ -226,10 +281,22 @@ class UserProfileRepository {
       ),
     );
 
+    final moderation = _moderation();
+    final own = addresses.any(moderation.isViewer);
+    final profile = {for (final a in addresses) a.toLowerCase()};
+    bool hidden(api.CollectionRender collection) =>
+        !own &&
+        moderation.hidesAnyAddress(
+          userRefAddresses(
+            collection.creator,
+          ).where((a) => !profile.contains(a.toLowerCase())),
+        );
+
     return response.result
         .map((json) {
           try {
             final collection = api.CollectionRender.fromJson(json);
+            if (hidden(collection)) return null;
             return ArtGroup(
               id: collection.slug ?? '',
               type: ArtGroupType.collection,
@@ -286,14 +353,20 @@ class UserProfileRepository {
     }
   }
 
-  /// Fetch all artworks belonging to a collection, scoped to the
+  /// Fetch one page of the artworks belonging to a collection, scoped to the
   /// collection itself (not a single user). Mirrors the webapp's
   /// `CollectionMarketplace` call: POST `/v1/explore` with
   /// `filter.collections = [slug]`. The user-scoped `/v1/profile`
   /// endpoint returns empty unless the queried address has actually
   /// created or collected within the collection — wrong for a public
   /// collection page.
-  Future<List<PortfolioArtwork>> getCollectionArtworks(
+  ///
+  /// The viewer's blocks and reports are applied here: artworks by blocked
+  /// accounts and reported artworks are dropped.
+  /// [PaginatedPage.hasMore] comes from the page as the server sent it (the
+  /// route has no flag of its own; an empty page is the end): a page the
+  /// filter emptied is not the end of the collection.
+  Future<PaginatedPage<PortfolioArtwork>> getCollectionArtworksPage(
     String collectionSlug, {
     int page = 0,
     api.ExploreSort sort = api.ExploreSort.recentActivity,
@@ -308,41 +381,13 @@ class UserProfileRepository {
         ),
       ),
     );
-    return response.result
-        .map((json) {
-          try {
-            final preview = api.NftPreview.fromJson(json);
-            return PortfolioArtwork(
-              mintAccount: preview.mintAccount,
-              title: preview.name,
-              imageUrl: preview.imageUrl ?? '',
-              playbackId: preview.playbackId,
-              clipPlaybackId: preview.clipPlaybackId,
-              artistName: formatUsernameOrAddress(
-                username: preview.creator?.username,
-                address: preview.creator?.effectiveAddress,
-              ),
-              artistUsername: preview.creator?.username,
-              collectionName: preview.collectionName,
-              aspectRatio: preview.aspectRatio ?? 1.0,
-              lastPrice: preview.lastSale?.price,
-              listingType: preview.listingType,
-              supply: preview.supply,
-              maxSupply: preview.maxSupply,
-              editionNumber: preview.editionNumber,
-              parentEdition: preview.parentEdition,
-              auctionMetadata: preview.auctionMetadata,
-              buyNowMetadata: preview.buyNowMetadata,
-              updateAuth: preview.updateAuth,
-              nsfw: preview.nsfw ?? false,
-              isHidden: preview.isOwnerHidden || preview.isCreatorHidden,
-            );
-          } catch (_) {
-            return null;
-          }
-        })
-        .whereType<PortfolioArtwork>()
-        .toList();
+    return PaginatedPage(
+      items: _mapProfilePreviews(
+        response.result,
+        hides: _moderation().hidesPreview,
+      ),
+      hasMore: response.result.isNotEmpty,
+    );
   }
 
   /// Fetch full collection detail (description, stats, royalties, tags)

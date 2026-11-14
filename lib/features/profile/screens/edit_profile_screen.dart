@@ -26,6 +26,7 @@ import '../../../shared/widgets/mallow_section_label.dart';
 import '../../../shared/widgets/mallow_svg_icon.dart';
 import '../../../shared/widgets/mallow_textarea_field.dart';
 import '../../../shared/widgets/mallow_toggle.dart';
+import '../../artwork/services/active_wallet_verification.dart';
 import '../../home/widgets/drawer_signal.dart';
 import '../../mint/widgets/mint_drop_zone.dart' show DashedBorderPainter;
 import '../../mint/widgets/mint_progress_bar.dart';
@@ -216,11 +217,18 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
     // Resume the X connect flow when the app returns via the app-link callback.
     _twitterSub = _twitterConnect.results.listen(_onTwitterConnectResult);
+    _twitterConnect.completing.addListener(_onTwitterCompletingChanged);
+  }
+
+  /// Rebuilds the X row while the callback's complete call is in flight.
+  void _onTwitterCompletingChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
     _twitterSub?.cancel();
+    _twitterConnect.completing.removeListener(_onTwitterCompletingChanged);
     _usernameDebounce?.cancel();
     _displayNameController.dispose();
     _usernameController.dispose();
@@ -343,19 +351,31 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   // `/v2/twitter/callback` finishes the OAuth exchange server-side (PKCE
   // verifier + address are cached against a single-use state token, not the
   // app session) and redirects to the `?twitter=…` app link, which
-  // [DeepLinkService] forwards to [TwitterConnectNotifier]. We then refresh the
-  // session to pick up the newly linked handle.
+  // [DeepLinkService] forwards to [TwitterConnectNotifier]. The notifier links
+  // the account on the signed `POST /v2/twitter/complete` and publishes the
+  // outcome. On success we refresh the session to pick up the linked handle.
 
   Future<void> _connectTwitter() async {
     setState(() => _connectingTwitter = true);
+    // Both ends of the connect take a signed login. Prove the wallet on the
+    // tap, so a social wallet missing its key gets its re-login rather than
+    // "Could not start X connect".
+    if (!await _verifiedForSignedWrite()) return;
+    var marked = false;
     try {
       final url = await _repo.getTwitterAuthUrl();
+      // Only a connect started here may be finished by the callback link.
+      // Recorded before the browser opens, so a fast round trip cannot beat it.
+      await _twitterConnect.markConnectStarted();
+      marked = true;
       final launched = await launchUrl(
         Uri.parse(url),
         mode: LaunchMode.externalApplication,
       );
       if (!launched) throw Exception('Could not open browser');
     } catch (_) {
+      // No browser, no connect: a link arriving now was not started here.
+      if (marked) await _twitterConnect.cancelConnectStarted();
       if (mounted) {
         AppSnackBar.show(
           context,
@@ -374,18 +394,37 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     if (!mounted) return;
     switch (status) {
       case TwitterConnectStatus.success:
+        // Busy until the refreshed session carries the handle, so the row does
+        // not flash back to "Connect X" between the link and the refresh.
+        setState(() => _connectingTwitter = true);
         try {
           await _auth.refresh();
         } catch (_) {
           // Best-effort — the link still succeeded server-side.
         }
         if (!mounted) return;
-        setState(() => _twitter = _auth.currentUserDetails?.twitter);
+        setState(() {
+          _connectingTwitter = false;
+          _twitter = _auth.currentUserDetails?.twitter;
+        });
         AppSnackBar.show(context, 'X connected', type: AppSnackBarType.success);
       case TwitterConnectStatus.userExists:
         AppSnackBar.show(
           context,
           'That X account is already linked to another account',
+          type: AppSnackBarType.error,
+        );
+      case TwitterConnectStatus.otherWallet:
+        AppSnackBar.show(
+          context,
+          'This X sign-in was started by another wallet. Switch to it and '
+          'connect X again.',
+          type: AppSnackBarType.error,
+        );
+      case TwitterConnectStatus.expired:
+        AppSnackBar.show(
+          context,
+          'X sign-in expired. Please connect X again.',
           type: AppSnackBarType.error,
         );
       case TwitterConnectStatus.error:
@@ -399,6 +438,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
   Future<void> _disconnectTwitter() async {
     setState(() => _connectingTwitter = true);
+    if (!await _verifiedForSignedWrite()) return;
     try {
       await _repo.disconnectTwitter();
       if (mounted) setState(() => _twitter = null);
@@ -413,6 +453,18 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     } finally {
       if (mounted) setState(() => _connectingTwitter = false);
     }
+  }
+
+  /// Runs [ensureActiveWalletVerified] for an X connect or disconnect tap.
+  /// On failure it shows why, clears the busy state and returns false.
+  Future<bool> _verifiedForSignedWrite() async {
+    final error = await ensureActiveWalletVerified();
+    if (error == null) return mounted;
+    if (mounted) {
+      setState(() => _connectingTwitter = false);
+      AppSnackBar.show(context, error, type: AppSnackBarType.error);
+    }
+    return false;
   }
 
   // --- Step navigation ---
@@ -861,7 +913,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     final website = _websiteController.text.trim();
 
     try {
-      // 1. /v0/login + signature verify with the primary wallet — this becomes
+      // 1. /v2/session + signature verify with the primary wallet — this becomes
       //    the profile's signing wallet and the active session.
       await _auth.switchWallet(primary.address);
       // 2. Link every other selected wallet into the primary's profile.
@@ -1092,7 +1144,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
           variant: MallowButtonVariant.secondary,
           isFullWidth: true,
           svgAsset: 'assets/icons/brand_x.svg',
-          isLoading: _connectingTwitter,
+          isLoading: _connectingTwitter || _twitterConnect.completing.value,
           onPressed: connected ? _disconnectTwitter : _connectTwitter,
         ),
         const SizedBox(height: 24),

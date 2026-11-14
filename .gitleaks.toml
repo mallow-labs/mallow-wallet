@@ -6,9 +6,9 @@
 # PR from day one is a check contributors learn to ignore.
 #
 # The allowlists below are deliberately narrow. The first suppresses *shapes*
-# that cannot be a credential for any provider gitleaks knows about. The second
-# names exact test-vector values, and only inside the one fixture that holds
-# them. Neither allowlists a path on its own, a file type, or a directory: a
+# that cannot be a credential for any provider gitleaks knows about. The others
+# name exact test-vector values, each only inside the one fixture that holds
+# them. None allowlists a path on its own, a file type, or a directory: a
 # real key committed to a test file is still caught.
 
 [extend]
@@ -59,4 +59,25 @@ regexTarget = "match"
 regexes = [
   '''708ceea4b59b859206ae644caa6d4f4dc81d025bf3e56d30b2cf9a2d4c1fe660''',
   '''c2ed4ae354cf4b119a700ef370fc94c4c5d831f531bbfc67484d4925f8b76210''',
+]
+
+[[allowlists]]
+description = """
+The social-vault format test vectors. Each `wrappedKey` is the AES-256-GCM
+encryption of the fixture's data key (bytes 0x40..0x5f) under a key-encryption
+key derived from a sequential test slot secret, produced by an independent
+reference implementation. The crypto tests assert that the Dart code produces
+these exact bytes, so they cannot be swapped for placeholders. They protect
+nothing.
+
+Both conditions must hold: the exact values, and only in that file. A different
+value in the fixture, or these values anywhere else, is still reported.
+"""
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)test/assets/social_vault_vectors\.json$''']
+regexTarget = "match"
+regexes = [
+  '''SR_zuPZg6ciWDegAWuzza1hHX2XQFQWc9F4h5AVm2ZCbtBvOKlVEYiZ4K_rYYe79''',
+  '''mEr4evw4Zhk_o4kQJyBEDHkJzxQUwjTme33DmmeWOlhIwbbLT4Y-pynDLXl-sjnN''',
 ]

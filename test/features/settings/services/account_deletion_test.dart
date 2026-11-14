@@ -4,6 +4,8 @@ import 'package:mallow_api/mallow_api.dart' as api;
 import 'package:mallow_wallet/core/models/account.dart';
 import 'package:mallow_wallet/core/network/auth_service.dart';
 import 'package:mallow_wallet/core/security/secure_storage.dart';
+import 'package:mallow_wallet/core/services/wallet_repository.dart';
+import 'package:mallow_wallet/core/social_vault/social_vault_service.dart';
 import 'package:mallow_wallet/core/session/session_manager.dart';
 import 'package:mallow_wallet/di.dart';
 import 'package:mallow_wallet/features/settings/services/account_deletion.dart';
@@ -16,6 +18,10 @@ class _MockAuth extends Mock implements AuthService {}
 class _MockSession extends Mock implements SessionManager {}
 
 class _MockStorage extends Mock implements SecureWalletStorage {}
+
+class _MockRepository extends Mock implements WalletRepository {}
+
+class _MockVaults extends Mock implements SocialVaultService {}
 
 DioException _http(int status) => DioException(
   requestOptions: RequestOptions(path: '/user/delete'),
@@ -202,6 +208,123 @@ void main() {
 
       verifyNever(() => auth.logout());
       verifyNever(() => storage.deleteActiveProfileId());
+    });
+
+    group('a Google or Apple wallet session', () {
+      late _MockRepository repository;
+      late _MockVaults vaults;
+
+      setUp(() {
+        repository = _MockRepository();
+        vaults = _MockVaults();
+        register<WalletRepository>(repository);
+        register<SocialVaultService>(vaults);
+        when(() => auth.currentAddress).thenReturn('SocialSol');
+        when(() => repository.getAllWallets()).thenAnswer(
+          (_) async => const [
+            WalletInfo(
+              id: 'w',
+              address: 'SocialSol',
+              name: 'Google Wallet',
+              walletType: WalletType.social,
+              chain: 'solana',
+              socialProvider: 'google',
+              socialVaultId: 'vault-1',
+              accountId: 'social-acc',
+            ),
+          ],
+        );
+      });
+
+      tearDown(() {
+        sl.unregister<WalletRepository>();
+        sl.unregister<SocialVaultService>();
+      });
+
+      test('deleting the profile keeps the vault and the wallet\'s link to '
+          'it', () async {
+        when(() => apiV2.deleteUser()).thenAnswer((_) async {});
+
+        expect(await deleteMallowAccount(), AccountDeletionOutcome.deleted);
+
+        verify(() => apiV2.deleteUser()).called(1);
+        verify(() => auth.logout()).called(1);
+        // Nothing of the wallet's backup is touched: not the vault on the
+        // backend, not this device's copy, not the platform entries, and not
+        // the rows that point at it.
+        verifyZeroInteractions(vaults);
+        verifyNever(() => repository.setSocialVaultId(any(), any()));
+        verifyNever(() => storage.loadSocialVaultMnemonic(any()));
+        verifyNever(() => storage.storeSocialAccountMnemonic(any(), any()));
+        verifyNever(() => storage.deleteSocialVaultMnemonic(any()));
+        verifyNever(() => storage.deleteSocialVaultDataKey(any()));
+      });
+
+      test('a failed profile delete touches the vault no more than a '
+          'successful one', () async {
+        when(() => apiV2.deleteUser()).thenThrow(_http(500));
+        expect(await deleteMallowAccount(), AccountDeletionOutcome.failed);
+        verifyZeroInteractions(vaults);
+        verifyNever(() => repository.setSocialVaultId(any(), any()));
+      });
+
+      test('the screen is told the backup is kept', () async {
+        expect(await profileHasWalletBackup(), isTrue);
+      });
+
+      test('address case does not hide the backup (an EVM session)', () async {
+        when(() => auth.currentAddress).thenReturn('socialsol');
+        expect(await profileHasWalletBackup(), isTrue);
+      });
+    });
+
+    group('profileHasWalletBackup', () {
+      late _MockRepository repository;
+
+      setUp(() {
+        repository = _MockRepository();
+        register<WalletRepository>(repository);
+        when(() => auth.currentAddress).thenReturn('Addr');
+      });
+
+      tearDown(() => sl.unregister<WalletRepository>());
+
+      WalletInfo wallet({
+        WalletType type = WalletType.social,
+        String? vaultId,
+        bool legacy = false,
+      }) => WalletInfo(
+        id: 'w',
+        address: 'Addr',
+        name: 'Wallet',
+        walletType: type,
+        chain: 'solana',
+        socialProvider: type == WalletType.social ? 'google' : null,
+        socialVaultId: vaultId,
+        legacySocial: legacy,
+      );
+
+      Future<bool> answerFor(List<WalletInfo> wallets) {
+        when(() => repository.getAllWallets()).thenAnswer((_) async => wallets);
+        return profileHasWalletBackup();
+      }
+
+      test('is false for a wallet from the older sign-in', () async {
+        expect(await answerFor([wallet(legacy: true)]), isFalse);
+      });
+
+      test('is false for a vault wallet whose backup was deleted', () async {
+        expect(await answerFor([wallet()]), isFalse);
+      });
+
+      test('is false for a seed or imported wallet', () async {
+        expect(await answerFor([wallet(type: WalletType.hd)]), isFalse);
+      });
+
+      test('is false when signed out', () async {
+        when(() => auth.currentAddress).thenReturn(null);
+        expect(await answerFor([wallet(vaultId: 'vault-1')]), isFalse);
+      });
     });
   });
 }

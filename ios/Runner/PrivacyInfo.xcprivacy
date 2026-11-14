@@ -148,7 +148,10 @@
 
 		<!-- Wallet address as the account identifier, and as the signer on the
 		     analytics `Transaction Submitted` event (counts active wallets;
-		     gated by the same analytics opt-out). -->
+		     gated by the same analytics opt-out). Also the Google or Apple
+		     account id of a wallet made with one of those sign-ins: the backend
+		     keeps it to find that wallet's encrypted backup again. It is used
+		     for nothing else and never reaches analytics. -->
 		<dict>
 			<key>NSPrivacyCollectedDataType</key>
 			<string>NSPrivacyCollectedDataTypeUserID</string>
@@ -160,6 +163,24 @@
 			<array>
 				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
 				<string>NSPrivacyCollectedDataTypePurposeAnalytics</string>
+			</array>
+		</dict>
+
+		<!-- Email address of the Google or Apple account behind a wallet made
+		     with one of those sign-ins. The backend reads it from the sign-in
+		     to tell the owner when a backup of their wallet is created or is
+		     about to be deleted. Only people who choose that sign-in send
+		     one. -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeEmailAddress</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
 			</array>
 		</dict>
 

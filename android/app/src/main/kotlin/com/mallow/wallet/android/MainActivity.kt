@@ -51,7 +51,9 @@ class MainActivity : FlutterFragmentActivity() {
         super.configureFlutterEngine(flutterEngine)
         flutterEngine.plugins.add(CastPlugin())
         flutterEngine.plugins.add(MnemonicVaultChannel())
+        flutterEngine.plugins.add(PermissionStatusChannel())
         flutterEngine.plugins.add(SecurityChannel())
+        flutterEngine.plugins.add(SocialVaultSlotChannel())
         flutterEngine.plugins.add(SeedVaultChannel())
         flutterEngine.plugins.add(TimezoneChannel())
     }

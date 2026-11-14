@@ -8,7 +8,7 @@ void main() {
       expect(solanaSignsDappMessagesVerbatim(WalletType.keystone), isTrue);
     });
 
-    test('Ledger is not: its off-chain wrapping changes the signed bytes', () {
+    test('Ledger is not: it signs only the off-chain format', () {
       expect(solanaSignsDappMessagesVerbatim(WalletType.ledger), isFalse);
     });
 
@@ -30,5 +30,37 @@ void main() {
         expect(solanaSignsDappMessagesVerbatim(WalletType.viewOnly), isFalse);
       },
     );
+  });
+
+  group('solanaSignsOffchainMessages', () {
+    test('every signer, Ledger included, signs the bytes the wallet built', () {
+      for (final type in WalletType.values) {
+        expect(
+          solanaSignsOffchainMessages(type),
+          type != WalletType.viewOnly,
+          reason: '$type',
+        );
+      }
+    });
+
+    test('a wallet offers it only when it can sign at all', () {
+      const ledger = DappWallet(
+        id: 'ledger',
+        address: 'address',
+        canSign: true,
+        canSignMessages: false,
+        type: WalletType.ledger,
+      );
+      expect(ledger.canSignOffchainMessages, isTrue);
+      expect(
+        const DappWallet(
+          id: 'view',
+          address: 'address',
+          canSign: false,
+          type: WalletType.hd,
+        ).canSignOffchainMessages,
+        isFalse,
+      );
+    });
   });
 }

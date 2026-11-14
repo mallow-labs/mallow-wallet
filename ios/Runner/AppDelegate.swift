@@ -67,6 +67,9 @@ class MallowSceneDelegate: FlutterSceneDelegate {
     let vaultRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "MnemonicVaultChannel")!
     MnemonicVaultChannel.register(with: vaultRegistrar)
 
+    let socialVaultSlotRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "SocialVaultSlotChannel")!
+    SocialVaultSlotChannel.register(with: socialVaultSlotRegistrar)
+
     let securityRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "SecurityChannel")!
     SecurityChannel.register(with: securityRegistrar)
 

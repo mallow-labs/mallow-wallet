@@ -49,6 +49,7 @@ void main() {
         chain: 'tezos',
         seedPhraseId: 'seed',
         derivationIndex: 0,
+        legacySocial: false,
         createdAt: 0,
         sortIndex: 0,
       ),

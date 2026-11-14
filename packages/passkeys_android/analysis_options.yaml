@@ -1,0 +1,8 @@
+# Vendored third-party code: checked for analyzer errors, not held to this
+# repository's lint rules.
+analyzer:
+  exclude:
+    - "**/*.g.dart"
+    # The generator input for lib/messages.g.dart and Messages.java. It imports
+    # package:pigeon, which only upstream's repository depends on.
+    - "pigeons/**"

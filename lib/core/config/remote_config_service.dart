@@ -8,6 +8,10 @@ import 'package:sentry_flutter/sentry_flutter.dart';
 import '../services/sentry_service.dart';
 import 'remote_config.dart';
 
+/// Reads `GET /v2/config/mobile` and returns its `result` object, undecoded
+/// beyond JSON. Throws when the request fails or the body has no such object.
+typedef MobileConfigFetch = Future<Map<String, dynamic>> Function();
+
 /// In-memory cache of `GET /v2/config/mobile` — the per-`(chain, flow)` kill
 /// switch and the force-upgrade fields.
 ///
@@ -40,11 +44,16 @@ import 'remote_config.dart';
 /// signing anyway.
 @lazySingleton
 class RemoteConfigService {
+  /// The payload is taken from the raw response body, not from the generated
+  /// model beside it: the model's flow enum cannot hold a cell the vendored
+  /// contract does not list, and the kill switch has to match such a cell too
+  /// (see [RemoteConfig.fromWire]).
   @factoryMethod
-  RemoteConfigService(MallowApiV2Client api) : this.withTtl(api, _defaultTtl);
+  RemoteConfigService(MallowApiV2Client api)
+    : this.withTtl(() => _fetchResult(api), _defaultTtl);
 
-  /// Test seam for the TTL and the clock — the staleness and cooldown windows
-  /// are minutes wide, and waiting them out is not a test.
+  /// Test seam for the fetch, the TTL and the clock — the staleness and
+  /// cooldown windows are minutes wide, and waiting them out is not a test.
   ///
   /// [elapsed] returns a monotonic duration since some fixed origin, matching
   /// `MarketplaceConfigService`'s seam. It defaults to a process-lifetime
@@ -55,17 +64,30 @@ class RemoteConfigService {
   /// arrives.
   @visibleForTesting
   RemoteConfigService.withTtl(
-    this._api,
+    this._fetchJson,
     this._ttl, {
     Duration Function()? elapsed,
   }) : _elapsed = elapsed ?? _defaultElapsed();
+
+  /// The production [MobileConfigFetch]: the `result` object of the config
+  /// route's answer, as the server sent it.
+  static Future<Map<String, dynamic>> _fetchResult(
+    MallowApiV2Client api,
+  ) async {
+    final body = (await api.getMobileConfig()).response.data;
+    final result = body is Map ? body['result'] : null;
+    if (result is! Map<String, dynamic>) {
+      throw const FormatException('mobile config: no result object');
+    }
+    return result;
+  }
 
   static Duration Function() _defaultElapsed() {
     final stopwatch = Stopwatch()..start();
     return () => stopwatch.elapsed;
   }
 
-  final MallowApiV2Client _api;
+  final MobileConfigFetch _fetchJson;
 
   static const _defaultTtl = Duration(minutes: 5);
 
@@ -136,8 +158,7 @@ class RemoteConfigService {
   Future<void> _fetch() async {
     _lastAttemptAt = _elapsed();
     try {
-      final response = await _api.getMobileConfig();
-      _config.value = RemoteConfig.fromWire(response.result);
+      _config.value = RemoteConfig.fromWire(await _fetchJson());
       _lastSuccessAt = _elapsed();
     } catch (e) {
       // Fail-open, but hold the line: keep whatever we already had rather

@@ -11,7 +11,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../../core/config/remote_config_service.dart';
 import '../../../core/crypto/ens_resolver.dart';
-import '../../../core/crypto/sns_resolver.dart';
+import '../../../core/crypto/solana_name_resolver.dart';
 import '../../../core/data/mallow_tokens.dart' as mallow_tokens;
 import '../../../core/models/account.dart';
 import '../../../core/security/security_utils.dart' show SecurityUtils;
@@ -187,7 +187,7 @@ class _SendSheetState extends State<SendSheet> {
   bool _pickedProfile = false;
 
   /// A signer switch is in flight. Blocks input and shows a spinner over the
-  /// step: the switch awaits a `/v0/login`, and the auto-adopt path
+  /// step: the switch awaits a `/v2/session`, and the auto-adopt path
   /// fires it without any user action.
   bool _switchingSource = false;
 
@@ -669,7 +669,7 @@ class _SendSheetState extends State<SendSheet> {
   /// to [SendBloc] via `SendEvent.setSource` is the whole mechanism — so they
   /// keep the source **flow-local**. Switching for them re-pointed the backend
   /// login identity (and every `owner == req.loginAddress` write with it) for
-  /// no signing benefit, cost a `/v0/login` round trip mid-flow, and was never
+  /// no signing benefit, cost a `/v2/session` round trip mid-flow, and was never
   /// restored. It also never delivered what it appeared to: `getAddress(chain:)`
   /// resolves through the *account*, so with two wallets on one chain the
   /// switch still left it pointing at the first.
@@ -690,7 +690,7 @@ class _SendSheetState extends State<SendSheet> {
     if (wallet.bindsGlobalSigner &&
         !alreadyCommitted &&
         wallet.address != _selfAddress) {
-      // The switch now awaits a `/v0/login` round trip, so it is seconds-long,
+      // The switch now awaits a `/v2/session` round trip, so it is seconds-long,
       // not a local DB write. Surface it: the auto-adopt path fires with no
       // user action at all and would otherwise read as a frozen sheet.
       if (mounted) setState(() => _switchingSource = true);
@@ -944,7 +944,7 @@ class _SendSheetState extends State<SendSheet> {
     _recipientSearch.onInput(trimmed, _chain);
     if (_recipientSearch.isOpen) return;
 
-    // Tezos recipients are Base58Check tz1/2/3/KT1 — no SNS domain resolution.
+    // Tezos recipients are Base58Check tz1/2/3/KT1 — no domain resolution.
     if (_chain == Chain.tezos) {
       if (!isValidTezosAddress(trimmed)) {
         setState(() => _addressError = 'Invalid Tezos address');
@@ -955,7 +955,7 @@ class _SendSheetState extends State<SendSheet> {
     }
 
     // Ethereum recipients are `0x` + 40 hex, or a `.eth` ENS domain resolved
-    // via ENS (debounced) — mirroring the `.sol` SNS path below.
+    // via ENS (debounced) — mirroring the Solana name path below.
     if (_chain == Chain.ethereum) {
       if (EnsResolver.isEthDomain(trimmed)) {
         _resolveDomain(trimmed, EnsResolver.resolve);
@@ -974,8 +974,8 @@ class _SendSheetState extends State<SendSheet> {
       return;
     }
 
-    if (SnsResolver.isSolDomain(trimmed)) {
-      _resolveDomain(trimmed, SnsResolver.resolve);
+    if (SolanaNameResolver.isDomain(trimmed)) {
+      _resolveDomain(trimmed, SolanaNameResolver.resolve);
       return;
     }
 
@@ -987,11 +987,11 @@ class _SendSheetState extends State<SendSheet> {
     context.read<SendBloc>().add(SendEvent.setRecipient(trimmed));
   }
 
-  /// Debounced domain resolution shared by the SNS (`.sol`) and ENS (`.eth`)
-  /// paths: shows the Resolving state, resolves via [resolve] 500 ms after the
-  /// last keystroke, and on success stores the resolved address and hands it to
-  /// [SendBloc]. The controller-text guards drop a resolution whose input has
-  /// since changed.
+  /// Debounced domain resolution shared by the Solana (`.sns`/`.sol`/`.skr`)
+  /// and ENS (`.eth`) paths: shows the Resolving state, resolves via [resolve]
+  /// 500 ms after the last keystroke, and on success stores the resolved
+  /// address and hands it to [SendBloc]. The controller-text guards drop a
+  /// resolution whose input has since changed.
   void _resolveDomain(String domain, Future<String?> Function(String) resolve) {
     setState(() => _isResolving = true);
     _resolveDebounce = Timer(const Duration(milliseconds: 500), () async {
@@ -1063,7 +1063,7 @@ class _SendSheetState extends State<SendSheet> {
     } else {
       isValid =
           SecurityUtils.isValidSolanaAddress(trimmed) ||
-          SnsResolver.isSolDomain(trimmed);
+          SolanaNameResolver.isDomain(trimmed);
     }
     if (!isValid) return;
     // Detection fires repeatedly — only the first hit may pop the scanner.
@@ -1072,8 +1072,9 @@ class _SendSheetState extends State<SendSheet> {
     Navigator.of(routeContext).pop(trimmed);
   }
 
-  /// Tapping a username-search row fills the field with the handle and commits
-  /// the profile's address for that chain.
+  /// Tapping a username-search row fills the field with the handle (the full
+  /// address when the profile has no username) and commits the profile's
+  /// address for that chain.
   ///
   /// Unlike a recent-recipient tap this does **not** advance: the user searched
   /// by name, so leaving them on the step with the resolved address visible
@@ -1145,7 +1146,7 @@ class _SendSheetState extends State<SendSheet> {
               // Same EIP-55 gate as [_onAddressChanged] — otherwise "Next"
               // advanced past the checksum error the field is showing.
               : evmRecipientError(trimmed) == null)
-        : SnsResolver.isSolDomain(trimmed)
+        : SolanaNameResolver.isDomain(trimmed)
         ? _resolvedAddress != null
         : SecurityUtils.isValidSolanaAddress(trimmed);
     if (!hasValidRecipient) {

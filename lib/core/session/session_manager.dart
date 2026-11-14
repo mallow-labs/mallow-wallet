@@ -39,7 +39,7 @@ enum LoginMode {
 /// This is the source of truth the rest of the app reads for "who am I" and
 /// "which wallets are in scope". It activates the active signing wallet through
 /// [WalletManager] (which keeps the existing per-wallet signing pipeline and
-/// drives the `/v0/login` re-login), so it composes with — rather than
+/// drives the `/v2/session` re-login), so it composes with — rather than
 /// replaces — that service.
 @lazySingleton
 class SessionManager extends ChangeNotifier {
@@ -672,7 +672,7 @@ class SessionManager extends ChangeNotifier {
   /// existing wallet-switch pipeline; rethrows if [WalletManager.switchWalletById]
   /// fails so the caller can keep the previous source and surface the error.
   ///
-  /// **The switch is atomic: this resolves only once the `/v0/login` for
+  /// **The switch is atomic: this resolves only once the `/v2/session` for
   /// [wallet] has landed**, so [AuthService.currentAddress] equals the target
   /// the moment it returns. That matters because the two "active wallet"
   /// mechanisms diverge in the gap: [WalletManager.getAddress] reads the DB and

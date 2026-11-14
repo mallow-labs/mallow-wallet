@@ -110,25 +110,88 @@ class EthereumTransactionSigningNotSupportedException implements Exception {
       'EthereumTransactionSigningNotSupportedException: $message';
 }
 
-/// Thrown when a social wallet predates the Web3Auth migration.
+/// Thrown when a Google or Apple wallet's key is missing from this device and
+/// nothing here can produce it again, or when a recovery produced a different
+/// wallet than the one the row holds.
 ///
-/// Such a row's key never left Reown's hosted wallet, so there is nothing to
-/// recover on-device: signing in again with the same identity derives a
-/// *different* address, which would sign for a wallet the row does not
-/// represent. The row is therefore permanently view-only and every sign path
-/// must fail loud rather than substitute the new key.
+/// Storing or signing with any other key would produce valid signatures from
+/// an address the row does not represent, which fails silently — so every
+/// sign path fails loud with this instead. [message] is shown to the user.
 class LegacySocialWalletException implements Exception {
   LegacySocialWalletException([
     this.message =
-        'This wallet was created with the old sign-in system and can no longer '
-        'sign. Its key cannot be recovered — signing in again creates a '
-        'different wallet.',
+        'This wallet cannot sign on this device: its key is not here and '
+        'signing in again would open a different wallet.',
   ]);
 
   final String message;
 
   @override
   String toString() => 'LegacySocialWalletException: $message';
+}
+
+/// Thrown when a wallet from the older Google or Apple sign-in (the one run
+/// by Web3Auth, `WalletInfo.isLegacySocialWallet`) has no stored key on this
+/// device.
+///
+/// This app has no older sign-in, so it cannot fetch that key again — a
+/// keystore wipe, or a database restored onto a fresh install, leaves the row
+/// unable to sign here. The key itself is not lost: the older sign-in on the
+/// mallow website still reproduces it, and [message] says how to bring it
+/// back. A subtype of [LegacySocialWalletException], so every surface that
+/// already renders that message renders this one.
+class LegacySocialKeyUnavailableException extends LegacySocialWalletException {
+  LegacySocialKeyUnavailableException({String provider = 'google'})
+    : super(recoveryMessage(provider));
+
+  /// How to get such a wallet back, for [provider] (`google` or `apple`).
+  /// Names no host: the website is whichever one this deployment serves. The
+  /// row is removed first because an import at an address a wallet already
+  /// holds is refused as a duplicate.
+  static String recoveryMessage(String provider) =>
+      'This wallet was made with mallow’s older '
+      '${provider == 'apple' ? 'Apple' : 'Google'} sign-in, and its keys are '
+      'not on this device. To use it again, sign in on the mallow website '
+      'with the older sign-in and export the wallet’s keys there. Then remove '
+      'this wallet here and add the keys with Import wallet.';
+
+  @override
+  String toString() => 'LegacySocialKeyUnavailableException: $message';
+}
+
+/// Thrown when a Google or Apple wallet's vault has to be reopened and the
+/// sign-in that answered is not the account the wallet belongs to — or cannot
+/// be shown to be (the wallet's row predates the stored identity, and the
+/// account that answered has no vault, or another one).
+///
+/// Nothing is concluded from such an answer and nothing is deleted: "this
+/// account has no vault" says the wallet's backup is gone only when the
+/// wallet's own account says it. [message] names the account the wallet
+/// needs when this device knows it. A subtype of
+/// [LegacySocialWalletException], so every surface that already renders that
+/// message renders this one.
+class SocialAccountMismatchException extends LegacySocialWalletException {
+  SocialAccountMismatchException({required this.provider, this.expectedEmail})
+    : super(describe(provider: provider, expectedEmail: expectedEmail));
+
+  /// `google` or `apple`.
+  final String provider;
+
+  /// The email last seen for the wallet's own account, when known. Display
+  /// only: the comparison is by the identity id, never by email.
+  final String? expectedEmail;
+
+  static String describe({required String provider, String? expectedEmail}) {
+    final name = provider == 'apple' ? 'Apple' : 'Google';
+    final account = (expectedEmail != null && expectedEmail.isNotEmpty)
+        ? expectedEmail
+        : 'the $name account it was created with';
+    return 'This wallet belongs to $account. Sign in with that account to '
+        'use it. Nothing was changed.';
+  }
+
+  @override
+  String toString() => 'SocialAccountMismatchException: $message';
 }
 
 /// Thrown when a Solana signing path resolves a wallet row that is not a Solana

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../social_vault/widgets/social_vault_attention_banner.dart';
 import '../../../core/router/app_router.dart';
 import '../../../core/services/avatar_service.dart';
 import '../../../di.dart';
@@ -116,6 +117,11 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       )
                     else if (homeState is HomeLoaded) ...[
+                      // 1. A social vault wallet that is not yet as
+                      // recoverable as it should be (no passkey).
+                      const SliverToBoxAdapter(
+                        child: SocialVaultAttentionBanner(),
+                      ),
                       // 2. Daily spotlight
                       if (homeState.spotlightArtworks.isNotEmpty)
                         SliverToBoxAdapter(

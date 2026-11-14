@@ -3,16 +3,20 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:get_it/get_it.dart';
 import 'package:injectable/injectable.dart';
-import 'package:web3auth_flutter/enums.dart';
-import 'package:web3auth_flutter/input.dart';
-import 'package:web3auth_flutter/web3auth_flutter.dart';
+import 'package:mallow_api/mallow_api.dart' as api;
 
 import '../../shared/utils/chain.dart' show Chain;
-import '../config/environment.dart';
-import '../crypto/derivation.dart';
 import '../crypto/exceptions.dart';
+import '../crypto/mnemonic_generator.dart';
 import '../models/account.dart';
 import '../observability/app_logger.dart';
+import '../social_vault/passkey_prf.dart';
+import '../social_vault/platform_backup_guard.dart';
+import '../social_vault/social_identity.dart';
+import '../social_vault/social_vault_api.dart';
+import '../social_vault/social_vault_crypto.dart';
+import '../social_vault/social_vault_service.dart';
+import '../social_vault/social_wallet_keys.dart';
 import 'wallet_repository.dart';
 
 /// Result of a social sign-in.
@@ -38,212 +42,187 @@ class SocialAuthResult {
   final bool existed;
 }
 
-/// The chain keys and addresses one Web3Auth login yields.
-///
-/// Hand-written (not freezed) with a redacted [toString]: a generated one
-/// prints every field, and `debugPrint` is not stripped from release builds —
-/// its output reaches the platform log (logcat / OSLog), where anything
-/// printed is readable off the device. So it would put private keys there.
-class _SocialKeys {
-  const _SocialKeys({
-    required this.solanaAddress,
-    required this.solanaStoredKey,
-    required this.ethereumAddress,
-    required this.tezosAddress,
-    required this.secpKeyHex,
-  });
+/// What the user answered when a sign-in found no wallet for the account.
+enum SocialVaultCreateChoice {
+  /// Create a new wallet for this account.
+  create,
 
-  final String solanaAddress;
+  /// This is the wrong account: sign in again and choose another.
+  useAnotherAccount,
 
-  /// base58 of the 64-byte Ed25519 keypair — the imported-key storage format.
-  final String solanaStoredKey;
-
-  final String ethereumAddress;
-  final String tezosAddress;
-
-  /// Normalized secp256k1 key hex. Stored as-is for Ethereum, and re-used as
-  /// the Tezos Ed25519 seed (Web3Auth's Tezos convention), so a leak of one
-  /// exposes both chains.
-  final String secpKeyHex;
-
-  @override
-  String toString() =>
-      '_SocialKeys(solana: $solanaAddress, ethereum: $ethereumAddress, '
-      'tezos: $tezosAddress, keys: <redacted>)';
+  /// Stop. Nothing is created.
+  cancel,
 }
 
-/// Social sign-in via Web3Auth (MetaMask Embedded Wallets).
+/// How this device knows a vault is gone, which decides what an unlink does
+/// with the vault's platform entries. See
+/// [SocialAuthService.unlinkDeletedVault].
+enum SocialVaultUnlink {
+  /// The backend accepted a delete this device signed.
+  signedDelete,
+
+  /// The backend answered "not found".
+  notFound,
+}
+
+/// The questions the social vault asks the user mid-flow, and the notices it
+/// shows. Implemented by the app shell with sheets on the root navigator;
+/// null in tests and before the shell has booted. Without it nothing is
+/// offered and nothing that needs a yes happens: no wallet is created, and
+/// no key is added.
+abstract interface class SocialVaultPrompts {
+  /// Offer a passkey right after a social wallet is created or first opened
+  /// here, so the wallet also opens on the web and on devices of the other
+  /// platform. True adds one — after [reauthenticate].
+  Future<bool> offerPasskey(String provider);
+
+  /// The app's own re-authentication (biometrics, else the PIN), asked before
+  /// a sign-in key is added outside the Sign-in keys screen — the same gate
+  /// that screen uses. A new key is a new way into the wallet, and whoever
+  /// holds the unlocked phone must not be able to add one. True when cleared.
+  Future<bool> reauthenticate();
+
+  /// The sign-in found no wallet for the account ([emailHint], when the
+  /// provider shared one). Nothing is created unless this answers
+  /// [SocialVaultCreateChoice.create].
+  ///
+  /// [hasWalletHere]: this device already holds a wallet with sign-in keys
+  /// for [provider], which belongs to [walletAccountEmail] (when known) — so
+  /// the likelier story is a sign-in with the wrong account, and the question
+  /// warns instead of inviting.
+  Future<SocialVaultCreateChoice> confirmCreate({
+    required String provider,
+    String? emailHint,
+    bool hasWalletHere = false,
+    String? walletAccountEmail,
+  });
+
+  /// A wallet on this device had to be reopened, and the sign-in that
+  /// answered is not the account it belongs to ([expectedEmail], when
+  /// known). True signs in again with an account chooser.
+  Future<bool> wrongAccount({
+    required String provider,
+    String? expectedEmail,
+    String? signedInEmail,
+  });
+
+  /// The wallet was added, but a step that keeps it recoverable (this
+  /// device's copy of the vault, its platform key or passkey) failed. The
+  /// wallet works; the user can retry from Sign-in keys or by signing in
+  /// again.
+  Future<void> backupIncomplete({required String provider});
+
+  /// Show what the latest record of [vaultId] calls for: the blocking
+  /// warning when its deletion is pending and unanswered, then the notice
+  /// for sign-in keys this device has not seen. Returns when the user has
+  /// dealt with them; shows nothing when there is nothing to show.
+  Future<void> reviewVault(String vaultId);
+
+  /// A [provider] wallet on this device was unlinked from its vault because
+  /// the backend no longer has it. Say so, once: the wallet stays on this
+  /// phone and its recovery phrase is now its only backup, with a way to the
+  /// phrase (behind the app's re-authentication). True once the user has
+  /// seen it, false when it could not be shown.
+  Future<bool> backupNoLongerStored({required String provider});
+
+  /// This phone's backup was without end-to-end encryption for a while, with
+  /// sign-in keys in it. Say so, and offer to replace them. True when the
+  /// user chose to (and was taken to Sign-in keys, where it is done), false
+  /// when they dismissed it, null when it could not be shown.
+  ///
+  /// The words must not promise more than a replacement does: it stops a
+  /// key read from that backup from opening the wallet backup from then on,
+  /// and does nothing about a read that was already used (the recovery
+  /// phrase stays the same). See `backupWasUnprotectedMessage`.
+  Future<bool?> offerKeyReplacement();
+}
+
+/// One more notice of the social vault's, kept apart from
+/// [SocialVaultPrompts] so that a shell which does not show it yet still
+/// builds. A shell that does implements both; one that does not is simply
+/// never asked, and the notice stays due.
+abstract interface class SocialVaultKeyReplacedPrompt {
+  /// A status check found that this device's own sign-in key for a
+  /// [provider] wallet no longer opens the wallet backup: the keys were
+  /// replaced on another device. Say so, once — otherwise the user only
+  /// finds Sign-in keys asking them to sign in again, with no reason given,
+  /// and the checks that would warn them of a pending deletion or a new key
+  /// have stopped without a word. Signing in again puts it right
+  /// (`signInKeyReplacedMessage`).
+  ///
+  /// True once the user has seen it, false when it could not be shown.
+  Future<bool> signInKeyReplaced({required String provider});
+}
+
+/// Google and Apple sign-in, backed by the social vault.
 ///
-/// One OAuth login yields two private keys — secp256k1 and Ed25519 —
-/// deterministic per (identity × Web3Auth project × Web3Auth network). From
-/// those we derive one Solana, one Ethereum and one Tezos address and hand the
-/// set to [WalletRepository.addSocialAccount], which stores each key in the
-/// format the imported-key loaders already read. After that the login is over:
-/// signing is local, so this service is not involved again unless a stored key
-/// goes missing ([recoverKeysForAccount]).
+/// A sign-in identifies the person (an ID token the backend verifies) and
+/// fetches their vault — ciphertext the backend cannot open. A slot only the
+/// user's devices hold opens it here: the platform slot silently, else a
+/// passkey. The wallet inside is a recovery phrase; its per-chain keys are
+/// then stored exactly as the imported-key signing paths read them, so signing
+/// never touches the vault.
 ///
-/// That is the whole reason the Reown-era session machinery is gone — there is
-/// no remote signer to keep aligned with the active wallet.
+/// An identity with no vault gets one, holding a fresh phrase: its first slot
+/// is made on this device, and the backend stores it. Only after the user
+/// confirmed it: "no wallet for this account" is as often the wrong account
+/// as a new user.
+///
+/// Every vault link records the sign-in identity it belongs to (the opaque id
+/// `open` returns), on the wallet's rows and in the recovery graph. A vault
+/// reopened for a wallet already on the device is opened only by that
+/// identity, and no answer from any other account is acted on.
+///
+/// Nothing here knows the older sign-in (run by Web3Auth) that made Google and
+/// Apple wallets before the vault. Such a wallet
+/// (`WalletInfo.isLegacySocialWallet`) keeps signing from the keys already
+/// stored on its device, is never placed in a vault, and cannot be re-created
+/// by this app: see [LegacySocialKeyUnavailableException].
 @lazySingleton
 class SocialAuthService {
+  SocialAuthService(this._identity, this._vaults);
+
   static const _tag = 'SocialAuthService';
 
-  /// Redirect the SDK returns to after the OAuth round-trip. The scheme is
-  /// already registered on both platforms (AndroidManifest / Info.plist) and
-  /// must be whitelisted on the Web3Auth dashboard. It carries a session
-  /// handshake, never key material — the key is reconstructed inside the SDK
-  /// from the MPC network.
-  static const _redirectUrl = 'mallowwallet://auth';
+  final SocialIdentityProvider _identity;
+  final SocialVaultService _vaults;
 
-  /// Broadcasts a [SocialAuthResult] the moment an account has been created or
-  /// completed. Durable and lifecycle-independent: the OAuth round-trip
-  /// backgrounds the app, and the sheet/screen that started the sign-in can be
-  /// torn down before it returns. The caller's [signInWithGoogle] future is
-  /// best-effort (it stops the in-flight spinner); this stream is the one that
-  /// must not be missed. See the top-level listener in `app.dart`.
+  /// Set by the app shell once its navigator exists.
+  SocialVaultPrompts? prompts;
+
   final StreamController<SocialAuthResult> _signInController =
       StreamController<SocialAuthResult>.broadcast();
 
   /// Fires once per successful social sign-in with the account's Solana row.
-  /// Key recovery ([recoverKeysForAccount]) deliberately does not publish —
-  /// no account was created, and the listener would re-run the add-wallet flow.
+  /// Durable and lifecycle-independent: the provider sheet can background
+  /// the app, and the screen that started the sign-in can be torn down before
+  /// it returns. Key recovery deliberately does not publish.
   Stream<SocialAuthResult> get onSignInComplete => _signInController.stream;
 
-  bool _initialized = false;
+  // ---------------------------------------------------------------------------
+  // Pure policy (pinned by tests)
+  // ---------------------------------------------------------------------------
 
-  /// In-flight init, shared by concurrent callers, so two racing sign-ins
-  /// cannot each run `Web3AuthFlutter.init` and leave the native SDK holding a
-  /// half-built second instance.
-  Future<void>? _initFuture;
-
-  /// Configure the native SDK. Deduplicated; lazy, so a user who never signs
-  /// in socially never pays for it.
+  /// What a key recovery for one account must reproduce, or
+  /// [LegacySocialWalletException] when the account cannot be recovered.
   ///
-  /// 🛑 Exactly **once per process**, and [_initialized] is never cleared once
-  /// set. `Web3AuthFlutter.init` constructs a new native `Web3Auth`, whose
-  /// constructor builds a Segment analytics client keyed by a fixed write key.
-  /// A successful `Web3Auth.logout()` — which every sign-in ends with — clears
-  /// that manager's own init flag *without* shutting the Segment client down,
-  /// so a second `init` builds a duplicate and the SDK throws
-  /// `Duplicate analytics client created with tag: …`, failing the sign-in
-  /// before the browser ever opens. Re-initializing gains nothing anyway: the
-  /// options come from compile-time [Config], and `connectTo` works fine on an
-  /// instance that has been logged out.
+  /// Unrecoverable means: no social row, no usable `socialProvider` (we would
+  /// not know whom to sign in as), or no social Solana row (the address a
+  /// recovery is verified against).
   ///
-  /// [Web3AuthFlutter.initialize] is deliberately **not** called. It exists to
-  /// restore a previous session, which we never want: we log out immediately
-  /// after capturing keys, and on Android it throws when no session exists —
-  /// which is our normal state. (On iOS it is a no-op; session restore there
-  /// happens inside `init` itself.)
-  Future<void> _ensureInitialized() async {
-    if (_initialized) return;
-    final pending = _initFuture;
-    if (pending != null) {
-      // Shares the outcome: a failure propagates to this caller too, and the
-      // next call (with _initFuture cleared) starts a fresh attempt.
-      await pending;
-      if (_initialized) return;
-    }
-    final future = _doInitialize();
-    _initFuture = future;
-    try {
-      await future;
-    } finally {
-      _initFuture = null;
-    }
-  }
-
-  Future<void> _doInitialize() async {
-    final clientId = Config.web3AuthClientId;
-    if (clientId.isEmpty) {
-      // Fail loud at the first login attempt rather than letting the native
-      // SDK fail with an opaque error: without a client id there is no
-      // Web3Auth project, so no key can be derived at all.
-      throw StateError(
-        'WEB3AUTH_CLIENT_ID is not configured — social sign-in cannot start. '
-        'Set it in .env / --dart-define-from-file.',
-      );
-    }
-    await Web3AuthFlutter.init(
-      Web3AuthOptions(
-        clientId: clientId,
-        redirectUrl: _redirectUrl,
-        web3AuthNetwork: web3AuthNetworkFor(Config.web3AuthNetwork),
-      ),
-    );
-    _initialized = true;
-    AppLogger.info(_tag, 'Web3Auth initialized on ${Config.web3AuthNetwork}');
-  }
-
-  /// Map [Config.web3AuthNetwork] onto the SDK enum.
-  ///
-  /// Pure and exhaustive on purpose: the network is part of the key
-  /// derivation, so a silent fallback to the wrong one would hand every user a
-  /// different address than the one their assets are on. `environment.dart`
-  /// stays SDK-free by keeping the value a string, and this is where the two
-  /// vocabularies meet.
+  /// `legacy` is `WalletInfo.isLegacySocialWallet` for the account: a wallet
+  /// from the older sign-in, which has no vault to reopen.
   @visibleForTesting
-  static Web3AuthNetwork web3AuthNetworkFor(String name) => switch (name) {
-    'sapphire_devnet' => Web3AuthNetwork.sapphire_devnet,
-    'sapphire_mainnet' => Web3AuthNetwork.sapphire_mainnet,
-    _ => throw StateError(
-      'Unsupported Web3Auth network "$name" — expected sapphire_devnet or '
-      'sapphire_mainnet.',
-    ),
-  };
-
-  static final _hexPattern = RegExp(r'^[0-9a-f]+$');
-
-  /// Canonicalize the secp256k1 key hex the SDK returns: `0x` stripped,
-  /// lowercase, left-padded with zeros to exactly 64 characters.
-  ///
-  /// 🛑 The padding is the point. The key is a 256-bit scalar, and the SDK
-  /// hands it back as a big-integer hex string — so a key whose leading
-  /// bytes/nibbles are zero comes back **shorter than 64 characters**.
-  /// Storing that as-is is a silent wrong-key bug on two chains at once:
-  ///  * `MultiChainDerivation.privateKeyBytesFromHex` decodes hex pairwise, so
-  ///    an odd-length string is truncated rather than rejected;
-  ///  * a short-but-even string decodes to fewer than 32 bytes, and both the
-  ///    Ethereum key and the Tezos seed would then be a *different* key than
-  ///    the one Web3Auth derived — valid signatures from the wrong address.
-  /// Short input is therefore padded, never rejected: rejecting it would lock
-  /// the user out of their own account on exactly the logins this fixes.
-  ///
-  /// Only genuinely unusable input throws — empty, non-hex, or longer than 64
-  /// characters (which cannot be a 32-byte key at all). The thrown message
-  /// carries the length only; embedding the value would put a private key into
-  /// logs and crash reports.
-  @visibleForTesting
-  static String normalizedSecpKeyHex(String hex) {
-    var body = hex.trim();
-    if (body.startsWith('0x') || body.startsWith('0X')) {
-      body = body.substring(2);
-    }
-    body = body.toLowerCase();
-    if (body.isEmpty || body.length > 64 || !_hexPattern.hasMatch(body)) {
-      throw ArgumentError(
-        'Web3Auth returned a secp256k1 key that is not 1-64 hex characters '
-        '(length ${body.length})',
-      );
-    }
-    return body.padLeft(64, '0');
-  }
-
-  /// The provider and Solana address a key recovery for one account must
-  /// reproduce, or [LegacySocialWalletException] when the account cannot be
-  /// recovered at all.
-  ///
-  /// Unrecoverable means: no social row (nothing to recover), no usable
-  /// `socialProvider` (we cannot know which identity to authenticate as), or
-  /// no social Solana row (the address a login is verified against). All three
-  /// describe a pre-migration Reown row, whose key never left Reown's hosted
-  /// wallet — see [LegacySocialWalletException].
-  ///
-  /// Pure so the policy is pinned without a live SDK.
-  @visibleForTesting
-  static ({String provider, String solanaAddress}) recoveryTargetFor(
-    List<WalletInfo> wallets,
-  ) {
+  static ({
+    String provider,
+    String solanaAddress,
+    String? ethereumAddress,
+    String? tezosAddress,
+    String? vaultId,
+    String? identityId,
+    bool legacy,
+  })
+  recoveryTargetFor(List<WalletInfo> wallets) {
     final social = wallets
         .where((w) => w.walletType == WalletType.social)
         .toList();
@@ -255,62 +234,75 @@ class SocialAuthService {
     final provider = social
         .map((w) => w.socialProvider)
         .firstWhere((p) => p == 'google' || p == 'apple', orElse: () => null);
-    if (provider == null) {
-      throw LegacySocialWalletException();
-    }
-    final solana = social.cast<WalletInfo?>().firstWhere(
-      (w) => w!.chain == Chain.solana.toDbString(),
+    if (provider == null) throw LegacySocialWalletException();
+    WalletInfo? on(Chain chain) => social.cast<WalletInfo?>().firstWhere(
+      (w) => w!.chain == chain.toDbString(),
       orElse: () => null,
     );
-    if (solana == null) {
-      throw LegacySocialWalletException();
-    }
-    return (provider: provider, solanaAddress: solana.address);
+    final solana = on(Chain.solana);
+    if (solana == null) throw LegacySocialWalletException();
+    return (
+      provider: provider,
+      solanaAddress: solana.address,
+      ethereumAddress: on(Chain.ethereum)?.address,
+      tezosAddress: on(Chain.tezos)?.address,
+      vaultId: social
+          .map((w) => w.socialVaultId)
+          .firstWhere((id) => id != null, orElse: () => null),
+      identityId: social
+          .map((w) => w.socialIdentityId)
+          .firstWhere((id) => id != null, orElse: () => null),
+      legacy: social.any((w) => w.isLegacySocialWallet),
+    );
   }
 
-  /// Gate a recovery on the re-login deriving the address the account already
-  /// holds.
+  /// Gate a recovery on it reproducing the address the account holds.
   ///
-  /// A mismatch is the pre-migration case, not a transient error: Web3Auth
-  /// derives a *different* address than Reown did for the same Google/Apple
-  /// identity. Storing the new key against the old row would produce valid
-  /// signatures from an address the row does not represent, which fails
-  /// silently downstream — so this throws instead.
-  ///
-  /// Pure so the hard cutover is pinned without a live SDK.
+  /// Storing a different key against the row would produce valid signatures
+  /// from an address the row does not represent, which fails silently — so
+  /// this throws instead.
   @visibleForTesting
   static void requireDerivedAddressMatches({
     required String expected,
     required String derived,
   }) {
     if (expected == derived) return;
-    throw LegacySocialWalletException();
+    throw LegacySocialWalletException(_differentWalletMessage);
   }
 
+  static const _differentWalletMessage =
+      'This sign-in opened a different wallet than the one on this device, '
+      'so nothing was changed.';
+
+  // ---------------------------------------------------------------------------
+  // Sign-in
+  // ---------------------------------------------------------------------------
+
   /// Sign in with Google. Returns null when the user cancels.
-  Future<SocialAuthResult?> signInWithGoogle() =>
-      _signIn(AuthConnection.google, 'google');
+  Future<SocialAuthResult?> signInWithGoogle() => _signIn('google');
 
   /// Sign in with Apple. Returns null when the user cancels.
-  Future<SocialAuthResult?> signInWithApple() =>
-      _signIn(AuthConnection.apple, 'apple');
+  Future<SocialAuthResult?> signInWithApple() => _signIn('apple');
 
-  /// Run the OAuth round-trip, then create or complete the account behind the
-  /// identity that came back.
-  ///
-  /// Returns null only for cancellation — the user's own abort, which every
-  /// caller treats as "nothing happened". Every other failure is logged and
-  /// rethrown so the sheet can show a reason; swallowing them (as the Reown
-  /// implementation did) left the user staring at a screen that silently did
-  /// nothing.
-  Future<SocialAuthResult?> _signIn(
-    AuthConnection connection,
-    String provider,
-  ) async {
+  /// Returns null only for a cancellation. Every other failure is logged and
+  /// rethrown so the sheet can say why.
+  Future<SocialAuthResult?> _signIn(String provider) async {
     try {
-      final keys = await _connectAndDerive(connection);
+      final signedIn = await _openOrCreate(provider);
+      if (signedIn == null) return null;
+      final opened = signedIn.opened;
+      final unlocked = signedIn.unlocked;
+      final vaultId = unlocked.vault.vaultId;
+
+      final keys = await SocialWalletKeys.fromPayload(unlocked.payload);
       final repository = GetIt.instance<WalletRepository>();
-      final outcome = await _storeSocialAccount(repository, provider, keys);
+      final outcome = await _storeSocialAccount(
+        repository,
+        provider,
+        keys,
+        vaultId,
+        opened.identityId,
+      );
       final result = SocialAuthResult(
         wallet: _solanaRowOf(outcome.wallets),
         provider: provider,
@@ -321,67 +313,271 @@ class SocialAuthService {
         '$provider sign-in complete for ${result.wallet.address} '
         '(existed=${result.existed})',
       );
-      // Publish on the durable stream FIRST so account creation is observed
-      // even if the awaiting sheet was disposed by the OAuth round-trip's
-      // background/resume cycle.
+      // The account exists from here on, whatever happens next: it is
+      // published even if keeping this device's copy of the vault or adding
+      // its keys fails, and that failure is reported on its own.
+      var backupComplete = true;
+      try {
+        await _vaults.persist(
+          unlocked,
+          provider: provider,
+          emailHint: opened.emailHint,
+        );
+        await _afterOpen(provider, unlocked, opened.emailHint);
+      } catch (e) {
+        backupComplete = false;
+        AppLogger.error(_tag, '$provider wallet stored; backup step failed', e);
+      }
       _signInController.add(result);
+      if (!backupComplete) {
+        await prompts?.backupIncomplete(provider: provider);
+      }
+      // A deletion request pending on the vault just opened, or a sign-in key
+      // this device has not seen, is said now rather than at the next unlock.
+      await _reviewVault(vaultId);
       return result;
-    } on UserCancelledException {
-      AppLogger.info(_tag, '$provider sign-in cancelled in the browser');
-      return null;
     } on TransactionAuthCancelledException {
-      AppLogger.info(_tag, '$provider sign-in cancelled from the app');
+      AppLogger.info(_tag, '$provider sign-in cancelled');
       return null;
+    } on PasskeyPrfException catch (e) {
+      if (e.error == PasskeyPrfError.cancelled) {
+        AppLogger.info(_tag, '$provider sign-in cancelled at the passkey');
+        return null;
+      }
+      AppLogger.error(_tag, '$provider sign-in failed', e);
+      rethrow;
     } catch (e) {
-      // Never interpolate the SDK response: Web3AuthResponse.toString() prints
-      // both private keys. Only the thrown error reaches the log.
+      // Only the error type and its own message are logged — never a token,
+      // a payload or a key, none of which any exception here carries.
       AppLogger.error(_tag, '$provider sign-in failed', e);
       rethrow;
     }
   }
 
+  /// Sign in and open the account's vault, or — when it has none and the
+  /// user says so — create one. Null when the user backs out, at the provider
+  /// or at the question; nothing is created or stored then.
+  Future<({api.SocialVaultOpenResponse opened, UnlockedSocialVault unlocked})?>
+  _openOrCreate(String provider) async {
+    var opened = await _openIdentity(provider);
+    while (true) {
+      if (opened == null) return null;
+      final vault = opened.vault;
+      if (vault != null) {
+        return (
+          opened: opened,
+          unlocked: await _cancellable(_vaults.unlock(vault)),
+        );
+      }
+      switch (await _confirmCreate(provider, opened)) {
+        case SocialVaultCreateChoice.create:
+          return (
+            opened: opened,
+            unlocked: await _createVault(provider, opened),
+          );
+        case SocialVaultCreateChoice.cancel:
+          AppLogger.info(_tag, '$provider sign-in: no wallet, none created');
+          return null;
+        case SocialVaultCreateChoice.useAnotherAccount:
+          opened = await _openIdentity(provider, chooseAccount: true);
+      }
+    }
+  }
+
+  /// Get an ID token and hand it to the vault's `open`. Null when the user
+  /// cancels the provider's sheet.
+  ///
+  /// A token from a [silent] sign-in can be one the provider's SDK had
+  /// cached, which the backend refuses as already used or too old
+  /// (`invalid_id_token`). That is no reason to fail: the sign-in is asked
+  /// again, with its sheet, once.
+  Future<api.SocialVaultOpenResponse?> _openIdentity(
+    String provider, {
+    bool silent = false,
+    bool chooseAccount = false,
+  }) async {
+    final token = await _cancellable(
+      _identity.idToken(provider, silent: silent, chooseAccount: chooseAccount),
+    );
+    if (token == null) return null;
+    try {
+      return await _vaults.vaultApi.open(token);
+    } on SocialVaultApiException catch (e) {
+      if (!silent || chooseAccount || !e.idTokenRefused) rethrow;
+      AppLogger.info(_tag, 'silent sign-in token refused; asking again');
+      final fresh = await _cancellable(_identity.idToken(provider));
+      if (fresh == null) return null;
+      return _vaults.vaultApi.open(fresh);
+    }
+  }
+
+  /// Ask before a wallet is created for an account that has none. Warns
+  /// instead when this device already holds a wallet with sign-in keys for
+  /// the provider: then the account that just signed in is more likely the
+  /// wrong one than a new one.
+  Future<SocialVaultCreateChoice> _confirmCreate(
+    String provider,
+    api.SocialVaultOpenResponse opened,
+  ) async {
+    final prompts = this.prompts;
+    // Nobody to ask is not a yes.
+    if (prompts == null) {
+      throw StateError('a new wallet needs a confirmation; no prompts are set');
+    }
+    WalletInfo? here;
+    for (final w in await GetIt.instance<WalletRepository>().getAllWallets()) {
+      if (w.walletType == WalletType.social &&
+          w.socialProvider == provider &&
+          w.socialVaultId != null) {
+        here = w;
+        break;
+      }
+    }
+    return prompts.confirmCreate(
+      provider: provider,
+      emailHint: opened.emailHint,
+      hasWalletHere: here != null,
+      walletAccountEmail: here == null
+          ? null
+          : (await _vaults.cached(here.socialVaultId!))?.emailHint,
+    );
+  }
+
+  /// First sign-in for an identity: a new wallet — a fresh recovery phrase —
+  /// in a new vault. Always: nothing is looked up about the identity
+  /// elsewhere, and an older-sign-in wallet it may have is not brought in.
+  Future<UnlockedSocialVault> _createVault(
+    String provider,
+    api.SocialVaultOpenResponse opened,
+  ) async {
+    try {
+      return await _cancellable(
+        _vaults.create(
+          identityToken: opened.identityToken,
+          payload: SocialVaultPayload(MnemonicGenerator.generate12Words()),
+          userName: _userName(provider, opened.emailHint),
+        ),
+      );
+    } on SocialVaultApiException catch (e) {
+      if (e.error != SocialVaultApiError.vaultExists) rethrow;
+      // Another device created this identity's vault first. Open that one.
+      AppLogger.info(_tag, 'vault created elsewhere first; opening it');
+      final again = await _openIdentity(provider, silent: true);
+      if (again == null) throw TransactionAuthCancelledException();
+      // The second sign-in shows no sheet where it can, so it may not be the
+      // account the first one was. Another account's vault is not this one's.
+      if (again.identityId != opened.identityId) {
+        throw SocialAccountMismatchException(
+          provider: provider,
+          expectedEmail: opened.emailHint,
+        );
+      }
+      final vault = again.vault;
+      if (vault == null) rethrow;
+      return _cancellable(_vaults.unlock(vault));
+    }
+  }
+
+  /// After a vault opens on this device: give the device its own platform
+  /// slot (so a reinstall reopens silently), then offer a passkey when the
+  /// vault has none. Both best effort — the wallet is already usable.
+  ///
+  /// The platform slot is added without asking: it is this device's own key,
+  /// kept where only this user's devices read it. The passkey is not: it is
+  /// a key that can live anywhere, so it is added only after the offer was
+  /// accepted AND the app's re-authentication cleared.
+  Future<void> _afterOpen(
+    String provider,
+    UnlockedSocialVault unlocked,
+    String? emailHint,
+  ) async {
+    var vault = unlocked.vault;
+    // Against the slot list as it is now, read by the sweep itself: the
+    // record in hand was fetched before the user was asked for a passkey,
+    // however long ago that was.
+    try {
+      await _vaults.sweepPlatformEntries(vault.vaultId, unlocked.dataKey);
+    } catch (e) {
+      AppLogger.warn(_tag, 'platform entries not swept: ${e.runtimeType}');
+    }
+    try {
+      vault = await _vaults.ensurePlatformSlot(vault, unlocked.dataKey);
+    } catch (e) {
+      AppLogger.warn(_tag, 'platform slot not added: ${e.runtimeType}');
+    }
+    final hasPasskey = vault.slots.any(
+      (s) => s.kind == api.SocialVaultSlotKind.passkeyPrf,
+    );
+    final prompts = this.prompts;
+    if (hasPasskey || prompts == null) return;
+    if (!await _vaults.passkeysAvailable()) return;
+    if (!await prompts.offerPasskey(provider)) return;
+    if (!await prompts.reauthenticate()) {
+      AppLogger.info(_tag, 'passkey not added: re-authentication not cleared');
+      return;
+    }
+    try {
+      await _vaults.addPasskeySlot(
+        vault,
+        unlocked.dataKey,
+        userName: _userName(provider, emailHint),
+      );
+    } catch (e) {
+      // The offer is optional; the Sign-in keys screen can add one later.
+      AppLogger.warn(_tag, 'passkey not added: $e');
+    }
+  }
+
+  static String _userName(String provider, String? emailHint) =>
+      (emailHint != null && emailHint.isNotEmpty)
+      ? emailHint
+      : '${_providerLabel(provider)} wallet';
+
+  // ---------------------------------------------------------------------------
+  // Key recovery
+  // ---------------------------------------------------------------------------
+
   /// Re-derive and re-store the keys for the social account [accountId].
   ///
-  /// Called when a social row's stored key is missing — a wiped keystore, a
-  /// restored database, or a row that predates this migration. The interactive
-  /// login is the only way back: keys are obtainable during a login session
-  /// and nowhere else.
+  /// Called when a social row's stored key is missing — a wiped keystore, or
+  /// a database restored onto a fresh install. A vault-linked account is
+  /// reopened: from this device's own copy when it still holds the data key,
+  /// else by signing in again (silently where the provider allows it) and
+  /// opening the vault with the platform slot or a passkey.
   ///
-  /// Publishes nothing on [onSignInComplete]: no account was created, and the
-  /// listener would re-run the add-wallet flow and yank navigation home.
+  /// The sign-in must be the account the wallet belongs to. When it is not —
+  /// the provider silently handed over another account — this asks the user
+  /// to sign in again with an account chooser, and throws
+  /// [SocialAccountMismatchException] when they decline. Whatever such a
+  /// sign-in answers ("no vault", another vault), nothing on this device or
+  /// in the platform's synced keychain is deleted because of it.
   ///
-  /// Throws [LegacySocialWalletException] when the account cannot be recovered
-  /// (see [recoveryTargetFor] and [requireDerivedAddressMatches]), and
-  /// [TransactionAuthCancelledException] when the user backs out — the caller
-  /// is mid-signature, so a cancel must unwind the whole flow rather than
-  /// return quietly.
+  /// An account with no vault has nothing to reopen. For a wallet from the
+  /// older sign-in this throws [LegacySocialKeyUnavailableException], whose
+  /// message says how to bring the wallet back (the older sign-in on the
+  /// mallow website, an export there, an import here); for a vault wallet
+  /// whose backup was deleted, a [LegacySocialWalletException] pointing at
+  /// its recovery phrase. Neither signs in or prompts.
   ///
-  /// Concurrent calls for the same [accountId] share one login and one
+  /// Every chain address the account holds must come out the same, or this
+  /// throws [LegacySocialWalletException] and stores nothing.
+  ///
+  /// Throws [TransactionAuthCancelledException] when the user backs out: the
+  /// caller is mid-signature, so a cancel must unwind the whole flow.
+  ///
+  /// Concurrent calls for the same [accountId] share one attempt and one
   /// outcome — see [_recoveriesInFlight].
   Future<void> recoverKeysForAccount(String accountId) {
     final pending = _recoveriesInFlight[accountId];
     if (pending != null) return pending;
-    // Registered before the first suspension inside [_runKeyRecovery], so no
-    // second entrant can slip past the lookup above.
     final started = _runKeyRecovery(accountId);
     _recoveriesInFlight[accountId] = started;
     return started;
   }
 
-  /// In-flight recoveries, keyed by account id, so concurrent callers share
-  /// one OAuth round-trip instead of each opening a browser tab.
-  ///
-  /// Mirrors [_initFuture], and for the same reason: `WalletManager` wires
-  /// recovery into every social key load, so a multi-chain sign or a
-  /// `Future.wait` over two rows of one account can enter here at once.
-  /// Un-coalesced, the second entrant starts a second login and installs its
-  /// own cancel signal, so the sheet's Cancel unwinds one caller and leaves
-  /// the other waiting on a browser tab that is never coming back.
-  ///
-  /// Every caller gets the *same* future, so all of them see the same
-  /// outcome — success, [LegacySocialWalletException], or the cancellation.
-  /// The entry is dropped before that future completes, so the next call is
-  /// always a fresh attempt rather than a replay of this one's result.
+  /// In-flight recoveries, keyed by account id. `WalletManager` wires
+  /// recovery into every social key load, so a multi-chain sign can enter
+  /// here twice at once; un-coalesced, each would show its own sign-in.
   final Map<String, Future<void>> _recoveriesInFlight =
       <String, Future<void>>{};
 
@@ -389,8 +585,6 @@ class SocialAuthService {
     try {
       await _recoverKeysForAccount(accountId);
     } finally {
-      // Discarded rather than awaited: `remove` hands back the evicted
-      // future, which is the one we are running inside.
       final _ = _recoveriesInFlight.remove(accountId);
     }
   }
@@ -401,21 +595,55 @@ class SocialAuthService {
       final target = recoveryTargetFor(
         await repository.getWalletsForAccount(accountId),
       );
-      final keys = await _connectAndDerive(_connectionFor(target.provider));
+      final vaultId = target.vaultId;
+      if (vaultId == null) {
+        throw target.legacy
+            ? LegacySocialKeyUnavailableException(provider: target.provider)
+            : LegacySocialWalletException(_backupDeletedMessage);
+      }
+      final reopened = await _reopen(
+        target.provider,
+        vaultId,
+        target.identityId,
+      );
+      final unlocked = reopened.unlocked;
+      final keys = await SocialWalletKeys.fromPayload(unlocked.payload);
       requireDerivedAddressMatches(
         expected: target.solanaAddress,
         derived: keys.solanaAddress,
       );
-      // Idempotent: re-stores all three keys and backfills any chain row the
-      // account is missing (a pre-Accounts-model row had Solana only).
-      await _storeSocialAccount(repository, target.provider, keys);
-      AppLogger.info(_tag, 'recovered keys for ${target.solanaAddress}');
-    } on UserCancelledException {
-      AppLogger.info(_tag, 'key recovery cancelled in the browser');
-      throw TransactionAuthCancelledException(
-        'Sign-in was cancelled. Transaction aborted.',
+      if (!keys.matches(
+        solana: target.solanaAddress,
+        ethereum: target.ethereumAddress,
+        tezos: target.tezosAddress,
+      )) {
+        throw LegacySocialWalletException(_differentWalletMessage);
+      }
+      // Idempotent: re-stores all three keys and backfills a missing row —
+      // and records the identity on a row that predates it.
+      await _storeSocialAccount(
+        repository,
+        target.provider,
+        keys,
+        vaultId,
+        reopened.identityId,
       );
+      await _vaults.persist(
+        unlocked,
+        provider: target.provider,
+        emailHint: reopened.emailHint,
+      );
+      AppLogger.info(_tag, 'recovered keys for ${target.solanaAddress}');
     } on TransactionAuthCancelledException {
+      AppLogger.info(_tag, 'key recovery cancelled');
+      rethrow;
+    } on PasskeyPrfException catch (e) {
+      if (e.error == PasskeyPrfError.cancelled) {
+        throw TransactionAuthCancelledException(
+          'Sign-in was cancelled. Transaction aborted.',
+        );
+      }
+      AppLogger.error(_tag, 'key recovery failed', e);
       rethrow;
     } catch (e) {
       AppLogger.error(_tag, 'key recovery failed', e);
@@ -423,20 +651,602 @@ class SocialAuthService {
     }
   }
 
-  /// The storage half both entry points share: map one login's derived keys
-  /// onto the three chain rows and hand them to secure storage.
+  static const _backupDeletedMessage =
+      'This wallet’s backup was deleted. Restore it from its recovery phrase.';
+
+  /// Open the vault [vaultId] again: from this device's data key and cached
+  /// record when both are here (no prompt, no network), else through a
+  /// sign-in and a slot. The caller checks the addresses either way.
   ///
-  /// 🛑 Stated exactly once on purpose. [_SocialKeys.secpKeyHex] is BOTH the
-  /// Ethereum stored key and the Tezos one (Web3Auth's Tezos convention feeds
-  /// the secp256k1 bytes in as an Ed25519 seed), and only sign-in derived the
-  /// addresses that mapping is checked against. A second copy of it could
-  /// drift, and then recovery would store different key material than sign-in
-  /// derived for the same rows — valid signatures from the wrong address,
-  /// which fails silently rather than erroring.
+  /// [identityId] is the sign-in identity recorded with the wallet's vault
+  /// link, or null for a row that predates it. `identityId` in the result is
+  /// the one the sign-in proved, or null when no sign-in was needed.
+  Future<
+    ({UnlockedSocialVault unlocked, String? emailHint, String? identityId})
+  >
+  _reopen(String provider, String vaultId, String? identityId) async {
+    final dataKey = await _vaults.loadDataKey(vaultId);
+    final cached = await _vaults.cached(vaultId);
+    if (dataKey != null && cached != null) {
+      try {
+        final payload = await SocialVaultCrypto.openPayload(
+          vaultId: vaultId,
+          dataKey: dataKey,
+          sealed: SocialVaultSealed.fromWire(
+            nonce: cached.vault.payloadNonce,
+            ciphertext: cached.vault.payloadCiphertext,
+          ),
+        );
+        return (
+          unlocked: UnlockedSocialVault(
+            vault: cached.vault,
+            dataKey: dataKey,
+            payload: payload,
+            openedWithSlotId: '',
+          ),
+          emailHint: cached.emailHint,
+          identityId: null,
+        );
+      } on SocialVaultCryptoException catch (e) {
+        AppLogger.warn(_tag, 'local vault copy unusable: ${e.message}');
+      }
+    }
+    var opened = await _openIdentity(provider, silent: true);
+    while (true) {
+      if (opened == null) {
+        throw TransactionAuthCancelledException(
+          'Sign-in was cancelled. Transaction aborted.',
+        );
+      }
+      final refusal = recoveryRefusalFor(
+        provider: provider,
+        vaultId: vaultId,
+        identityId: identityId,
+        opened: opened,
+        expectedEmail: cached?.emailHint,
+      );
+      if (refusal == null) break;
+      // Whatever the reason, nothing is deleted: not this device's copy, and
+      // above all not the platform entries, which may be the only thing that
+      // opens a vault that still exists for another account.
+      if (refusal is! SocialAccountMismatchException) throw refusal;
+      final again =
+          await prompts?.wrongAccount(
+            provider: provider,
+            expectedEmail: cached?.emailHint,
+            signedInEmail: opened.emailHint,
+          ) ??
+          false;
+      if (!again) throw refusal;
+      opened = await _openIdentity(provider, chooseAccount: true);
+    }
+    var unlocked = await _cancellable(_vaults.unlock(opened.vault!));
+    // As in [_afterOpen]: the sweep reads the slot list itself, now.
+    try {
+      await _vaults.sweepPlatformEntries(
+        unlocked.vault.vaultId,
+        unlocked.dataKey,
+      );
+    } catch (_) {}
+    // Awaited, so the record persisted afterwards is the one after this
+    // write rather than racing it.
+    try {
+      unlocked = unlocked.withVault(
+        await _vaults.ensurePlatformSlot(unlocked.vault, unlocked.dataKey),
+      );
+    } catch (e) {
+      AppLogger.warn(_tag, 'platform slot not added: ${e.runtimeType}');
+    }
+    return (
+      unlocked: unlocked,
+      emailHint: opened.emailHint,
+      identityId: opened.identityId,
+    );
+  }
+
+  /// Why the sign-in answer [opened] cannot reopen the vault [vaultId] of a
+  /// wallet on this device, or null when it can.
+  ///
+  /// - Another identity than the one recorded with the link
+  ///   ([SocialAccountMismatchException]): the wrong account. Its answer says
+  ///   nothing about this wallet's vault.
+  /// - No identity recorded (a row older than the record) and the answer is
+  ///   not this vault: it cannot be told apart from a wrong account, so it is
+  ///   treated as one.
+  /// - The wallet's own account, and it has no vault or another one: the
+  ///   backup was deleted. A [LegacySocialWalletException] pointing at the
+  ///   recovery phrase.
+  ///
+  /// None of these deletes anything.
+  @visibleForTesting
+  static LegacySocialWalletException? recoveryRefusalFor({
+    required String provider,
+    required String vaultId,
+    required String? identityId,
+    required api.SocialVaultOpenResponse opened,
+    String? expectedEmail,
+  }) {
+    final sameVault = opened.vault?.vaultId == vaultId;
+    if (identityId == null) {
+      return sameVault
+          ? null
+          : SocialAccountMismatchException(
+              provider: provider,
+              expectedEmail: expectedEmail,
+            );
+    }
+    if (opened.identityId != identityId) {
+      return SocialAccountMismatchException(
+        provider: provider,
+        expectedEmail: expectedEmail,
+      );
+    }
+    return sameVault
+        ? null
+        : LegacySocialWalletException(_backupDeletedMessage);
+  }
+
+  // ---------------------------------------------------------------------------
+  // The vault's own life: status, deletion
+  // ---------------------------------------------------------------------------
+
+  /// Read the status of every vault a wallet here is linked to and this
+  /// device holds the data key for, and act on the answers:
+  ///
+  /// - an unlink that was begun and cut short — the rows were unlinked, and
+  ///   the recovery graph or this device's copy of the vault was not — is
+  ///   finished first ([_finishUnlinks]);
+  /// - a vault the backend has said "not found" for twice, at least a day
+  ///   apart, is unlinked from its wallet ([unlinkDeletedVault] with
+  ///   [SocialVaultUnlink.notFound]): its platform entries are kept, and the
+  ///   user is told once. A single "not found" changes nothing and shows
+  ///   nothing — and only the backend's own coded answer, from the backend
+  ///   the vault is known to live on, counts as one at all
+  ///   (`SocialVaultService.checkStatus`). This is also how a Delete wallet
+  ///   backup that was cut short between the backend and this device
+  ///   finishes;
+  /// - a vault under another vault key drops this device's stale data key,
+  ///   and the user is told once ([SocialVaultKeyReplacedPrompt]);
+  /// - a vault a wallet was unlinked from that way is asked about again
+  ///   ([_reviewRetiredVaults]): if it is there after all the wallet is
+  ///   linked back, and only after 30 days of "not found" are its platform
+  ///   entries deleted;
+  /// - a pending deletion, or a sign-in key this device has not seen, is
+  ///   shown ([SocialVaultPrompts.reviewVault]);
+  /// - the platform entry of a vault creation that never happened is cleaned
+  ///   up.
+  ///
+  /// Before any of that, and every time (it asks only this device): the
+  /// phone backup that carries the platform entries is checked for
+  /// end-to-end encryption, and the entries are pulled out of it or put back
+  /// (`SocialVaultService.checkPlatformBackup`). When that found keys in a
+  /// backup that had lost its encryption, the user is offered — once, when
+  /// the encryption is back — to replace them
+  /// ([SocialVaultPrompts.offerKeyReplacement]).
+  ///
+  /// Called when the app is unlocked or comes to the foreground; each vault's
+  /// status is read at most once per `SocialVaultService.statusInterval`.
+  /// Never awaited by the UI and never throws: being offline is normal.
+  /// Concurrent calls share one run.
+  Future<void> checkVaults() =>
+      _vaultCheck ??= _runVaultCheck().whenComplete(() => _vaultCheck = null);
+
+  Future<void>? _vaultCheck;
+
+  Future<void> _runVaultCheck() async {
+    // First, and on its own: it needs no network, and what it guards (a slot
+    // secret in a backup Google can read) does not wait for the rest.
+    PlatformBackupStatus? backup;
+    try {
+      backup = await _vaults.checkPlatformBackup();
+    } catch (e) {
+      AppLogger.info(_tag, 'backup check failed: ${e.runtimeType}');
+    }
+    try {
+      final repository = GetIt.instance<WalletRepository>();
+      await _finishUnlinks(repository);
+      final linked = <String, String>{};
+      final providers = <String, String>{};
+      for (final w in await repository.getAllWallets()) {
+        final vaultId = w.socialVaultId;
+        final accountId = w.accountId;
+        if (w.walletType != WalletType.social ||
+            vaultId == null ||
+            accountId == null) {
+          continue;
+        }
+        linked[vaultId] = accountId;
+        providers[vaultId] = w.socialProvider == 'apple' ? 'apple' : 'google';
+      }
+      final toReview = <String>[];
+      for (final MapEntry(key: vaultId, value: accountId) in linked.entries) {
+        switch (await _vaults.checkStatus(vaultId)) {
+          case SocialVaultStatus.gone:
+            AppLogger.warn(
+              _tag,
+              'a linked vault was not found twice; unlinking its wallet',
+            );
+            await unlinkDeletedVault(
+              accountId,
+              vaultId,
+              SocialVaultUnlink.notFound,
+            );
+          case SocialVaultStatus.unconfirmedGone:
+            // One "not found" proves nothing: see
+            // `SocialVaultService.checkStatus`.
+            break;
+          case SocialVaultStatus.current:
+            toReview.add(vaultId);
+          case SocialVaultStatus.skipped:
+            // Read recently (or no data key: then nothing is cached either).
+            // What the last read found may still be waiting for an answer.
+            toReview.add(vaultId);
+          case SocialVaultStatus.staleKey:
+            // Said below, with any that an earlier check found and could
+            // not show.
+            break;
+          case SocialVaultStatus.failed:
+            break;
+        }
+      }
+      await _vaults.sweepAbandonedCreates(
+        referencedVaultIds: linked.keys.toSet(),
+      );
+      await _reviewRetiredVaults(repository);
+      for (final vaultId in toReview) {
+        await _reviewVault(vaultId);
+      }
+      for (final MapEntry(key: vaultId, value: provider) in providers.entries) {
+        if (await _vaults.staleKeyNoticeDue(vaultId)) {
+          await _announceKeyReplaced(vaultId, provider);
+        }
+      }
+      if (backup != null && backup.replacementOfferDue(linked.keys)) {
+        await _offerKeyReplacement();
+      }
+    } catch (e) {
+      AppLogger.info(_tag, 'vault check failed: ${e.runtimeType}');
+    }
+  }
+
+  /// Offer, once, to replace sign-in keys a phone backup held while it was
+  /// not end-to-end encrypted. Dismissing it is an answer: the advice is
+  /// dropped. An offer that could not be shown is made at the next check.
+  Future<void> _offerKeyReplacement() {
+    final prompts = this.prompts;
+    if (prompts == null) return Future<void>.value();
+    return _reviews = _reviews.then((_) async {
+      try {
+        final replace = await prompts.offerKeyReplacement();
+        if (replace == null) return;
+        await _vaults.markKeyReplacementOffered();
+        if (!replace) await _vaults.dismissBackupExposure();
+      } catch (e) {
+        AppLogger.warn(_tag, 'key replacement not offered: ${e.runtimeType}');
+      }
+    });
+  }
+
+  /// Say, once, that this device's sign-in key for [vaultId] was replaced
+  /// elsewhere. A notice that could not be shown — no shell yet, or one
+  /// that does not show this notice — stays due and is tried at the next
+  /// check. One notice at a time, like [_reviewVault].
+  Future<void> _announceKeyReplaced(String vaultId, String provider) {
+    final Object? prompts = this.prompts;
+    if (prompts is! SocialVaultKeyReplacedPrompt) return Future<void>.value();
+    return _reviews = _reviews.then((_) async {
+      try {
+        if (await prompts.signInKeyReplaced(provider: provider)) {
+          await _vaults.markStaleKeyAnnounced(vaultId);
+        }
+      } catch (e) {
+        AppLogger.warn(_tag, 'replaced-key notice not shown: ${e.runtimeType}');
+      }
+    });
+  }
+
+  /// One review at a time: a sign-in and a status check can both want to
+  /// show the same vault's warning, and the second finds it answered.
+  Future<void> _reviewVault(String vaultId) {
+    final prompts = this.prompts;
+    if (prompts == null) return Future<void>.value();
+    return _reviews = _reviews.then((_) async {
+      try {
+        await prompts.reviewVault(vaultId);
+      } catch (e) {
+        AppLogger.warn(_tag, 'vault notices not shown: ${e.runtimeType}');
+      }
+    });
+  }
+
+  Future<void> _reviews = Future<void>.value();
+
+  /// Go through the vaults wallets here were unlinked from on a "not found"
+  /// answer (`SocialVaultService.retire`):
+  ///
+  /// - the user is told, once, that the wallet's backup is no longer stored
+  ///   ([SocialVaultPrompts.backupNoLongerStored]);
+  /// - the backend is asked about the vault again, at most once a day, with
+  ///   the data key set aside for it. If the vault is there after all, the
+  ///   wallet is linked back to it ([_relink]) — nothing of it was ever
+  ///   deleted. Its platform entries are deleted only by
+  ///   `SocialVaultService.checkRetired`, after 30 days of "not found" and on
+  ///   a fresh one;
+  /// - a vault whose wallet has left this device, or is linked again (a
+  ///   sign-in does that), is no longer kept track of. Its entries stay.
+  Future<void> _reviewRetiredVaults(WalletRepository repository) async {
+    for (final retired in await _vaults.retiredVaults()) {
+      try {
+        final rows = (await repository.getWalletsForAccount(
+          retired.accountId,
+        )).where((w) => w.walletType == WalletType.social).toList();
+        if (rows.isEmpty || rows.any((w) => w.socialVaultId != null)) {
+          await _vaults.forgetRetired(retired.vaultId);
+          continue;
+        }
+        if (!retired.announced) await _announceBackupGone(retired);
+        final unlocked = (await _vaults.checkRetired(retired.vaultId)).unlocked;
+        if (unlocked != null) {
+          await _relink(repository, retired, rows, unlocked);
+        }
+      } catch (e) {
+        AppLogger.info(_tag, 'retired vault not reviewed: ${e.runtimeType}');
+      }
+    }
+  }
+
+  /// One notice at a time, like [_reviewVault]. A notice that could not be
+  /// shown is shown at the next check.
+  Future<void> _announceBackupGone(RetiredSocialVault retired) {
+    final prompts = this.prompts;
+    if (prompts == null) return Future<void>.value();
+    return _reviews = _reviews.then((_) async {
+      try {
+        if (await prompts.backupNoLongerStored(provider: retired.provider)) {
+          await _vaults.markRetiredAnnounced(retired.vaultId);
+        }
+      } catch (e) {
+        AppLogger.warn(_tag, 'backup notice not shown: ${e.runtimeType}');
+      }
+    });
+  }
+
+  /// The vault a wallet was unlinked from is there after all, and the data
+  /// key this device set aside opened it. Link the wallet's rows back to it —
+  /// provided the phrase inside is this wallet: every chain address the
+  /// account holds must come out the same, or nothing is touched.
+  Future<void> _relink(
+    WalletRepository repository,
+    RetiredSocialVault retired,
+    List<WalletInfo> rows,
+    UnlockedSocialVault unlocked,
+  ) async {
+    final target = recoveryTargetFor(rows);
+    final keys = await SocialWalletKeys.fromPayload(unlocked.payload);
+    if (!keys.matches(
+      solana: target.solanaAddress,
+      ethereum: target.ethereumAddress,
+      tezos: target.tezosAddress,
+    )) {
+      AppLogger.warn(_tag, 'a retired vault holds another wallet; not linked');
+      await _vaults.forgetRetired(retired.vaultId);
+      return;
+    }
+    await _storeSocialAccount(
+      repository,
+      target.provider,
+      keys,
+      retired.vaultId,
+      retired.identityId,
+    );
+    // Also drops the vault from the retired ones.
+    await _vaults.persist(
+      unlocked,
+      provider: target.provider,
+      emailHint: retired.emailHint,
+    );
+    AppLogger.info(_tag, 'a vault reported missing is back; wallet relinked');
+  }
+
+  /// Delete the wallet backup of the social account [accountId]: its social
+  /// vault on the backend, with a delete this device signs. The wallet stays
+  /// on this device, as a Google or Apple wallet with no vault whose recovery
+  /// phrase — kept under the account from here on — is its only backup.
+  ///
+  /// Throws, having deleted nothing:
+  /// [SocialVaultPhraseUnavailableException] when this device does not hold
+  /// the recovery phrase (deleting the backup would then leave none at all),
+  /// [SocialVaultStaleKeyException] when it holds no data key that signs for
+  /// the vault, and whatever the signed delete throws (a
+  /// `SocialVaultApiError.staleTimestamp` for a wrong clock included).
+  ///
+  /// When the backend accepts the delete, the vault's platform entries are
+  /// deleted with it. When it answers that there is no such vault, the
+  /// wallet is unlinked all the same — that is what the user asked for — but
+  /// as after any "not found": the entries are kept, to be deleted only once
+  /// the vault has stayed gone ([SocialVaultUnlink.notFound], with no notice,
+  /// since the user just did this).
+  ///
+  /// "No such vault" here is the backend's own coded answer, from the
+  /// backend the vault is known to live on. Any other 404 — a proxy's, a
+  /// backend without these routes — is a failed request like any other: it
+  /// is thrown, and nothing is unlinked or deleted. The same goes for a
+  /// vault this build's backend has never shown to exist
+  /// (`SocialVaultService.deleteVault`).
+  ///
+  /// Ordered so that a crash cannot leave the wallet looking backed up: the
+  /// backend delete comes first, and until [unlinkDeletedVault] has unlinked
+  /// the rows this device keeps the data key — so a later [checkVaults]
+  /// finds the vault gone and unlinks. Every step can be repeated: called
+  /// again after it failed partway through the unlink (the rows unlinked,
+  /// the recovery graph or this device's copy of the vault not), it
+  /// finishes that unlink, and throws again if it still cannot.
+  Future<void> deleteWalletBackup(String accountId) async {
+    final repository = GetIt.instance<WalletRepository>();
+    final vaultId = (await repository.getWalletsForAccount(accountId))
+        .where((w) => w.walletType == WalletType.social)
+        .map((w) => w.socialVaultId)
+        .firstWhere((id) => id != null, orElse: () => null);
+    // Already unlinked. Done — once whatever an earlier run left unfinished
+    // is finished.
+    if (vaultId == null) {
+      await _finishUnlinks(
+        repository,
+        accountId: accountId,
+        rethrowFailure: true,
+      );
+      return;
+    }
+    if (!await _vaults.hasMnemonic(vaultId)) {
+      throw const SocialVaultPhraseUnavailableException();
+    }
+    switch (await _vaults.deleteVaultWithLocalKey(vaultId)) {
+      case SocialVaultDeletion.noKey:
+        throw SocialVaultStaleKeyException(vaultId);
+      case SocialVaultDeletion.deleted:
+        await unlinkDeletedVault(
+          accountId,
+          vaultId,
+          SocialVaultUnlink.signedDelete,
+        );
+      case SocialVaultDeletion.notFound:
+        await unlinkDeletedVault(
+          accountId,
+          vaultId,
+          SocialVaultUnlink.notFound,
+          announce: false,
+        );
+    }
+  }
+
+  /// Unlink the wallet of [accountId] from the vault [vaultId], which the
+  /// backend no longer has. [why] says how this device knows, and decides
+  /// what happens to the vault's platform entries — slot secrets whose
+  /// deletion reaches every device the platform syncs them to:
+  ///
+  /// - [SocialVaultUnlink.signedDelete]: the backend accepted a delete this
+  ///   device signed. The entries are deleted at once (by the delete itself,
+  ///   and again here, so a repeat finishes the job).
+  /// - [SocialVaultUnlink.notFound]: the backend answered "not found". That
+  ///   cannot be authenticated, so the entries are kept and the data key is
+  ///   set aside (`SocialVaultService.retire`), and the user is told once
+  ///   unless [announce] is false.
+  ///
+  /// Either way:
+  ///
+  /// 1. the recovery phrase is kept under the account, so Show secrets still
+  ///    exports it;
+  /// 2. the rows are unlinked (and the recovery graph with them) — from here
+  ///    the wallet shows as one whose backup was deleted, never as an
+  ///    older-sign-in wallet, and offers no vault actions;
+  /// 3. this device's copy of the vault (data key, phrase, record) is
+  ///    dropped.
+  ///
+  /// The data key goes last, after the unlink, because it is what lets a
+  /// later launch notice a half-finished run. Every step can be repeated.
+  ///
+  /// Step 2 writes two stores, the rows and then the recovery graph, and
+  /// the second can fail with the first already done. From then on the rows
+  /// name no vault, so nothing would lead back to the data key and the
+  /// second copy of the phrase still kept under the vault id, or to the
+  /// graph that still names the deleted vault. So the unlink is written
+  /// down before step 2 (`SocialVaultService.beginUnlink`) and crossed out
+  /// by step 3; [_finishUnlinks] sees an unfinished one through, at the
+  /// next [checkVaults] or when the user asks for the delete again.
+  Future<void> unlinkDeletedVault(
+    String accountId,
+    String vaultId,
+    SocialVaultUnlink why, {
+    bool announce = true,
+  }) async {
+    final repository = GetIt.instance<WalletRepository>();
+    switch (why) {
+      case SocialVaultUnlink.signedDelete:
+        await _vaults.forgetPlatformEntries(vaultId);
+      case SocialVaultUnlink.notFound:
+        final rows = (await repository.getWalletsForAccount(
+          accountId,
+        )).where((w) => w.walletType == WalletType.social).toList();
+        await _vaults.retire(
+          vaultId,
+          accountId: accountId,
+          provider: rows
+              .map((w) => w.socialProvider)
+              .firstWhere((p) => p == 'apple', orElse: () => 'google')!,
+          identityId: rows
+              .map((w) => w.socialIdentityId)
+              .firstWhere((id) => id != null, orElse: () => null),
+          announced: !announce,
+        );
+    }
+    // Written down first, and not begun if that fails: an unlink nothing
+    // remembers is one a failure below could leave half done for good.
+    await _vaults.beginUnlink(vaultId, accountId);
+    await _vaults.keepMnemonicForAccount(vaultId, accountId);
+    await repository.setSocialVaultId(accountId, null);
+    await _vaults.forgetLocal(vaultId);
+  }
+
+  /// See through the unlinks that were begun and cut short (all of them, or
+  /// only [accountId]'s): write the recovery graph again, then drop this
+  /// device's copy of the vault — the two steps that follow the unlinking
+  /// of the rows in [unlinkDeletedVault].
+  ///
+  /// Only when the rows are already unlinked. An unlink that never reached
+  /// them is crossed out and nothing else: the wallet is still linked, and
+  /// what happens to it is again up to what the backend answers.
+  ///
+  /// The phrase is copied under the account once more before the vault's
+  /// own copy goes, as in the unlink itself. A failure leaves the record in
+  /// place for the next try, and is thrown only with [rethrowFailure].
+  Future<void> _finishUnlinks(
+    WalletRepository repository, {
+    String? accountId,
+    bool rethrowFailure = false,
+  }) async {
+    for (final pending in await _vaults.pendingUnlinks()) {
+      if (accountId != null && pending.accountId != accountId) continue;
+      try {
+        final rows = (await repository.getWalletsForAccount(
+          pending.accountId,
+        )).where((w) => w.walletType == WalletType.social).toList();
+        if (rows.any((w) => w.socialVaultId == pending.vaultId)) {
+          await _vaults.dropPendingUnlink(pending.vaultId);
+          continue;
+        }
+        // No rows at all: the wallet has left this device since, and only
+        // the vault's leftovers remain to be dropped.
+        if (rows.isNotEmpty) {
+          await _vaults.keepMnemonicForAccount(
+            pending.vaultId,
+            pending.accountId,
+          );
+          if (rows.every((w) => w.socialVaultId == null)) {
+            await repository.setSocialVaultId(pending.accountId, null);
+          }
+        }
+        await _vaults.forgetLocal(pending.vaultId);
+        AppLogger.info(_tag, 'an unlink that was cut short is finished');
+      } catch (e) {
+        AppLogger.warn(_tag, 'unlink not finished: ${e.runtimeType}');
+        if (rethrowFailure) rethrow;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Storage
+  // ---------------------------------------------------------------------------
+
+  /// Map one vault wallet's keys onto the three chain rows, linked to the
+  /// vault and to the sign-in identity it belongs to ([identityId]; null when
+  /// the vault was reopened without a sign-in, which keeps what is recorded).
   Future<({List<WalletInfo> wallets, bool existed})> _storeSocialAccount(
     WalletRepository repository,
     String provider,
-    _SocialKeys keys,
+    SocialWalletKeys keys,
+    String vaultId,
+    String? identityId,
   ) => repository.addSocialAccount(
     provider: provider,
     name: '${_providerLabel(provider)} Wallet',
@@ -446,111 +1256,19 @@ class SocialAuthService {
     ),
     ethereum: SocialChainCredential(
       address: keys.ethereumAddress,
-      storedKey: keys.secpKeyHex,
+      storedKey: keys.ethereumKeyHex,
     ),
     tezos: SocialChainCredential(
       address: keys.tezosAddress,
-      storedKey: keys.secpKeyHex,
+      storedKey: keys.tezosSeedHex,
     ),
+    socialVaultId: vaultId,
+    socialIdentityId: identityId,
   );
-
-  /// The interactive half both entry points share: OAuth, capture both keys,
-  /// end the Web3Auth session, derive the three addresses.
-  Future<_SocialKeys> _connectAndDerive(AuthConnection connection) async {
-    await _ensureInitialized();
-
-    // Raced against [cancelPendingRequest]: this blocks on the user finishing
-    // a browser round-trip, and nothing else times it out.
-    final response = await _cancellable(
-      Web3AuthFlutter.connectTo(
-        LoginParams(authConnection: connection, mfaLevel: MFALevel.NONE),
-      ),
-    );
-
-    final ed25519Hex = await _capturedKey(
-      response.ed25519PrivateKey,
-      Web3AuthFlutter.getEd25519PrivateKey,
-      'Ed25519',
-    );
-    final rawSecpHex = await _capturedKey(
-      response.privateKey,
-      Web3AuthFlutter.getPrivateKey,
-      'secp256k1',
-    );
-
-    // The stored keys are our source of truth from here on, so end the session
-    // immediately — that is what makes "add another Google wallet" show a
-    // fresh account chooser instead of silently reusing this identity. Done
-    // before any validation so an unusable key still leaves no session behind.
-    await _logoutQuietly();
-
-    final secpHex = normalizedSecpKeyHex(rawSecpHex);
-
-    // Fails loud on anything but exactly 64 bytes; seed-first byte order is
-    // pinned by derivation_test.dart, the one place a silent wrong-key bug
-    // could hide.
-    final solanaAddress = MultiChainDerivation.solanaAddressFromEd25519KeyHex(
-      ed25519Hex,
-    );
-    return _SocialKeys(
-      solanaAddress: solanaAddress,
-      solanaStoredKey: MultiChainDerivation.solanaStoredKeyFromEd25519KeyHex(
-        ed25519Hex,
-      ),
-      ethereumAddress: MultiChainDerivation.ethereumAddressFromPrivateKeyHex(
-        secpHex,
-      ),
-      // Web3Auth's canonical Tezos convention: the secp256k1 key bytes fed in
-      // as an Ed25519 seed. Same bytes as the Ethereum key by design.
-      tezosAddress: await MultiChainDerivation.tezosAddressFromSeedHex(secpHex),
-      secpKeyHex: secpHex,
-    );
-  }
-
-  /// The key from the login response, falling back to the SDK getter.
-  ///
-  /// `connectTo` normally carries both keys, but the field is nullable on the
-  /// wire and the getters read the same session — so the fallback costs one
-  /// channel call and removes a class of "logged in but no key" failures.
-  Future<String> _capturedKey(
-    String? fromResponse,
-    Future<String> Function() fallback,
-    String label,
-  ) async {
-    final direct = fromResponse?.trim() ?? '';
-    if (direct.isNotEmpty) return direct;
-    final recovered = (await fallback()).trim();
-    if (recovered.isEmpty) {
-      throw StateError(
-        'Web3Auth returned no $label private key for this login.',
-      );
-    }
-    return recovered;
-  }
-
-  /// End the Web3Auth session. Best effort: the keys are already captured, and
-  /// a failed logout must not fail a sign-in that otherwise succeeded.
-  Future<void> _logoutQuietly() async {
-    try {
-      await Web3AuthFlutter.logout();
-    } catch (e) {
-      AppLogger.warn(
-        _tag,
-        'logout failed (session may persist): ${e.runtimeType}',
-      );
-    }
-  }
 
   static String _providerLabel(String provider) =>
       provider == 'apple' ? 'Apple' : 'Google';
 
-  static AuthConnection _connectionFor(String provider) =>
-      provider == 'apple' ? AuthConnection.apple : AuthConnection.google;
-
-  /// The Solana row of a freshly created/completed social account. Absent only
-  /// if [WalletRepository.addSocialAccount] changed shape, which would break
-  /// the wallet the app selects and signs with — so it throws rather than
-  /// guessing at another chain's row.
   static WalletInfo _solanaRowOf(List<WalletInfo> wallets) =>
       wallets.firstWhere(
         (w) => w.chain == Chain.solana.toDbString(),
@@ -559,13 +1277,16 @@ class SocialAuthService {
         ),
       );
 
+  // ---------------------------------------------------------------------------
+  // Cancellation
+  // ---------------------------------------------------------------------------
+
   /// Race [operation] against a signal [cancelPendingRequest] can complete,
-  /// publishing on [requestPending] that something cancellable is in flight so
-  /// the UI can offer a way out.
+  /// publishing on [requestPending] that something cancellable is in flight.
   ///
-  /// Wraps the OAuth round-trip — the one step that blocks on the user leaving
-  /// the app. Unraced, an abandoned browser tab would strand the caller (the
-  /// transaction sheet's approval step) forever.
+  /// Wraps every step that waits on the user outside the app (a provider
+  /// sheet, a browser tab, a passkey prompt). Unraced, an abandoned one would
+  /// strand the caller — the transaction sheet's approval step — forever.
   Future<T> _cancellable<T>(Future<T> operation) async {
     final cancelSignal = Completer<Never>();
     _cancelSignals.add(cancelSignal);
@@ -574,46 +1295,22 @@ class SocialAuthService {
       return await Future.any<T>([operation, cancelSignal.future]);
     } finally {
       _cancelSignals.remove(cancelSignal);
-      // Only the last one out clears the flag, so an operation that overlaps
-      // this one keeps the Cancel affordance up instead of losing it when
-      // this one unwinds.
       if (_cancelSignals.isEmpty) _requestPending.value = false;
     }
   }
 
   /// Whether an interactive sign-in is in flight and can still be cancelled.
-  ///
-  /// Drives the Cancel affordance on the approval step of
-  /// `TransactionPipelineSheet`, which is reachable when a social row's key
-  /// must be recovered mid-signature.
+  /// Drives the Cancel affordance on `TransactionPipelineSheet`.
   ValueListenable<bool> get requestPending => _requestPending;
   final ValueNotifier<bool> _requestPending = ValueNotifier<bool>(false);
 
-  /// Completed by [cancelPendingRequest] to break the waits in [_cancellable].
-  /// Empty when nothing is in flight.
-  ///
-  /// A set rather than a single field: recovery is reachable from every social
-  /// key load, so it can overlap a sign-in or a recovery for another account.
-  /// With one field the later entrant overwrote the earlier one's signal, and
-  /// a Cancel then unwound only the last caller while the rest waited forever
-  /// on a browser tab nobody was going to come back to.
+  /// One per in-flight [_cancellable]; a set because a recovery can overlap
+  /// a sign-in or another account's recovery, and one Cancel must unwind all.
   final Set<Completer<Never>> _cancelSignals = <Completer<Never>>{};
 
-  /// Stop waiting on the in-flight sign-in.
-  ///
-  /// The browser tab stays open — we cannot close it — and the SDK's future
-  /// may still complete later, onto a future nobody listens to. All this does
-  /// is stop *us* waiting, which is the part that strands the user.
-  ///
-  /// Reuses [TransactionAuthCancelledException] rather than inventing a
-  /// cancellation type: `AppFailure.fromError` already maps it to
-  /// `AppFailure.cancelled`, so every flow's existing `isCancelled` branch
-  /// treats this as the clean abort it is. No-op when nothing is in flight.
+  /// Stop waiting on whatever sign-in step is in flight. The provider's UI
+  /// may stay up; all this does is stop *us* waiting on it.
   void cancelPendingRequest() {
-    // Signals are left in the set for [_cancellable]'s `finally` to remove —
-    // it owns both the set and the in-flight flag, and removing here would
-    // strand the flag on and leave the Cancel button up after the flow has
-    // unwound. Iterated over a copy for the same reason.
     for (final signal in _cancelSignals.toList()) {
       if (signal.isCompleted) continue;
       signal.completeError(
@@ -623,16 +1320,4 @@ class SocialAuthService {
       );
     }
   }
-
-  /// Drop any Web3Auth session, so the next sign-in starts from a fresh
-  /// account chooser.
-  ///
-  /// Best effort. Deleting stored private keys is **not** this method's job —
-  /// wallet removal owns that, because a key belongs to a wallet row, not to
-  /// the SDK session this clears.
-  ///
-  /// 🛑 Deliberately leaves [_initialized] set. The logout is what ends the
-  /// session; re-initializing buys nothing (the options are compile-time
-  /// config) and on Android it *crashes* — see [_ensureInitialized].
-  Future<void> reset() => _logoutQuietly();
 }

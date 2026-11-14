@@ -129,6 +129,8 @@ void main() {
         walletType: WalletType.social,
         chain: 'solana',
         accountId: 'acct-1',
+        socialProvider: 'google',
+        socialVaultId: 'vault-1',
       ),
     ],
   );
@@ -377,13 +379,15 @@ void main() {
     expect(find.text('home'), findsOneWidget);
   });
 
-  testWidgets('a social account is told it can be signed back in, not to back '
-      'up a phrase it never had', (tester) async {
+  testWidgets('a social vault account is told it can be signed back in, not '
+      'to back up a phrase it never had', (tester) async {
     when(
       () => repo.getAccountViews(),
     ).thenAnswer((_) async => [socialAccount, otherAccount]);
 
     await pumpScreen(tester);
+    // A vault wallet is not described as one from the older sign-in.
+    expect(find.textContaining('Web3Auth'), findsNothing);
     await openRemoveSheet(tester);
 
     expect(
@@ -391,6 +395,58 @@ void main() {
       findsOneWidget,
     );
     expect(find.textContaining('backed up your recovery phrase'), findsNothing);
+  });
+
+  testWidgets('an account from the older sign-in says what it is, and is not '
+      'told that signing in again brings it back', (tester) async {
+    final older = socialAccount.copyWith(
+      wallets: [
+        for (final w in socialAccount.wallets)
+          w.copyWith(socialVaultId: null, legacySocial: true),
+      ],
+    );
+    when(
+      () => repo.getAccountViews(),
+    ).thenAnswer((_) async => [older, otherAccount]);
+
+    await pumpScreen(tester);
+    expect(
+      find.text(
+        'Older sign-in, run by Web3Auth: your Google account alone can open '
+        'this wallet.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('legacy-sign-in-mark')), findsOneWidget);
+
+    await openRemoveSheet(tester);
+    expect(find.textContaining('You can add it back'), findsNothing);
+    expect(
+      find.textContaining('older sign-in on the mallow website'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a vault account whose backup was deleted is told its phrase is '
+      'the way back, and is not marked as older', (tester) async {
+    final unlinked = socialAccount.copyWith(
+      wallets: [
+        for (final w in socialAccount.wallets) w.copyWith(socialVaultId: null),
+      ],
+    );
+    when(
+      () => repo.getAccountViews(),
+    ).thenAnswer((_) async => [unlinked, otherAccount]);
+
+    await pumpScreen(tester);
+    expect(find.textContaining('Web3Auth'), findsNothing);
+
+    await openRemoveSheet(tester);
+    expect(find.textContaining('You can add it back'), findsNothing);
+    expect(
+      find.textContaining('Save its recovery phrase from Show secrets'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('an all-Ledger account says the keys stay on the device that '

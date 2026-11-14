@@ -33,6 +33,7 @@ import '../../features/settings/screens/recovery_phrase_screen.dart';
 import '../../features/settings/screens/recovery_phrase_warning_screen.dart';
 import '../../features/settings/screens/recovery_phrase_words_screen.dart';
 import '../../features/settings/screens/show_secrets_screen.dart';
+import '../../features/social_vault/screens/sign_in_keys_screen.dart';
 import '../../features/settings/screens/report_bug_screen.dart';
 import '../../features/settings/screens/reset_app_screen.dart';
 import '../../features/settings/screens/security_privacy_screen.dart';
@@ -185,6 +186,14 @@ abstract class AppRoutes {
       '/settings/security-privacy/recovery-phrase/private-key/warning';
   static const privateKeyReveal =
       '/settings/security-privacy/recovery-phrase/private-key/reveal';
+
+  /// The keys that open each Google or Apple wallet's social vault. Under
+  /// Security & Privacy, but not reached only through it — the Home banner
+  /// and the new-key notice open it directly — so the screen is gated on
+  /// entry itself: only the Security & Privacy row, whose own gate was just
+  /// cleared, passes `extra: true` to skip a second challenge. Adding a key,
+  /// removing one and deleting the backup re-authenticate again.
+  static const signInKeys = '/settings/security-privacy/sign-in-keys';
   static const reportBug = '/settings/security-privacy/report-bug';
   static const resetApp = '/settings/security-privacy/reset-app';
 
@@ -563,6 +572,15 @@ GoRouter createRouter({required AuthStateNotifier authStateNotifier}) {
       GoRoute(
         path: AppRoutes.changePin,
         builder: (context, state) => const ChangePinScreen(),
+      ),
+
+      GoRoute(
+        path: AppRoutes.signInKeys,
+        // `extra == true` only from the gated Security & Privacy row; any
+        // other entry leaves it null and the screen challenges before it
+        // lists anything.
+        builder: (context, state) =>
+            SignInKeysScreen(preAuthenticated: state.extra == true),
       ),
 
       // Recovery Phrase / secrets routes

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/crypto/solana_name_resolver.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../core/services/avatar_service.dart';
 import '../../../shared/utils/address_utils.dart';
@@ -68,6 +69,9 @@ class SendRecipientStep extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.mallowColors;
+    final nameNotice = chain == Chain.solana
+        ? SolanaNameResolver.notice(controller.text)
+        : null;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: MallowTheme.spacing20),
       child: Column(
@@ -144,6 +148,10 @@ class SendRecipientStep extends StatelessWidget {
                 color: colors.textSecondary,
               ),
             ),
+            if (nameNotice case final notice?) ...[
+              const SizedBox(height: MallowTheme.spacingSm),
+              SendWarningNotice(message: notice),
+            ],
           ],
           const SizedBox(height: MallowTheme.spacingLg),
           Expanded(child: _recentList(context)),

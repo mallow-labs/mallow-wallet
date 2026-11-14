@@ -413,7 +413,7 @@ void main() {
   });
 }
 
-class _FakeSocialAuthService extends SocialAuthService {
+class _FakeSocialAuthService implements SocialAuthService {
   final pending = ValueNotifier<bool>(false);
   int cancelCalls = 0;
 
@@ -422,4 +422,7 @@ class _FakeSocialAuthService extends SocialAuthService {
 
   @override
   void cancelPendingRequest() => cancelCalls++;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

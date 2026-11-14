@@ -145,6 +145,7 @@ SimulationReview _review({
   List<ReviewProgramCall> calls = const [],
   List<String> warnings = const [],
   Map<String, ReviewNftMetadata> nftMetadata = const {},
+  Map<String, Set<String>> delegatedBy = const {},
   Uri? explorerUrl,
   DateTime? simulatedAt,
 }) => SimulationReview(
@@ -164,6 +165,7 @@ SimulationReview _review({
   programCalls: calls,
   warnings: warnings,
   nftMetadata: nftMetadata,
+  delegatedBy: delegatedBy,
   explorerUrl: explorerUrl,
 );
 
@@ -536,6 +538,39 @@ void main() {
         _review(feePayer: 'sponsor'),
       ]);
       expect(sponsored.feePayer, 'sponsor');
+    });
+
+    test('who made a delegation is added up, with the calls no part could '
+        'tie to an account', () {
+      // One transaction's listed program sets the account's delegate. A
+      // call in another, which could not be read to its account, may have
+      // set it too: the batch keeps both, so the second still counts
+      // against the first.
+      final combined = combineSolanaReviews([
+        _review(
+          delegatedBy: const {
+            'account': {'market'},
+          },
+        ),
+        _review(
+          digest: 'b',
+          delegatedBy: const {
+            'account': {'token-program'},
+            'other': {'market'},
+          },
+        ),
+        _review(
+          digest: 'c',
+          delegatedBy: const {
+            kUntracedDelegations: {'executor'},
+          },
+        ),
+      ]);
+      expect(combined.delegatedBy, {
+        'account': {'market', 'token-program'},
+        'other': {'market'},
+        kUntracedDelegations: {'executor'},
+      });
     });
 
     test('an explicit error replaces the composed one', () {

@@ -67,22 +67,24 @@ advisory, unless you would rather stay anonymous. Tell us which you prefer.
 
 ## Verifying you have a genuine build
 
-**mallow wallet is not on the App Store, Google Play or the Solana dApp Store
-yet.** It will be published to all three, and this section will name the
-listings when it is. Saying so matters more than it looks: a document that points
-you at listings that do not exist would have you accept *any* build claiming to
-be the store one.
+mallow wallet is published in three places. These are the only official builds:
 
-mallow's current dApp Store listing is an earlier app that wraps the mallow.art
-website, not this wallet. This wallet will replace it under the same listing.
+- **iOS** — the App Store:
+  [mallow - digital art wallet](https://apps.apple.com/app/id6758995397), from
+  mallow labs LLC.
+- **Android** — Google Play:
+  [`com.mallow.wallet.android`](https://play.google.com/store/apps/details?id=com.mallow.wallet.android).
+- **Solana Mobile** — the Solana dApp Store on the device, package
+  `art.mallow.twa`. That listing used to hold an earlier app that wrapped the
+  mallow.art website; this wallet replaced it under the same listing.
 
-Until the listings are live, these are the only official builds:
+In a store, check the package name or the App Store id rather than the title or
+the icon. A title and an icon can be copied; a store holds only one app under
+each id.
 
-- **iOS** — **TestFlight**, through an invitation from mallow.
-- **Android** — **Google Play closed testing**, through an invitation from
-  mallow.
-
-Both are invitation-based. If you did not get the link from us, it is not ours.
+Builds made before a release go out through TestFlight and Google Play's testing
+tracks, by invitation from mallow. If you did not get that link from us, it is
+not ours.
 
 A build from anywhere else is not ours either, whatever it is called and
 whatever logo it carries. Anyone can fork this repository, point it at a backend

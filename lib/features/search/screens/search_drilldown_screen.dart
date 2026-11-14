@@ -212,6 +212,12 @@ class _ArtworkDrilldown extends StatelessWidget {
 
   List<Widget> _contentSlivers(BuildContext context) {
     if (state.isRefetching) return [_loadingSkeleton];
+    // Everything loaded so far was dropped (the viewer blocked its creator, or
+    // reported it, from a route on top of this one) and the next page is on
+    // its way: the skeleton stands in for "No results" until it answers.
+    if (state.artworks.isEmpty && state.isLoadingMore) {
+      return [_loadingSkeleton];
+    }
     if (state.artworks.isEmpty) {
       return [
         SliverFillRemaining(

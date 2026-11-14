@@ -38,6 +38,11 @@ class ArtworkSheetFrame extends StatelessWidget {
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
+        // `AnimatedSheetReveal` hands the frame loose constraints, so without
+        // this it only spans the screen when [child] has something full-width
+        // in it. A store build that hides a sheet's only button leaves just
+        // text, and the frame would shrink to fit that text.
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(

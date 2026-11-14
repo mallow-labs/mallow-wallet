@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:collection/collection.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -20,7 +21,20 @@ import '../../../shared/widgets/sheet_drag_handle.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
 import '../../../shared/widgets/usd_estimate.dart';
 import '../../portfolio/services/token_balance_bloc.dart';
+import '../../send/widgets/send_sheet_widgets.dart';
 import '../models/market_price.dart';
+
+/// Shown to a bidder on a Core auction whose asset or collection has a permanent
+/// delegate. The plugins outlive settlement, when the auction account is gone and
+/// with it every exit. Before settlement a refund becomes possible only once a
+/// delegate has acted, and it is not automatic, so this ties it to that event
+/// and to support. A delegate can also stop a sale the bidder has already won.
+const kCoreAuctionPermanentDelegateWarning =
+    'This artwork or its collection has a permanent delegate that could burn, '
+    'move or freeze it before or after the sale settles. If that happens before '
+    "it settles, the sale can't complete, even if you've won. Contact "
+    "support@mallow.art to get the bid refunded; refunds aren't automatic. If it "
+    "happens after it settles, the bid can't be refunded.";
 
 /// Bottom sheet for entering an auction bid amount. Mirrors [MakeOfferSheet]'s
 /// scaffold (drag handle, subject header, "Next" CTA) but swaps the
@@ -50,6 +64,7 @@ class PlaceBidSheet extends StatefulWidget {
     this.nsfw = false,
     this.onNext,
     this.isSubmitting = false,
+    this.showPermanentDelegateWarning,
   });
 
   final String artworkTitle;
@@ -94,6 +109,11 @@ class PlaceBidSheet extends StatefulWidget {
   /// Moderation flag for the subject preview — blurs it (with an eye-icon
   /// reveal) unless the viewer's show-NSFW setting is on.
   final bool nsfw;
+
+  /// Shows [kCoreAuctionPermanentDelegateWarning] while true. A listenable because
+  /// the on-chain read can finish after this sheet has opened. It only informs:
+  /// nothing about entering or submitting a bid reads it.
+  final ValueListenable<bool>? showPermanentDelegateWarning;
 
   @override
   State<PlaceBidSheet> createState() => _PlaceBidSheetState();
@@ -321,6 +341,22 @@ class _PlaceBidSheetState extends State<PlaceBidSheet> {
                                 _AuctionInfoBox(
                                   auction: widget.auction!,
                                   token: _token,
+                                ),
+                              if (widget.showPermanentDelegateWarning != null)
+                                ValueListenableBuilder<bool>(
+                                  valueListenable:
+                                      widget.showPermanentDelegateWarning!,
+                                  builder: (context, show, _) => show
+                                      ? const Padding(
+                                          padding: EdgeInsets.only(
+                                            bottom: MallowTheme.spacingLg,
+                                          ),
+                                          child: SendWarningNotice(
+                                            message:
+                                                kCoreAuctionPermanentDelegateWarning,
+                                          ),
+                                        )
+                                      : const SizedBox.shrink(),
                                 ),
                               Row(
                                 mainAxisAlignment:

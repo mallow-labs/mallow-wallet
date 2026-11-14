@@ -124,7 +124,9 @@ class RestoreAborted extends RestoreResult {
 
   /// Wallets in the graph a partial restore could still write **and that
   /// could then sign**: an HD wallet of a readable seed, an imported key whose
-  /// own secret reads, or a social row (a re-login recovers its key).
+  /// own secret reads, or a social row — one linked to a social vault (a
+  /// sign-in reopens it and stores the key again), or one without a vault
+  /// whose stored key reads (nothing in this app re-creates that key).
   ///
   /// View-only and hardware rows (Ledger, Seed Vault) are deliberately
   /// excluded. They restore fine — and a partial restore does write them — but
@@ -1025,12 +1027,20 @@ class WalletRepository {
   /// one of the addresses is a genuine duplicate and throws
   /// [DuplicateWalletException] — checked for all three addresses before
   /// anything is written, so a collision cannot leave a half-built account.
+  ///
+  /// [socialVaultId] links every row to the social vault the keys came from.
+  /// Null keeps whatever link a row already has. [socialIdentityId] is the
+  /// sign-in identity that vault belongs to, recorded with the link; null
+  /// (the vault was reopened from this device's own copy, with no sign-in)
+  /// keeps whatever identity a row already records.
   Future<({List<WalletInfo> wallets, bool existed})> addSocialAccount({
     required String provider,
     required String name,
     required SocialChainCredential solana,
     required SocialChainCredential ethereum,
     required SocialChainCredential tezos,
+    String? socialVaultId,
+    String? socialIdentityId,
   }) => _locked(
     () => _addSocialAccountLocked(
       provider: provider,
@@ -1038,6 +1048,8 @@ class WalletRepository {
       solana: solana,
       ethereum: ethereum,
       tezos: tezos,
+      socialVaultId: socialVaultId,
+      socialIdentityId: socialVaultId == null ? null : socialIdentityId,
     ),
   );
 
@@ -1047,6 +1059,8 @@ class WalletRepository {
     required SocialChainCredential solana,
     required SocialChainCredential ethereum,
     required SocialChainCredential tezos,
+    String? socialVaultId,
+    String? socialIdentityId,
   }) async {
     // Account-card order: Solana, then Tezos, then Ethereum (matches
     // [_walletImportOrder], which orders a seed account's rows).
@@ -1111,7 +1125,35 @@ class WalletRepository {
         if (existing.accountId != accountId) {
           await _db.updateWalletAccountId(existing.id, accountId);
         }
-        results.add(_walletRowToInfo(existing).copyWith(accountId: accountId));
+        // A row moved to another vault does not keep the old vault's
+        // identity: without one named here it has none until the next
+        // sign-in.
+        final relinked =
+            socialVaultId != null && existing.socialVaultId != socialVaultId;
+        final identityId = relinked
+            ? socialIdentityId
+            : socialIdentityId ?? existing.socialIdentityId;
+        if (relinked) {
+          await _db.setWalletsSocialVaultLink([existing.id], null);
+        }
+        if (relinked ||
+            (socialVaultId != null &&
+                identityId != existing.socialIdentityId)) {
+          await _db.setWalletsSocialVaultLink(
+            [existing.id],
+            socialVaultId,
+            identityId: identityId,
+          );
+        }
+        results.add(
+          _walletRowToInfo(existing).copyWith(
+            accountId: accountId,
+            socialVaultId: socialVaultId ?? existing.socialVaultId,
+            socialIdentityId: socialVaultId == null
+                ? existing.socialIdentityId
+                : identityId,
+          ),
+        );
         if (chain == Chain.solana) solanaWalletId = existing.id;
         continue;
       }
@@ -1133,6 +1175,8 @@ class WalletRepository {
           name: name,
           walletType: WalletType.social.toDbString(),
           socialProvider: Value(provider),
+          socialVaultId: Value(socialVaultId),
+          socialIdentityId: Value(socialIdentityId),
           chain: Value(chain.toDbString()),
           createdAt: _nowSeconds(),
           sortIndex: Value(sortIndex),
@@ -1146,6 +1190,8 @@ class WalletRepository {
           name: name,
           walletType: WalletType.social,
           socialProvider: provider,
+          socialVaultId: socialVaultId,
+          socialIdentityId: socialIdentityId,
           chain: chain.toDbString(),
           accountId: accountId,
         ),
@@ -1164,6 +1210,34 @@ class WalletRepository {
     await _syncWalletGraph(failOnError: true);
     return (wallets: results, existed: existed);
   }
+
+  /// Link every social row of [accountId] to [vaultId] (or unlink with
+  /// null), and record it in the recovery graph — the graph is what lets a
+  /// reinstall find the vault again.
+  ///
+  /// Unlinking also drops the sign-in identity recorded with the link. What
+  /// is left is a Google or Apple wallet with no vault and no older-sign-in
+  /// mark: its keys are on this device and its recovery phrase is its only
+  /// backup.
+  ///
+  /// The rows are written first and the graph after, and the graph write
+  /// can fail ([GraphSyncException]) with the rows already changed. So this
+  /// is repeatable: called again with the same [vaultId] it rewrites the
+  /// same rows and writes the graph again. The caller that unlinks keeps a
+  /// record of an unfinished unlink and calls back until this returns
+  /// (`SocialAuthService.unlinkDeletedVault`).
+  Future<void> setSocialVaultId(String accountId, String? vaultId) =>
+      _locked(() async {
+        final rows = (await _db.getWalletsForAccount(accountId))
+            .where(
+              (w) => WalletType.fromDbString(w.walletType) == WalletType.social,
+            )
+            .map((w) => w.id)
+            .toList();
+        if (rows.isEmpty) return;
+        await _db.setWalletsSocialVaultLink(rows, vaultId);
+        await _syncWalletGraph(failOnError: true);
+      });
 
   // ---------------------------------------------------------------------------
   // Selection
@@ -1696,11 +1770,57 @@ class WalletRepository {
       );
     }
 
-    // Delete wallet-sig cookie
-    await _deleteSecret(
-      'wallet authentication cookie',
-      () => _storage.deleteWalletSigCookie(address),
-    );
+    // Delete the wallet's stored ownership proof. The auth layer files it
+    // under the lowercased form of a `0x` address, while this row holds the
+    // checksummed one — so both spellings are deleted. A proof left behind
+    // would give the same address, added back as watch-only, a signed
+    // session until the proof expires.
+    for (final key in {
+      address,
+      if (address.startsWith('0x')) address.toLowerCase(),
+    }) {
+      await _deleteSecret(
+        'wallet authentication cookie',
+        () => _storage.deleteWalletSigCookie(key),
+      );
+    }
+
+    // The last row of a social vault takes this device's copy of the vault
+    // with it: the data key, the recovery phrase and the cached record. The
+    // vault itself and its platform slot stay — the wallet still exists, and
+    // the user's other devices (or a later sign-in here) still open it.
+    final accountId = row.accountId;
+    if (walletType == WalletType.social && accountId != null) {
+      final accountLeft = (await _db.getWalletsForAccount(
+        accountId,
+      )).isNotEmpty;
+      if (!accountLeft) {
+        await _deleteSecret(
+          'social wallet recovery phrase',
+          () => _storage.deleteSocialAccountMnemonic(accountId),
+        );
+      }
+    }
+    final vaultId = row.socialVaultId;
+    if (walletType == WalletType.social && vaultId != null) {
+      final stillLinked = (await _db.getAllWallets()).any(
+        (w) => w.socialVaultId == vaultId,
+      );
+      if (!stillLinked) {
+        await _deleteSecret(
+          'social vault data key',
+          () => _storage.deleteSocialVaultDataKey(vaultId),
+        );
+        await _deleteSecret(
+          'social vault recovery phrase',
+          () => _storage.deleteSocialVaultMnemonic(vaultId),
+        );
+        await _deleteSecret(
+          'social vault record',
+          () => _storage.deleteSocialVaultCache(vaultId),
+        );
+      }
+    }
   }
 
   /// Run one post-commit secret delete, logging and continuing on failure.
@@ -1915,6 +2035,9 @@ class WalletRepository {
               'derivationScheme': w.derivationScheme?.name,
               'masterFingerprint': w.masterFingerprint,
               'socialProvider': w.socialProvider,
+              'socialVaultId': w.socialVaultId,
+              'socialIdentityId': w.socialIdentityId,
+              'legacySocial': w.legacySocial,
               'chain': w.chain,
               'sortIndex': w.sortIndex,
             },
@@ -2403,14 +2526,24 @@ class WalletRepository {
       final type = WalletType.fromDbString(w['walletType'] as String);
       if (type != WalletType.importedKey) {
         // Only rows that could sign afterwards count — an HD row of a seed
-        // that read, or a social row whose key a re-login mints again. A
+        // that read, or a social row whose key is here or can come back. A
         // view-only or Ledger row restores without a secret, so counting it
         // would offer a partial restore that writes nothing signable and
         // then hides the Restore screen behind a database that has wallets.
-        if (!underMissingSeed &&
-            (type == WalletType.hd || type == WalletType.social)) {
-          readableWallets++;
-        }
+        //
+        // A social row linked to a vault gets its key back by signing in. One
+        // with no vault — a wallet from the older sign-in, or a vault wallet
+        // whose backup was deleted — has only the stored key, so it counts
+        // when that reads. Either way the row is still restored: it shows
+        // the address, and signing says how the wallet is brought back.
+        final signable = switch (type) {
+          WalletType.hd => true,
+          WalletType.social =>
+            w['socialVaultId'] != null ||
+                (await _tryRead(() => _storage.loadPrivateKey(id))) != null,
+          _ => false,
+        };
+        if (!underMissingSeed && signable) readableWallets++;
         continue;
       }
       totalKeys++;
@@ -2505,12 +2638,35 @@ class WalletRepository {
           derivationScheme: Value(w['derivationScheme'] as String?),
           masterFingerprint: Value(w['masterFingerprint'] as int?),
           socialProvider: Value(w['socialProvider'] as String?),
+          socialVaultId: Value(w['socialVaultId'] as String?),
+          // An entry written before the identity was recorded has none, and
+          // neither does a wallet without a vault.
+          socialIdentityId: Value(
+            w['socialVaultId'] == null
+                ? null
+                : w['socialIdentityId'] as String?,
+          ),
+          legacySocial: Value(_graphEntryIsLegacySocial(w)),
           chain: Value(w['chain'] as String? ?? 'solana'),
           createdAt: _nowSeconds(),
           sortIndex: Value(sortIndex),
         ),
       );
     }
+  }
+
+  /// Whether the graph wallet entry [w] is a wallet from the older Google or
+  /// Apple sign-in (`WalletInfo.isLegacySocialWallet`).
+  ///
+  /// An entry written since the mark exists carries it. One written before
+  /// has no `legacySocial` key, and gets the answer the database migration
+  /// gives the same row: no release that wrote such a graph could create a
+  /// social vault, so a social entry without a vault id is an older-sign-in
+  /// wallet.
+  static bool _graphEntryIsLegacySocial(Map<String, dynamic> w) {
+    if (w.containsKey('legacySocial')) return w['legacySocial'] == true;
+    return w['walletType'] == WalletType.social.toDbString() &&
+        w['socialVaultId'] == null;
   }
 
   // ---------------------------------------------------------------------------
@@ -2771,8 +2927,9 @@ class WalletRepository {
 
         // Rows that own a vault key — imported *and* social — are only
         // duplicates when a live row at the address can actually sign. A
-        // social key is recoverable by re-login and an imported one is not,
-        // but on this device both are the only copy, and deleting one because
+        // vault wallet's social key is recoverable by signing in and an
+        // imported one is not (nor is a social key without a vault), but on
+        // this device each is the only copy, and deleting one because
         // a view-only or Ledger row happens to hold the address destroys it
         // either way.
         if ((type == WalletType.importedKey || type == WalletType.social) &&
@@ -2959,6 +3116,9 @@ class WalletRepository {
     derivationScheme: _parseDerivationScheme(row.derivationScheme),
     masterFingerprint: row.masterFingerprint,
     socialProvider: row.socialProvider,
+    socialVaultId: row.socialVaultId,
+    socialIdentityId: row.socialIdentityId,
+    legacySocial: row.legacySocial,
     sortIndex: row.sortIndex,
   );
 

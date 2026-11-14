@@ -68,6 +68,7 @@ void main() {
         walletType: 'ledger',
         chain: 'tezos',
         derivationIndex: 2,
+        legacySocial: false,
         createdAt: 0,
         sortIndex: 0,
       ),

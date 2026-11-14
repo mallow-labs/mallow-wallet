@@ -15,6 +15,7 @@ import '../../../core/data/mallow_tokens.dart'
     show ethMint, mallowTokenMints, tokenByMint;
 import '../../../core/models/simulation_review.dart';
 import '../../../core/network/ethereum_rpc_service.dart';
+import '../../../core/network/kept_alive_http.dart';
 import '../../../core/network/evm_simulation_decoder.dart';
 import '../../../core/services/pending_evm_tx_tracker.dart';
 import '../../../core/services/preferences_service.dart';
@@ -87,6 +88,16 @@ final Set<String> _reservedSymbols = {
 
 final _zero = '0x${'0' * 40}';
 final _uint256Max = (BigInt.one << 256) - BigInt.one;
+
+/// ERC-20 calls made on the token itself: `transfer`, `approve`,
+/// `transferFrom`, `increaseAllowance` and `decreaseAllowance`.
+const _tokenCallSelectors = {
+  '0xa9059cbb',
+  '0x095ea7b3',
+  '0x23b872dd',
+  '0x39509351',
+  '0xa457c2d7',
+};
 
 typedef EthereumDappRpc =
     Future<Object?> Function(String method, List<Object?> params);
@@ -340,6 +351,10 @@ class _EthereumReads {
   final Future<Object?> estimate;
   final Future<EvmSimulationResult> simulation;
   final Future<Object?>? code;
+
+  /// Token reads this review has made, so the one started with the
+  /// simulation is the one the review awaits.
+  final tokens = <String, Future<(ReviewAsset, String?)>>{};
   final Future<BigInt?> Function() _readBaseFee;
   Future<BigInt?>? _baseFee;
 
@@ -393,6 +408,9 @@ class EthereumMessageReview extends DappMessageReview {
 }
 
 /// What a typed-data signature authorizes, as far as this wallet can tell.
+/// [generic] is everything it does not recognise: the review lists the signed
+/// fields but cannot say what the contract will do with them, so it is
+/// treated as cautiously as the kinds known to move assets.
 enum TypedDataKind { generic, permit, permit2, transfer, order }
 
 /// A spending permission a typed-data signature grants once submitted.
@@ -413,19 +431,57 @@ class TypedDataPermission {
   final DateTime? expires;
 }
 
-/// A token transfer a typed-data signature authorizes once submitted.
+/// A token transfer a typed-data signature authorizes once submitted
+/// (EIP-3009 `TransferWithAuthorization` / `ReceiveWithAuthorization`).
 class TypedDataTransfer {
   const TypedDataTransfer({
     required this.token,
+    required this.from,
     required this.recipient,
     required this.amount,
+    this.validFrom,
     this.expires,
   });
 
+  /// Lower-cased token contract: the domain's `verifyingContract`.
   final String token;
+
+  /// Lower-cased account the tokens leave.
+  final String from;
   final String recipient;
   final BigInt amount;
+
+  /// When the authorization starts to be valid; null when it already is
+  /// (`validAfter` of zero).
+  final DateTime? validFrom;
+
+  /// When it stops (`validBefore`); null when that is not a readable time.
   final DateTime? expires;
+}
+
+/// The fields of an EIP-3009 authorization and their types. A payload is
+/// summarised as a transfer only when its primary type declares exactly
+/// these, so every value the transfer card shows is one the digest covers
+/// under the meaning the card gives it.
+const _transferAuthorizationFields = {
+  'from': 'address',
+  'to': 'address',
+  'value': 'uint256',
+  'validAfter': 'uint256',
+  'validBefore': 'uint256',
+  'nonce': 'bytes32',
+};
+
+bool _isTransferAuthorization(Eip712TypedData data) {
+  if (data.primaryType != 'TransferWithAuthorization' &&
+      data.primaryType != 'ReceiveWithAuthorization') {
+    return false;
+  }
+  final fields = data.types[data.primaryType]!;
+  return fields.length == _transferAuthorizationFields.length &&
+      fields.every(
+        (field) => _transferAuthorizationFields[field.name] == field.type,
+      );
 }
 
 class EthereumTypedDataReview {
@@ -471,6 +527,8 @@ class EthereumDappAdapter {
     void Function({required String txHash, required String address})?
     onNftReceived,
   }) : _rpc = rpc ?? _defaultRpc,
+       // A cache belongs to the node it was read from.
+       _tokenInfo = rpc == null ? _sharedTokenInfo : {},
        _simulate = simulate ?? _defaultSimulate,
        _gasMarket = gasMarket ?? _defaultGasMarket,
        _preferences = preferences,
@@ -480,6 +538,12 @@ class EthereumDappAdapter {
   final WalletManager walletManager;
   final EthereumDappRpc _rpc;
   final EthereumDappSimulate _simulate;
+
+  /// Decimals and symbols already read, by contract, oldest first. A token's
+  /// do not change in practice, so a later review of it does not read them
+  /// again. Only a read that found the decimals is kept.
+  final Map<String, (ReviewAsset, String?)> _tokenInfo;
+  static final _sharedTokenInfo = <String, (ReviewAsset, String?)>{};
   final Future<EthGasMarket> Function() _gasMarket;
   final PreferencesService? _preferences;
   final BrowserTransactionTracker _tracker;
@@ -495,12 +559,21 @@ class EthereumDappAdapter {
 
   /// One client for every adapter, so a review's calls reuse one kept-alive
   /// connection instead of each paying for its own TLS handshake.
-  static final _dio = Dio(
+  static final _dio = keptAliveDio(
     BaseOptions(
       connectTimeout: const Duration(seconds: 12),
       receiveTimeout: const Duration(seconds: 20),
     ),
   );
+
+  /// Opens the connections a review reads through: three to the node, for
+  /// the nonce, gas estimate and code reads that go out together, and the
+  /// simulation endpoint's.
+  static Future<void> warmConnections() => Future.wait([
+    openConnections(dioHead(_dio), Config.ethereumRpcUrl, connections: 3),
+    if (GetIt.I.isRegistered<EthereumRpcService>())
+      GetIt.I<EthereumRpcService>().warmConnections(),
+  ]);
 
   static Future<Object?> _defaultRpc(
     String method,
@@ -656,17 +729,15 @@ class EthereumDappAdapter {
           ),
         );
       }
-    } else if ((data.primaryType == 'TransferWithAuthorization' ||
-            data.primaryType == 'ReceiveWithAuthorization') &&
-        contract != null &&
-        message['to'] is String &&
-        eip712Integer(message['value']) != null) {
+    } else if (contract != null && _isTransferAuthorization(data)) {
       kind = TypedDataKind.transfer;
       transfers.add(
         TypedDataTransfer(
           token: contract,
+          from: (message['from'] as String).toLowerCase(),
           recipient: (message['to'] as String).toLowerCase(),
           amount: eip712Integer(message['value'])!,
+          validFrom: _timestamp(eip712Integer(message['validAfter'])),
           expires: _timestamp(eip712Integer(message['validBefore'])),
         ),
       );
@@ -676,11 +747,17 @@ class EthereumDappAdapter {
       kind = TypedDataKind.order;
     }
     final tokens = <String, ReviewAsset>{};
-    for (final token in {
-      ...permissions.map((p) => p.token),
-      ...transfers.map((t) => t.token),
-    }.take(10)) {
-      tokens[token] = await _tokenAsset(token);
+    final reads = {
+      for (final token in {
+        ...permissions.map((p) => p.token),
+        ...transfers.map((t) => t.token),
+      }.take(10))
+        token: _knownTokens[token] != null
+            ? Future.value(_knownTokens[token]!)
+            : _token(token).then((info) => info.$1),
+    };
+    for (final MapEntry(:key, :value) in reads.entries) {
+      tokens[key] = await value;
     }
     return EthereumTypedDataReview(
       data: data,
@@ -803,6 +880,13 @@ class EthereumDappAdapter {
           : null,
       baseFee: _baseFee,
     );
+    // A token's own call names the token, so its decimals and symbol are
+    // read with the simulation rather than after it. The read never fails.
+    if (request.data.length >= 4 &&
+        _tokenCallSelectors.contains(_hexBytes(request.data.sublist(0, 4))) &&
+        _knownTokens[request.to] == null) {
+      (reads.tokens[request.to] = _token(request.to)).ignore();
+    }
     Future<PreparedEthereumTransaction> prepare({required bool simulated}) =>
         _prepare(
           request: request,
@@ -967,7 +1051,14 @@ class EthereumDappAdapter {
     // Token names and precision are for the review, which an early approval
     // never shows.
     if (simulated) {
-      await _resolveTokens(funds, accounts, tokenMetadata, assets, warnings);
+      await _resolveTokens(
+        funds,
+        accounts,
+        tokenMetadata,
+        assets,
+        warnings,
+        reads.tokens,
+      );
     }
 
     final siteFee = request.maxFeePerGas != null || request.gasPrice != null;
@@ -1372,6 +1463,7 @@ class EthereumDappAdapter {
     Map<String, ReviewTokenMetadata> metadata,
     Map<String, ReviewAsset> assets,
     List<String> warnings,
+    Map<String, Future<(ReviewAsset, String?)>> tokens,
   ) async {
     final contracts = {
       ...funds.map((f) => f.asset.id),
@@ -1380,12 +1472,12 @@ class EthereumDappAdapter {
           .map((a) => a.assetId)
           .whereType<String>(),
     }.where((id) => id.startsWith('0x')).take(10).toList();
-    // Every unknown contract's decimals and symbol are read at once; neither
-    // read throws.
+    // Every unknown contract's decimals and symbol are read at once, unless
+    // they already were with the simulation; neither read throws.
     final reads = {
       for (final contract in contracts)
         if (_knownTokens[contract] == null)
-          contract: (_tokenAsset(contract), _symbol(contract)).wait,
+          contract: tokens[contract] ??= _token(contract),
     };
     for (final contract in contracts) {
       final known = _knownTokens[contract];
@@ -1420,6 +1512,19 @@ class EthereumDappAdapter {
         );
       }
     }
+  }
+
+  /// [contract]'s decimals and symbol, from [_tokenInfo] or the chain.
+  /// Never fails: what could not be read is null.
+  Future<(ReviewAsset, String?)> _token(String contract) async {
+    final cached = _tokenInfo.remove(contract);
+    if (cached != null) return _tokenInfo[contract] = cached;
+    final info = await (_tokenAsset(contract), _symbol(contract)).wait;
+    if (info.$1.decimals != null) {
+      _tokenInfo[contract] = info;
+      if (_tokenInfo.length > 256) _tokenInfo.remove(_tokenInfo.keys.first);
+    }
+    return info;
   }
 
   Future<ReviewAsset> _tokenAsset(String contract) async {

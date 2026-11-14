@@ -1,15 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../../core/utils/address_format.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/widgets/app_snack_bar.dart';
 import '../../../shared/widgets/review_wallet_identity.dart';
 import '../../../shared/widgets/signing_review_layout.dart';
 import '../models/dapp_message_review.dart';
+import '../models/sign_in_checks.dart';
 import 'browser_site_tile.dart';
 
 /// Native review for a website's message signature (`signMessage`,
-/// `personal_sign`). A Sign In With Solana or Ethereum message gets a
+/// `signOffchainMessage`, `personal_sign`). A Sign In With Solana or Ethereum message gets a
 /// structured card only when the whole message fits the sign-in grammar
 /// ([DappMessageReview.signInFields] is strict), so no line can hide behind
 /// it; anything else is shown verbatim (UTF-8, or hex in
@@ -19,6 +21,10 @@ import 'browser_site_tile.dart';
 /// The host in the title comes from [DappMessageReview.origin], the native
 /// committed origin; the message's own domain claim is only ever compared
 /// against it, never shown in its place.
+///
+/// A sign-in whose domain or URI names another site than the one asking, or
+/// whose validity window is closed, is offered reject-first and signs only on
+/// a press-and-hold (see [SignInAssessment]).
 class MessageSigningReview extends StatelessWidget {
   const MessageSigningReview({
     required this.review,
@@ -26,6 +32,7 @@ class MessageSigningReview extends StatelessWidget {
     required this.onApprove,
     this.iconUrl,
     this.wallet,
+    this.now,
     super.key,
   });
 
@@ -37,6 +44,10 @@ class MessageSigningReview extends StatelessWidget {
 
   /// Defaults to resolving [DappMessageReview.address] against the session.
   final ReviewWalletIdentity? wallet;
+
+  /// The time a sign-in's validity is judged at. Defaults to the device's
+  /// clock; a test sets it.
+  final DateTime? now;
 
   @override
   Widget build(BuildContext context) {
@@ -87,12 +98,20 @@ class MessageSigningReview extends StatelessWidget {
     Map<String, String> fields,
   ) {
     final colors = context.mallowColors;
-    final matches = fields['Domain'] == _origin.authority;
-    final networkWarning = review.signInNetworkWarning;
+    final at = now ?? DateTime.now();
+    final check = assessSignIn(review, now: at);
+    final matches = check.domainMatches;
+    final networkWarning = check.networkWarning;
     final statement = review.signInStatement;
     final expires = fields['Expiration Time'];
     final nonce = fields['Nonce'];
     const shown = {'Domain', 'Account', 'Expiration Time', 'Nonce'};
+    // A claim the wallet could not confirm is set in the warning colour.
+    Color? flagged(String label) => switch (label) {
+      'URI' when !check.uriMatches => colors.warning,
+      'Chain ID' when networkWarning != null => colors.warning,
+      _ => null,
+    };
     // Each row takes whether it closes the card, which drops its hairline.
     final rows = <Widget Function(bool last)>[
       (last) => ReviewKvRow(
@@ -169,13 +188,14 @@ class MessageSigningReview extends StatelessWidget {
           (last) => ReviewKvRow(
             label: field.key,
             value: field.value,
+            valueColor: flagged(field.key),
             dense: true,
             divider: !last,
           ),
       if (expires != null)
         (last) => ReviewKvRow(
           label: 'Expires',
-          value: _expiry(expires),
+          value: _expiry(expires, at),
           dense: true,
           divider: !last,
         ),
@@ -200,8 +220,9 @@ class MessageSigningReview extends StatelessWidget {
       footer: ReviewDecisionBar(
         rejectKey: const Key('reject-signing'),
         approveKey: const Key('approve-signing'),
-        rejectLabel: 'Cancel',
-        approveLabel: matches ? 'Sign in' : 'Sign',
+        rejectLabel: check.needsHold ? 'Reject' : 'Cancel',
+        approveLabel: check.forThisSite ? 'Sign in' : 'Sign',
+        holdToApprove: check.needsHold,
         onReject: onReject,
         onApprove: onApprove,
       ),
@@ -210,7 +231,9 @@ class MessageSigningReview extends StatelessWidget {
         _hero(context),
         const SizedBox(height: 18),
         ReviewTitle(
-          matches ? 'Sign in to ${_origin.host}' : 'Review sign-in request',
+          check.forThisSite
+              ? 'Sign in to ${_origin.host}'
+              : 'Review sign-in request',
         ),
         _subtitle(
           context,
@@ -219,15 +242,38 @@ class MessageSigningReview extends StatelessWidget {
         if (!matches) ...[
           const SizedBox(height: 18),
           ReviewCautionCard(
+            key: const Key('sign-in-domain-mismatch'),
             title: 'The sign-in domain does not match this website.',
             messages: [
-              'The message asks to sign in to ${fields['Domain']}, but this request comes from ${review.origin}.',
+              '${_origin.authority} is asking, but the message signs you in to ${fields['Domain']}.',
+              _otherSiteAdvice,
+            ],
+          ),
+        ] else if (!check.uriMatches) ...[
+          const SizedBox(height: 18),
+          ReviewCautionCard(
+            key: const Key('sign-in-uri-mismatch'),
+            title: 'The sign-in address does not match this website.',
+            messages: [
+              '${_origin.authority} is asking, but the message signs you in at ${fields['URI']}.',
+              _otherSiteAdvice,
+            ],
+          ),
+        ],
+        if (check.timeProblem case final problem?) ...[
+          const SizedBox(height: 18),
+          ReviewCautionCard(
+            key: const Key('sign-in-time-problem'),
+            title: '$problem.',
+            messages: const [
+              'A website has no use for a sign-in that is not valid now. Reject unless you are sure.',
             ],
           ),
         ],
         if (networkWarning != null) ...[
           const SizedBox(height: 18),
           ReviewCautionCard(
+            key: const Key('sign-in-network-mismatch'),
             title: 'The sign-in network does not match this wallet.',
             messages: [networkWarning],
           ),
@@ -293,6 +339,16 @@ class MessageSigningReview extends StatelessWidget {
               ? identity.shortAddress
               : '${identity.label} · ${identity.shortAddress}',
         ),
+        // The message is valid only once these sign too; this wallet signs
+        // for itself alone.
+        if (review.coSigners.isNotEmpty)
+          ReviewKvRow(
+            key: const Key('message-co-signers'),
+            label: 'Other signers',
+            value: review.coSigners
+                .map((a) => truncateAddress(a, lead: 4, trail: 4))
+                .join('\n'),
+          ),
         ReviewDisclosure(
           key: const Key('message-full'),
           label: 'Exact bytes and digest',
@@ -303,11 +359,16 @@ class MessageSigningReview extends StatelessWidget {
   }
 }
 
-/// "in 10 minutes" for a parseable ISO time, else the raw value.
-String _expiry(String raw) {
-  final at = DateTime.tryParse(raw);
+/// What a signature for another site can be used for, said once for either
+/// mismatch.
+const _otherSiteAdvice =
+    'A website that asks you to sign in to a different one may be trying to get into your account there. Reject unless you are sure.';
+
+/// "in 10 minutes" for a readable time, else the raw value.
+String _expiry(String raw, DateTime now) {
+  final at = parseSignInTime(raw);
   if (at == null) return raw;
-  final left = at.toUtc().difference(DateTime.now().toUtc());
+  final left = at.difference(now.toUtc());
   if (left.isNegative) return 'Expired';
   if (left.inMinutes < 1) return 'in under a minute';
   if (left.inMinutes < 60) {

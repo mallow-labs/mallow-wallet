@@ -138,6 +138,7 @@ class AuctionState extends Equatable {
     this.userPubkey = '',
     this.entryFromArtworkDetail = false,
     this.isSecondaryMarket = false,
+    this.saleMarketUnknown = false,
     this.showVerifiedSellerOptions = false,
     this.selectedArtwork,
     this.listingEligibilityError,
@@ -176,6 +177,12 @@ class AuctionState extends Equatable {
   /// True when the listing is on the secondary market (the user is not the
   /// verified update authority). Drives the proceeds split logic.
   final bool isSecondaryMarket;
+
+  /// True when the sale could not be classified as primary or secondary (the
+  /// collection of a Core asset could not be read). [isSecondaryMarket] means
+  /// nothing then, so the review step shows no proceeds rows and no
+  /// direct-proceeds toggle instead of figures for the wrong class.
+  final bool saleMarketUnknown;
 
   /// Webapp parity: `(onChainAsset != null && !isSecondaryMarket(...)) ||
   /// isApprovedCreator(user)` (`ListingContext`). For now we
@@ -239,6 +246,7 @@ class AuctionState extends Equatable {
     String? userPubkey,
     bool? entryFromArtworkDetail,
     bool? isSecondaryMarket,
+    bool? saleMarketUnknown,
     bool? showVerifiedSellerOptions,
     Object? selectedArtwork = _sentinel,
     Object? listingEligibilityError = _sentinel,
@@ -268,6 +276,7 @@ class AuctionState extends Equatable {
     entryFromArtworkDetail:
         entryFromArtworkDetail ?? this.entryFromArtworkDetail,
     isSecondaryMarket: isSecondaryMarket ?? this.isSecondaryMarket,
+    saleMarketUnknown: saleMarketUnknown ?? this.saleMarketUnknown,
     showVerifiedSellerOptions:
         showVerifiedSellerOptions ?? this.showVerifiedSellerOptions,
     listingEligibilityError: identical(listingEligibilityError, _sentinel)
@@ -308,6 +317,7 @@ class AuctionState extends Equatable {
     userPubkey,
     entryFromArtworkDetail,
     isSecondaryMarket,
+    saleMarketUnknown,
     showVerifiedSellerOptions,
     selectedArtwork,
     listingEligibilityError,
@@ -395,17 +405,19 @@ class AuctionState extends Equatable {
   /// webapp `ProceedsInfo`'s `showDirectProceedsOption`: only on a primary
   /// sale with creator shares where the seller isn't the first creator (the
   /// split is a no-op otherwise).
-  bool get showDirectProceedsOption => showDirectProceedsOptionOf(
-    isSecondary: isSecondaryMarket,
-    seller: userPubkey,
-    shares: royaltyShares,
-  );
+  bool get showDirectProceedsOption =>
+      !saleMarketUnknown &&
+      showDirectProceedsOptionOf(
+        isSecondary: isSecondaryMarket,
+        seller: userPubkey,
+        shares: royaltyShares,
+      );
 
   /// Pre-computed proceeds rows for the review step. Empty before the bloc has
   /// hydrated a seller. Auctions always show percentages (no fixed sale price
   /// at listing time), so the amount column is driven by [reservePrice].
   List<ProceedsSplit> get proceedsSplits {
-    if (userPubkey.isEmpty) return const [];
+    if (userPubkey.isEmpty || saleMarketUnknown) return const [];
     return computeProceedsSplits(
       seller: userPubkey,
       priceRaw: reservePrice,
@@ -658,7 +670,8 @@ class AuctionBloc extends Bloc<AuctionEvent, AuctionState> {
     emit(
       state.copyWith(
         listingEligibilityError: ctx.tradeEligibility.message,
-        isSecondaryMarket: ctx.isSecondaryMarket,
+        isSecondaryMarket: ctx.isSecondaryMarket ?? false,
+        saleMarketUnknown: ctx.isSecondaryMarket == null,
         showVerifiedSellerOptions: ctx.isVerifiedSeller,
         royaltyShares: ctx.royaltyShares,
         royaltyBps: ctx.royaltyBps,
@@ -769,16 +782,17 @@ class AuctionBloc extends Bloc<AuctionEvent, AuctionState> {
 
     // 3. Sign + broadcast + confirm via [MarketplaceActionFlow].
     // Local-key wallets skip the user-facing approval prompt — surface
-    // the local signing copy instead. Listing creation transfers the NFT into
-    // escrow but does not move any SOL/token value out of the wallet
-    // beyond ~5k lamports of network fee — well below the gate threshold.
+    // the local signing copy instead.
     final isLocal = await _walletManager.isLocalSigner();
 
     await _flow.execute(
       sink: sink,
       tracker: _txTracker,
       txsBase64: unsignedTxsBase64,
-      usdValue: 0.0,
+      // The NFT goes into escrow under a reserve whoever is signing just chose,
+      // so nothing here says what is at stake. Valued as unknown, step-up auth
+      // prompts at any threshold, as for a direct transfer.
+      usdValue: null,
       flow: const FlowKey.solana(AppFlow.auctionCreate),
       // On the two-step (setup + auction) batch the copy carries the step
       // count so the user knows a second approval prompt is coming — an

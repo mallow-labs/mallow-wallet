@@ -163,7 +163,10 @@ void main() {
       service.dispose();
     });
 
-    testWidgets('the auth redirect is dropped before any handler', (
+    // `mallowwallet://auth` was a sign-in SDK's redirect, dropped before any
+    // handler could see it. The SDK is gone and the host has no special case
+    // left: a link on it is a trusted custom-scheme link like any other.
+    testWidgets('a link on the auth host is offered like any trusted link', (
       tester,
     ) async {
       final router = _router();
@@ -186,7 +189,7 @@ void main() {
       links.emit(Uri.parse('mallowwallet://auth?code=x'));
       await tester.pump();
 
-      expect(asked, 0);
+      expect(asked, 1);
       service.dispose();
     });
 

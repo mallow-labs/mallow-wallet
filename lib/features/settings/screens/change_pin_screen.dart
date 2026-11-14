@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../core/security/pin_attempt_verifier.dart';
 import '../../../core/security/secure_storage.dart';
 import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/widgets/app_snack_bar.dart';
 import '../../../shared/widgets/confirm_sheet.dart';
 import '../../../shared/widgets/custom_number_pad.dart';
+import '../../../shared/widgets/pin_cooldown_pad.dart';
 import '../widgets/settings_page_scaffold.dart';
 
 enum _Step { currentPin, newPin, confirmPin }
@@ -32,6 +34,7 @@ class _ChangePinScreenState extends State<ChangePinScreen>
   bool _isError = false;
   bool _ready = false;
   bool _hasExistingPin = false;
+  DateTime? _cooldownUntil;
 
   final _focusNode = FocusNode();
 
@@ -61,12 +64,17 @@ class _ChangePinScreenState extends State<ChangePinScreen>
   }
 
   Future<void> _initStep() async {
-    final hasPinSet = await sl<SecureWalletStorage>().hasPin();
+    final storage = sl<SecureWalletStorage>();
+    final hasPinSet = await storage.hasPin();
+    final cooldownUntil = hasPinSet
+        ? await PinAttemptVerifier(storage).activeCooldown()
+        : null;
     if (!mounted) return;
     setState(() {
       _hasExistingPin = hasPinSet;
       _step = hasPinSet ? _Step.currentPin : _Step.newPin;
       _ready = true;
+      _cooldownUntil = cooldownUntil;
     });
   }
 
@@ -95,7 +103,17 @@ class _ChangePinScreenState extends State<ChangePinScreen>
     };
   }
 
+  /// The pad is frozen during a cooldown, but a hardware keyboard reaches
+  /// [_onNumber] around it. Only the current-PIN step checks anything.
+  bool get _isCoolingDown {
+    final until = _cooldownUntil;
+    return _step == _Step.currentPin &&
+        until != null &&
+        DateTime.now().isBefore(until);
+  }
+
   void _onNumber(String digit) {
+    if (_isCoolingDown) return;
     if (_pin.length >= _pinLength) return;
     setState(() {
       _pin += digit;
@@ -138,13 +156,22 @@ class _ChangePinScreenState extends State<ChangePinScreen>
       });
       return;
     }
-    if (await storage.verifyPin(_pin)) {
-      setState(() {
-        _pin = '';
-        _step = _Step.newPin;
-      });
-    } else {
-      _triggerError();
+    final result = await PinAttemptVerifier(storage).verify(_pin);
+    if (!mounted) return;
+    switch (result) {
+      case PinVerified():
+        setState(() {
+          _pin = '';
+          _step = _Step.newPin;
+        });
+      case PinRejected(:final cooldownUntil):
+        _cooldownUntil = cooldownUntil;
+        _triggerError();
+      case PinCoolingDown(:final until):
+        _cooldownUntil = until;
+        _triggerError();
+      case PinCheckUnavailable():
+        _triggerError();
     }
   }
 
@@ -264,9 +291,14 @@ class _ChangePinScreenState extends State<ChangePinScreen>
                 ),
               ),
               const SizedBox(height: 32),
-              CustomNumberPad(
-                onNumberTap: _onNumber,
-                onBackspace: _onBackspace,
+              PinCooldownPad(
+                cooldownUntil: _step == _Step.currentPin
+                    ? _cooldownUntil
+                    : null,
+                child: CustomNumberPad(
+                  onNumberTap: _onNumber,
+                  onBackspace: _onBackspace,
+                ),
               ),
               const SizedBox(height: 32),
               if (showTurnOff) ...[

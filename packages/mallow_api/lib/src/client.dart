@@ -17,7 +17,6 @@ import 'generated/openapi.models.swagger.dart'
     show
         CreateProfileUploadRequest,
         CreateProfileUploadResponse,
-        LoginBody,
         ShowNsfwRequest,
         ShowNsfwResponse,
         StakingGetClaimTxRequest,
@@ -27,7 +26,6 @@ import 'generated/openapi.models.swagger.dart'
         OpenSeaPurchasePrepareRequest,
         OpenSeaPurchasePrepareResponse,
         OpenSeaPurchaseConfirmRequest;
-import 'models/login.dart';
 import 'models/market.dart';
 import 'models/market_event.dart';
 import 'models/offer.dart';
@@ -87,10 +85,10 @@ abstract class MallowApiClient {
   Future<ApiResponse<HomePopularCurationsResponse>> getHomePopularCurations();
 
   // --- Auth ---
-
-  /// Login with wallet address.
-  @POST('/v0/login')
-  Future<ApiResponse<LoginResult>> login(@Body() LoginBody request);
+  //
+  // The session (`POST /v2/session`) and the user (`GET /v0/currentUser`) are
+  // read with raw Dio in `AuthService`: the session's login token comes off
+  // `Set-Cookie`. `/v0/login` is deprecated server-side and no longer called.
 
   // --- Artwork ---
 
@@ -454,8 +452,19 @@ abstract class MallowApiClient {
   Future<NotificationsListResponse> getNotifications();
 
   /// Get the unread notification count for the current user.
+  ///
+  /// Requires a login. [requireProof] (always sent by this app) makes a login
+  /// without a valid `wallet-sig` a `401` "Signature required" / "Signature
+  /// expired". Without it the backend answers that login with a zero count,
+  /// for builds that predate it.
+  ///
+  /// [extras] go on the Dio request's `extra` map, for the app's interceptors
+  /// to read (the badge refresh uses it to opt out of re-signing on a 401).
   @GET('/v1/notifications/unread-count')
-  Future<NotificationUnreadCountResponse> getNotificationUnreadCount();
+  Future<NotificationUnreadCountResponse> getNotificationUnreadCount({
+    @Query('requireProof') bool requireProof = true,
+    @Extras() Map<String, dynamic> extras = const {},
+  });
 
   /// Mark all unread notifications as read.
   ///

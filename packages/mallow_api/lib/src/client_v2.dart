@@ -386,8 +386,22 @@ abstract class MallowApiV2Client {
   Future<ApiResponse<String>> getTwitterAuthUrl();
 
   /// Disconnect the linked X (Twitter) account. Requires a signed login.
-  @GET('/twitter/disconnect')
+  /// `POST`: the `GET` form could be triggered cross-site.
+  @POST('/twitter/disconnect')
   Future<void> disconnectTwitter();
+
+  /// Finish an X (Twitter) connect. Requires a signed login.
+  ///
+  /// The callback does not link the account. It redirects to the
+  /// `?twitter=confirm&token=…` app link, and this call, with
+  /// `{"token": <that token>}`, links it — only for the wallet that started
+  /// the flow. `200` carries `{"result": {"username": …}}`; `403` means another
+  /// wallet started it, `400` that the token is unknown or expired, `409` that
+  /// the X account is on another profile. The token is spent on every outcome.
+  @POST('/twitter/complete')
+  Future<ApiResponse<TwitterCompleteResponse>> completeTwitterConnect(
+    @Body() Map<String, dynamic> body,
+  );
 
   // --- Artwork portfolio (aggregated across all session wallets) ---
 
@@ -456,8 +470,13 @@ abstract class MallowApiV2Client {
   ///
   /// Public read — a missing config document or a datastore error still
   /// returns a permissive 200 rather than an error.
+  ///
+  /// Returns the raw response beside the parsed one. The parsed model holds
+  /// each disabled flow as an enum generated from the vendored contract, which
+  /// cannot hold a flow newer than that contract; a caller that must match
+  /// every cell reads the wire strings from the raw body.
   @GET('/config/mobile')
-  Future<ApiResponse<MobileConfigResponse>> getMobileConfig();
+  Future<HttpResponse<ApiResponse<MobileConfigResponse>>> getMobileConfig();
 
   // --- Account deletion ---
 
@@ -502,8 +521,19 @@ abstract class MallowApiV2Client {
 
   /// The caller's blocked accounts, newest first, with enough profile data to
   /// render the Blocked Accounts settings screen. Backs the unblock flow.
+  ///
+  /// Requires a login. [requireProof] (always sent by this app) makes a login
+  /// without a valid `wallet-sig` a `401` "Signature required" / "Signature
+  /// expired", the refusal re-sign handling acts on. Without it the backend
+  /// answers that login with an empty list, for builds that predate it.
+  ///
+  /// [extras] go on the Dio request's `extra` map, for the app's interceptors
+  /// to read (a background load uses it to opt out of re-signing on a 401).
   @GET('/blocks')
-  Future<ApiResponse<List<BlockedAccount>>> getBlockedAccounts();
+  Future<ApiResponse<List<BlockedAccount>>> getBlockedAccounts({
+    @Query('requireProof') bool requireProof = true,
+    @Extras() Map<String, dynamic> extras = const {},
+  });
 
   // --- Moderation: reporting ---
 
@@ -521,4 +551,100 @@ abstract class MallowApiV2Client {
   /// `(e as DioException).response?.statusCode == 429`.
   @POST('/reports')
   Future<void> createReport(@Body() ReportRequest request);
+
+  // --- Social vault ---
+  //
+  // The encrypted store behind Google and Apple sign-in. The backend holds
+  // ciphertext, wrapped data keys and a vault public key, never a secret it
+  // can open. These routes carry no login: `open` and `create` are
+  // authenticated by the provider's ID token, the writes by a vault-key
+  // signature.
+
+  /// Verify a Google or Apple ID token and return its vault, or a null
+  /// `vault` when the identity has none. The returned `identityToken` is what
+  /// [createSocialVault] takes. `401` (`invalid_id_token`) when the token is
+  /// invalid, expired or already used: ID tokens are accepted once.
+  ///
+  /// Returns the raw response beside the parsed one. The parsed model reads a
+  /// missing `vault` field as null, and "no vault" is an answer a caller acts
+  /// on (it offers to create a wallet), so the caller checks the raw body for
+  /// an explicit `vault` before it believes a null.
+  @POST('/social-vault/open')
+  Future<HttpResponse<ApiResponse<SocialVaultOpenResponse>>> openSocialVault(
+    @Body() SocialVaultOpenRequest request,
+  );
+
+  /// Create the identity's only vault. `409` (`vault_exists`) when another
+  /// device won a first-sign-in race; the caller opens that vault instead.
+  @POST('/social-vault/create')
+  Future<ApiResponse<SocialVault>> createSocialVault(@Body() SocialVaultCreateRequest request);
+
+  /// Add a slot. [signature] and [timestamp] are the vault-key signature over
+  /// the request message, which covers the SHA-256 of the exact JSON body —
+  /// so the caller signs `jsonEncode(request.toJson())`, the bytes this
+  /// method sends. `409` carries the current vault ([SocialVaultConflict]).
+  @POST('/social-vault/slots/add')
+  Future<ApiResponse<SocialVault>> addSocialVaultSlot(
+    @Body() SocialVaultAddSlotRequest request, {
+    @Header('x-vault-signature') required String signature,
+    @Header('x-vault-timestamp') required String timestamp,
+  });
+
+  /// Remove a slot. The last live slot cannot be removed (`400`,
+  /// `last_slot`). Signed like [addSocialVaultSlot].
+  @POST('/social-vault/slots/remove')
+  Future<ApiResponse<SocialVault>> removeSocialVaultSlot(
+    @Body() SocialVaultRemoveSlotRequest request, {
+    @Header('x-vault-signature') required String signature,
+    @Header('x-vault-timestamp') required String timestamp,
+  });
+
+  /// Replace a live slot's display label; an empty label clears it. Only the
+  /// label changes. Signed like [addSocialVaultSlot].
+  @POST('/social-vault/slots/rename')
+  Future<ApiResponse<SocialVault>> renameSocialVaultSlot(
+    @Body() SocialVaultRenameSlotRequest request, {
+    @Header('x-vault-signature') required String signature,
+    @Header('x-vault-timestamp') required String timestamp,
+  });
+
+  /// Replace the vault's payload ciphertext, vault key and whole live slot
+  /// set in one write, at revision + 1. Signed by the CURRENT vault key like
+  /// [addSocialVaultSlot]; every slot id must be new to the vault.
+  @POST('/social-vault/rotate')
+  Future<ApiResponse<SocialVault>> rotateSocialVault(
+    @Body() SocialVaultRotateRequest request, {
+    @Header('x-vault-signature') required String signature,
+    @Header('x-vault-timestamp') required String timestamp,
+  });
+
+  /// Delete the vault and its slots (`204`). Signed like
+  /// [addSocialVaultSlot].
+  @POST('/social-vault/delete')
+  Future<void> deleteSocialVault(
+    @Body() SocialVaultDeleteRequest request, {
+    @Header('x-vault-signature') required String signature,
+    @Header('x-vault-timestamp') required String timestamp,
+  });
+
+  /// Read the current vault without a new sign-in: a signed read. Signed like
+  /// [addSocialVaultSlot], over the caller's last known revision, which the
+  /// backend does not compare — so this never answers `409`. `404` when the
+  /// vault is gone.
+  @POST('/social-vault/status')
+  Future<ApiResponse<SocialVault>> socialVaultStatus(
+    @Body() SocialVaultStatusRequest request, {
+    @Header('x-vault-signature') required String signature,
+    @Header('x-vault-timestamp') required String timestamp,
+  });
+
+  /// Cancel a pending deletion request (one not signed by the vault key) and
+  /// record that a holder of the vault key refused it. Signed like
+  /// [addSocialVaultSlot]; succeeds when there is no pending request.
+  @POST('/social-vault/deletion/cancel')
+  Future<ApiResponse<SocialVault>> cancelSocialVaultDeletion(
+    @Body() SocialVaultCancelDeletionRequest request, {
+    @Header('x-vault-signature') required String signature,
+    @Header('x-vault-timestamp') required String timestamp,
+  });
 }

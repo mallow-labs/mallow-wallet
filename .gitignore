@@ -18,6 +18,9 @@ build/
 *.mocks.dart
 *.swagger.dart
 lib/di.config.dart
+# Vendored third-party plugin: its Pigeon output is upstream source, copied
+# verbatim, and nothing in the build regenerates it.
+!packages/passkeys_android/lib/messages.g.dart
 
 # IDE
 .idea/

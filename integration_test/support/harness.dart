@@ -670,11 +670,13 @@ Element? _topNumberPad() {
 /// Fill colours of every circular [Container] inside the active PIN surface,
 /// in tree order.
 ///
-/// The scope is the innermost [Column] above the pad: all three surfaces
-/// (`PinSetupScreen`, `LockScreen`, `PinPromptSheet`) lay their dots row and
-/// their [CustomNumberPad] out as siblings in one Column, so this reads the
-/// dots of the surface being typed into without the harness having to know
-/// which one it is.
+/// The scope is the innermost [Column] above the pad that also holds a circle
+/// outside the pad: every surface lays its dots row out in a Column above its
+/// [CustomNumberPad], so this reads the dots of the surface being typed into
+/// without the harness having to know which one it is. The nearest Column is
+/// not enough, because `PinCooldownPad` wraps the pad in a Column of its own on
+/// the PIN sheet and the Change PIN screen. That Column holds only the pad's
+/// keys, whose colour never changes, so every digit would read as swallowed.
 ///
 /// Deliberately NOT "the six dots": the three surfaces size their dots
 /// differently (12 dp for the two `Container` ones, 16 dp for the lock
@@ -691,7 +693,7 @@ List<Color?> _pinSurfaceCircles(WidgetTester tester) {
   if (pad == null) return const [];
   Element? scope;
   pad.visitAncestorElements((element) {
-    if (element.widget is Column) {
+    if (element.widget is Column && _holdsCircleOutside(element, pad)) {
       scope = element;
       return false;
     }
@@ -701,18 +703,41 @@ List<Color?> _pinSurfaceCircles(WidgetTester tester) {
 
   final colours = <Color?>[];
   void visit(Element element) {
-    final widget = element.widget;
-    if (widget is Container) {
-      final decoration = widget.decoration;
-      if (decoration is BoxDecoration && decoration.shape == BoxShape.circle) {
-        colours.add(decoration.color);
-      }
-    }
+    final colour = _circleColour(element);
+    if (colour != null) colours.add(colour.value);
     element.visitChildren(visit);
   }
 
   scope!.visitChildren(visit);
   return colours;
+}
+
+/// The fill of [element] when it is a circular [Container], boxed so that a
+/// circle with no fill still counts as one; null for anything else.
+({Color? value})? _circleColour(Element element) {
+  final widget = element.widget;
+  if (widget is! Container) return null;
+  final decoration = widget.decoration;
+  if (decoration is! BoxDecoration || decoration.shape != BoxShape.circle) {
+    return null;
+  }
+  return (value: decoration.color);
+}
+
+/// Whether [scope] holds a circular [Container] that is not part of [pad].
+bool _holdsCircleOutside(Element scope, Element pad) {
+  var found = false;
+  void visit(Element element) {
+    if (found || identical(element, pad)) return;
+    if (_circleColour(element) != null) {
+      found = true;
+      return;
+    }
+    element.visitChildren(visit);
+  }
+
+  scope.visitChildren(visit);
+  return found;
 }
 
 /// How many dots have changed away from [baseline] (sampled with the buffer

@@ -75,11 +75,74 @@ void main() {
 
     test('LegacySocialWalletException default + toString', () {
       final ex = LegacySocialWalletException();
-      // The copy must say the wallet is unrecoverable, not merely unsupported —
-      // re-signing in produces a different address, so "try again" is wrong.
-      expect(ex.message, contains('old sign-in system'));
-      expect(ex.message, contains('cannot be recovered'));
+      // The copy must say why this wallet cannot sign here, and must not
+      // suggest signing in again: that opens a different wallet.
+      expect(ex.message, contains('cannot sign on this device'));
+      expect(ex.message, contains('would open a different wallet'));
       expect(ex.toString(), startsWith('LegacySocialWalletException: '));
+    });
+
+    test('SocialAccountMismatchException names the account the wallet '
+        'needs', () {
+      // A vault had to be reopened and another account answered. The message
+      // names the right one (by the email last seen for it, when known) and
+      // says nothing was changed: no answer from the wrong account is acted
+      // on.
+      final named = SocialAccountMismatchException(
+        provider: 'google',
+        expectedEmail: 'owner@example.test',
+      );
+      expect(named, isA<LegacySocialWalletException>());
+      expect(
+        named.message,
+        'This wallet belongs to owner@example.test. Sign in with that account '
+        'to use it. Nothing was changed.',
+      );
+      expect(named.toString(), startsWith('SocialAccountMismatchException: '));
+
+      final unnamed = SocialAccountMismatchException(provider: 'apple');
+      expect(
+        unnamed.message,
+        contains('the Apple account it was created with'),
+      );
+      // It never sends the user to the older sign-in or to a phrase: the
+      // wallet's vault may well be intact.
+      expect(unnamed.message, isNot(contains('older')));
+      expect(unnamed.message, isNot(contains('backup')));
+    });
+
+    test('LegacySocialKeyUnavailableException says how to get the wallet '
+        'back', () {
+      // A wallet from the older sign-in whose stored key is gone. The app has
+      // no older sign-in, so the message is the whole recovery path: the
+      // website, an export there, an import here.
+      final ex = LegacySocialKeyUnavailableException();
+      expect(ex, isA<LegacySocialWalletException>());
+      expect(
+        ex.message,
+        allOf(
+          contains('older Google sign-in'),
+          contains('not on this device'),
+          contains('sign in on the mallow website with the older sign-in'),
+          contains('export the wallet’s keys there'),
+          contains('Import wallet'),
+        ),
+      );
+      // The existing row has to go first: an import at an address a wallet
+      // already holds is refused as a duplicate.
+      expect(ex.message, contains('remove this wallet here'));
+      // No host is named; the website is whichever one a deployment serves.
+      expect(ex.message, isNot(contains('http')));
+      expect(ex.message, isNot(matches(RegExp(r'\.(art|com|io|app)\b'))));
+      expect(
+        ex.toString(),
+        startsWith('LegacySocialKeyUnavailableException: '),
+      );
+
+      expect(
+        LegacySocialKeyUnavailableException(provider: 'apple').message,
+        contains('older Apple sign-in'),
+      );
     });
 
     test('NonSolanaSigningWalletException default + toString', () {

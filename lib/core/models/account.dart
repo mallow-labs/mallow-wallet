@@ -104,8 +104,10 @@ enum WalletType {
   /// View-only (no signing capability)
   viewOnly,
 
-  /// Derived from a social-auth (Web3Auth) login; the key is held locally,
-  /// like [importedKey]
+  /// A Google or Apple sign-in wallet. Its keys are held locally like
+  /// [importedKey]. They come from a social vault, except for a wallet made by
+  /// the older sign-in (`WalletInfo.isLegacySocialWallet`), whose keys came
+  /// from Web3Auth and which this app can no longer re-create
   social,
 
   /// Connected via Ledger hardware wallet (BLE)
@@ -176,7 +178,20 @@ enum WalletType {
 /// The provenance badge shown beside a wallet/account name. Each value maps to
 /// a single icon (see `WalletTypeBadge`). Plain HD/imported wallets carry no
 /// badge.
-enum WalletBadge { watchOnly, ledger, seedVault, keystone, google, apple }
+///
+/// `googleLegacy` and `appleLegacy` are the provider marks of a wallet from the
+/// older sign-in ([WalletInfo.isLegacySocialWallet]): the same icon with the
+/// small mark of that sign-in at its bottom right.
+enum WalletBadge {
+  watchOnly,
+  ledger,
+  seedVault,
+  keystone,
+  google,
+  apple,
+  googleLegacy,
+  appleLegacy,
+}
 
 /// A single wallet (HD, imported key, view-only, social, or hardware).
 @freezed
@@ -208,6 +223,20 @@ abstract class WalletInfo with _$WalletInfo {
     /// wallets, drives the brand badge beside the name. Null otherwise.
     String? socialProvider,
 
+    /// The social vault this social wallet's keys come from. Null for
+    /// non-social wallets, for a wallet from the older sign-in
+    /// ([legacySocial]) and for a vault wallet whose backup was deleted.
+    String? socialVaultId,
+
+    /// The sign-in identity [socialVaultId]'s vault belongs to, as the
+    /// backend names it (an opaque id, not an email). Null without a vault,
+    /// and for a vault wallet not opened since the id was first recorded.
+    String? socialIdentityId,
+
+    /// The stored mark of a wallet from the older Google or Apple sign-in.
+    /// Read it through [isLegacySocialWallet].
+    @Default(false) bool legacySocial,
+
     /// Explicit display order — sourced from DB, not persisted back.
     int? sortIndex,
 
@@ -222,12 +251,26 @@ abstract class WalletInfo with _$WalletInfo {
   /// in secure storage (`WalletRepository.addSocialAccount`) and sign locally
   /// through the imported-key paths, so nothing about them is remote.
   ///
-  /// One caveat this gate cannot express: a social row created before the
-  /// Web3Auth migration has no stored key. Signing it triggers a one-shot
-  /// interactive recovery (`SocialAuthService.recoverKeysForAccount`), which
-  /// throws `LegacySocialWalletException` because the re-login derives a
-  /// different address. That is a sign-time failure, not a capability one.
+  /// One caveat this gate cannot express: a social row whose stored key is
+  /// missing. Signing it triggers a one-shot recovery
+  /// (`SocialAuthService.recoverKeysForAccount`), which reopens a vault
+  /// wallet's social vault and, for a wallet from the older sign-in, throws
+  /// `LegacySocialKeyUnavailableException` — this app cannot re-create that
+  /// key. That is a sign-time failure, not a capability one.
   bool get canSign => walletType != WalletType.viewOnly;
+
+  /// Whether this is a wallet from the older Google or Apple sign-in — the
+  /// one run by Web3Auth, where the Google or Apple account alone reproduces
+  /// the keys. THE predicate for that: every surface that marks, explains or
+  /// refuses such a wallet reads this and nothing else.
+  ///
+  /// False for a social vault wallet, including one whose backup was deleted
+  /// (it has no [socialVaultId] either, which is why the answer is a stored
+  /// mark and not `socialVaultId == null`). The mark is set by the database
+  /// migration that introduced it, for the social wallets that were already
+  /// on the device, and by nothing afterwards: this app has no older sign-in.
+  bool get isLegacySocialWallet =>
+      walletType == WalletType.social && legacySocial;
 
   /// Whether this wallet can locally sign a *send transfer* on its own chain.
   ///
@@ -274,7 +317,7 @@ abstract class WalletInfo with _$WalletInfo {
   ///
   /// Solana only: `WalletManager._getKeypair()` resolves the signer from
   /// `loadSelectedWalletId()`, so a Solana flow must re-point the global
-  /// selection (and with it the `/v0/login` identity) before it can sign with a
+  /// selection (and with it the `/v2/session` identity) before it can sign with a
   /// wallet other than the active one. Tezos and Ethereum sign by explicit id
   /// ([WalletManager.signTezosOperation], [WalletManager.signEthereumTransaction]),
   /// so a flow sourcing from those chains must leave the selection alone —
@@ -306,8 +349,15 @@ abstract class WalletInfo with _$WalletInfo {
     WalletType.ledger => WalletBadge.ledger,
     WalletType.seedVault => WalletBadge.seedVault,
     WalletType.keystone => WalletBadge.keystone,
-    WalletType.social =>
-      socialProvider == 'apple' ? WalletBadge.apple : WalletBadge.google,
+    WalletType.social => switch ((
+      socialProvider == 'apple',
+      isLegacySocialWallet,
+    )) {
+      (true, false) => WalletBadge.apple,
+      (true, true) => WalletBadge.appleLegacy,
+      (false, false) => WalletBadge.google,
+      (false, true) => WalletBadge.googleLegacy,
+    },
     WalletType.hd || WalletType.importedKey => null,
   };
 }
@@ -340,7 +390,7 @@ abstract class ProfileGroup with _$ProfileGroup {
   bool get canAcceptLink => wallets.any((w) => w.canSign);
   bool get isFull => wallets.length >= kMaxProfileWallets;
 
-  /// The address that identifies this profile to the backend (`/v0/login`).
+  /// The address that identifies this profile to the backend (`/v2/session`).
   ///
   /// The exact answer, independent of the global active-wallet selection.
   /// `WalletManager.getAddress()` reads that selection, which
@@ -401,6 +451,20 @@ abstract class Account with _$Account {
   /// account's wallets otherwise share a type, so the primary wallet decides.
   WalletBadge? get typeBadge =>
       isWatchOnly ? WalletBadge.watchOnly : primaryWallet?.badge;
+
+  /// Whether this is an account from the older Google or Apple sign-in: any
+  /// of its wallets answers [WalletInfo.isLegacySocialWallet] (they share the
+  /// mark, like they share a provider).
+  bool get isLegacySocial => wallets.any((w) => w.isLegacySocialWallet);
+
+  /// The provider name of this account's social wallets as shown to the
+  /// user: "Apple" or "Google" (the default when none is recorded).
+  String get socialProviderName =>
+      wallets.any(
+        (w) => w.walletType == WalletType.social && w.socialProvider == 'apple',
+      )
+      ? 'Apple'
+      : 'Google';
 
   /// Whether this group has a seed phrase (at least one HD wallet).
   bool get hasSeedPhrase => wallets.any((w) => w.walletType == WalletType.hd);

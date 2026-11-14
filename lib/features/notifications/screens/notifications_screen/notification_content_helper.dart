@@ -146,11 +146,15 @@ class NotificationContentHelper {
           data['buyerUser'] as Map<String, dynamic>?,
           data['buyer'] as String?,
         );
+        // Only the seller's own notification has sellerReceived. price is what
+        // the buyer paid, which is not what the seller's wallet gained.
+        final amount = data['sellerReceived'] != null
+            ? 'and you received ${_price(data, 'sellerReceived')}'
+            : 'for ${_price(data, 'price')}';
         return NotificationContents(
           title: 'Artwork sold!',
           message: nft != null
-              ? '$buyer purchased "${_nftName(nft)}" for '
-                    '${_price(data, 'price')}'
+              ? '$buyer purchased "${_nftName(nft)}" $amount'
               : null,
           linkPath: _artworkLink(nft),
           linkLabel: nft != null ? 'View artwork' : null,

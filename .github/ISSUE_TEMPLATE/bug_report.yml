@@ -76,7 +76,7 @@ body:
         Forks are welcome here, but a fork pointed at its own backend has a
         different failure surface — knowing which saves a round trip.
       options:
-        - An official mallow build (TestFlight / Google Play)
+        - An official mallow build (App Store, Google Play, Solana dApp Store, or a TestFlight / Play testing invite)
         - My own build from source
         - A fork
     validations:

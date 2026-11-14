@@ -1008,6 +1008,12 @@ class LedgerService {
     if (_reconnectBlocked) throw const LedgerNotConnectedException();
   }
 
+  /// Runs just before the OS Bluetooth permission dialog, so the app can say
+  /// in its own words what the permission is for. Returning false cancels the
+  /// request. Set by the app shell, which owns a navigator to show it on;
+  /// null asks straight away.
+  static Future<bool> Function()? beforePermissionRequest;
+
   /// Requests Bluetooth permissions when the OS state requires it.
   ///
   /// Called by [LedgerInterface] before scanning or connecting.
@@ -1018,6 +1024,8 @@ class LedgerService {
     if (state == AvailabilityState.poweredOn) return true;
 
     if (state == AvailabilityState.unauthorized) {
+      final disclose = beforePermissionRequest;
+      if (disclose != null && !await disclose()) return false;
       await UniversalBle.requestPermissions();
       final updated = await UniversalBle.getBluetoothAvailabilityState();
       return updated == AvailabilityState.poweredOn;

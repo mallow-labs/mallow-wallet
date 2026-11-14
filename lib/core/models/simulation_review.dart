@@ -19,6 +19,16 @@ enum AccountChangeKind {
 
 enum NftChangeKind { transfer, mint, burn, approve, revoke, authority }
 
+/// What an NFT's delegate may do with it. A Core NFT's transfer, burn and
+/// freeze delegates are separate grants, each with its own holder.
+enum NftDelegatePower { transfer, burn, freeze }
+
+/// The key in [SimulationReview.delegatedBy] for calls that may have set a
+/// delegate or an authority and could not be tied to an account. Their
+/// programs count toward every account's set. No address is empty, so the key
+/// cannot collide with one.
+const String kUntracedDelegations = '';
+
 class ReviewAsset {
   const ReviewAsset({
     required this.id,
@@ -68,6 +78,7 @@ class AccountChange {
     this.rawAllowance,
     this.assetId,
     this.balance,
+    this.power,
   });
   final AccountChangeKind kind;
   final String address;
@@ -82,6 +93,11 @@ class AccountChange {
   /// base units, when it was read. Lets the review tell an approval that
   /// covers the whole balance from a partial one.
   final BigInt? balance;
+
+  /// What the delegate of an NFT may do with it, when the grant says: a Core
+  /// NFT's delegates. Null for every other change, where an approval is the
+  /// right to transfer.
+  final NftDelegatePower? power;
 }
 
 class NftChange {
@@ -207,6 +223,7 @@ class SimulationReview {
     List<FundChange> funds = const [],
     List<AccountChange> accounts = const [],
     List<NftChange> nfts = const [],
+    Map<String, Set<String>> delegatedBy = const {},
   }) : nftMetadata = Map.unmodifiable(nftMetadata),
        tokenMetadata = Map.unmodifiable(tokenMetadata),
        assets = Map.unmodifiable(assets),
@@ -215,8 +232,23 @@ class SimulationReview {
        warnings = List.unmodifiable(warnings),
        funds = List.unmodifiable(funds),
        accounts = List.unmodifiable(accounts),
-       nfts = List.unmodifiable(nfts);
+       nfts = List.unmodifiable(nfts),
+       delegatedBy = Map.unmodifiable({
+         for (final MapEntry(:key, :value) in delegatedBy.entries)
+           key: Set<String>.unmodifiable(value),
+       });
   final Uri? explorerUrl;
+
+  /// On Solana, for each account whose delegate or authority a call sets (a
+  /// token account, a compressed or Core NFT by its asset id, a stake
+  /// account, a program, a name), the programs of the top-level instructions
+  /// whose calls did so: the program itself when the transaction calls it
+  /// directly, otherwise the program whose calls reached it. Read from the
+  /// simulation's inner instructions, so it is empty until a simulation has
+  /// run. An account missing here was not traced, and who chose its delegate
+  /// or authority is unknown. [kUntracedDelegations] keys the programs whose
+  /// calls could not be tied to any account.
+  final Map<String, Set<String>> delegatedBy;
   final Map<String, ReviewNftMetadata> nftMetadata;
 
   /// Unverified tokens' own symbol and image, keyed by mint. Registry mints

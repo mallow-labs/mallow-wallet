@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'mallow_network_image.dart';
 
+import '../../core/crypto/ed25519_curve.dart';
 import '../../core/data/mallow_tokens.dart'
     show isRegistryMint, solMint, tokenByMint;
 import '../../core/models/simulation_review.dart';
@@ -24,20 +25,76 @@ import 'transaction_expiry.dart';
 const _u64Max = '18446744073709551615';
 const _defaultTitle = 'Review transaction';
 
+/// How a [SimulationReview.warnings] entry starts when it says the wallet
+/// signs for a program the review has no reader for. With a simulation that
+/// ran, that is a statement about the review's reach, shown as a plain line;
+/// without one it stays among the cautions.
+const _unreadProgramsWarning =
+    'Some instructions you sign for could not be read.';
+
 /// An allowance no one would grant as an amount: Solana's u64 maximum, or
 /// anything from 2^128 up, which covers the uint256 maximum and the other
 /// "infinite" values EVM websites send.
 bool _isUnlimited(BigInt allowance) =>
     allowance == BigInt.parse(_u64Max) || allowance >= BigInt.one << 128;
 
+/// Programs that hand a permission or an authority to whichever account
+/// their caller names, so a listed one making the change says nothing about
+/// who chose its holder: the token programs, Token Metadata (every pNFT
+/// delegate and lock goes through it), Bubblegum and Core (an NFT's
+/// delegates), the System, Stake, loader and name programs (an account's
+/// owner or authority), and the executors that replay stored instructions
+/// with the signer's privileges.
+///
+/// Everything else on the published list is an application: a marketplace
+/// that delegates a listed NFT to an address of its own, a stake pool that
+/// takes a stake account into its own keeping. A change one of those makes
+/// in its own call is the program's doing, not the website's. A program that
+/// passes its caller's choice through and is added to the published list
+/// must be added here too, or the list becomes a way round the hold.
+const _passThroughPrograms = {
+  '11111111111111111111111111111111', // System Program (Assign)
+  'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', // Token Program
+  'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb', // Token-2022
+  'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s', // Metaplex Token Metadata
+  'BGUMAp9Gq7iTEuizy4pqaxsTyUCBK68MDfK752saRPUY', // Metaplex Bubblegum
+  'CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d', // Metaplex Core
+  'Stake11111111111111111111111111111111111111', // Stake Program
+  'BPFLoader1111111111111111111111111111111111', // BPF Loader
+  'BPFLoader2111111111111111111111111111111111', // BPF Loader 2
+  'BPFLoaderUpgradeab1e11111111111111111111111', // BPF Upgradeable Loader
+  'LoaderV411111111111111111111111111111111111', // Loader v4
+  'namesLPneVptA9Z5rqUDD9tMTWEJwofgaYwp8cawRkX', // Name Service
+  'SMPLecH534NA9acpos4G6x7uf3LWbCAwZQE9e8ZekMu', // Squads v3
+  'SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf', // Squads v4
+  'GovER5Lthms3bLBqWub97yVrMmEogzX7xNjdXpPPCVZw', // SPL Governance
+};
+
+/// Who holds a permission or an authority the transaction hands over.
+enum _Holder {
+  /// An address someone holds the key to, or one that cannot be read: it can
+  /// use what it was given whenever it likes.
+  wallet,
+
+  /// A program-derived address, so only its program's code can use it, but
+  /// the review cannot tell that program apart from one the site deployed.
+  program,
+
+  /// A program-derived address chosen by a listed program's own code.
+  listedProgram,
+}
+
 /// Native review shared by transaction surfaces. Warnings describe uncertainty;
 /// the caller alone applies signer/network validity and authentication policy.
 ///
 /// Layout: origin, title and estimate caption, balance and asset actions,
-/// fee / wallet / network, then the program calls behind a disclosure. When the simulation failed, rejecting
-/// becomes the primary action and approving needs a press-and-hold. Without
-/// [onApprove] the wallet cannot sign: the review still shows, under a
-/// view-only warning, with Close as its only action.
+/// fee / wallet / network, then the program calls behind a disclosure (in
+/// the open on Solana when they are all the review has to show). When the
+/// simulation failed or could not run, or the review shows a Permission or
+/// Authority card, rejecting becomes the primary action and approving needs
+/// a press-and-hold. Without [onApprove] the wallet
+/// cannot sign: the review still shows, under a view-only warning, with
+/// Close as its only action.
 class SimulationReviewSheet extends StatelessWidget {
   const SimulationReviewSheet({
     required this.review,
@@ -97,32 +154,132 @@ class SimulationReviewSheet extends StatelessWidget {
 
   bool get _failed => review.execution == SimulationExecution.failed;
 
-  /// A Solana review whose simulation failed or could not be decoded turns
-  /// reject-first, with press-and-hold approval. Ethereum and Tezos reviews
-  /// keep the ordinary title and decision bar; their caution cards still say
-  /// what went wrong. A Tezos contract call is never fully decoded, so on
-  /// Tezos the hold would stand in front of every contract call.
-  bool get _needsCaution =>
-      !_evm &&
-      !review.chain.startsWith('tezos:') &&
-      (_failed || review.effectsUndecodable);
+  /// A review whose effects were not checked turns reject-first, with
+  /// press-and-hold approval: its simulation failed, or could not run at
+  /// all, on any chain. "Could not run" counts on purpose. The website that
+  /// asks for the signature can make a simulation unavailable (a batch too
+  /// large to simulate, a node it keeps busy), so an unchecked request must
+  /// never be the easier one to approve.
+  ///
+  /// A simulation whose effects could not be decoded counts too, except on
+  /// Tezos: a Tezos contract call is never fully decoded, so there the hold
+  /// would stand in front of every contract call.
+  ///
+  /// A review that shows a Permission or Authority card takes the same
+  /// care, checked or not: see [_hasRiskCard].
+  bool get _unchecked =>
+      review.execution != SimulationExecution.succeeded ||
+      (!_tezos && review.effectsUndecodable);
   bool get _viewOnly => onApprove == null;
 
   bool get _evm => review.chain.startsWith('eip155:');
+  bool get _tezos => review.chain.startsWith('tezos:');
+  bool get _solana => !_evm && !_tezos;
 
   /// A batch approved as a whole, its effects combined across transactions.
   bool get _batch => review.transactions.length > 1;
 
+  /// Whether the permission or hand-over [change] gets the Permission or
+  /// Authority card, and with it the hold: what it grants outlasts the
+  /// transaction, so approving it is never the tap a finger was already
+  /// making.
+  ///
   /// Every EVM approval is a lasting grant a contract can use without asking,
-  /// so each gets a card. On Solana the ones that hand over what the account
-  /// holds do: an unlimited allowance, an NFT, or the whole balance.
-  bool _hasRiskCard(AccountChange change) =>
-      change.kind == AccountChangeKind.authority ||
-      (change.kind == AccountChangeKind.approve &&
-          (_evm ||
-              (change.rawAllowance != null &&
-                  _isUnlimited(change.rawAllowance!)) ||
-              _coversHolding(change)));
+  /// so each gets the card. On Solana every change of authority does, and
+  /// every new delegate with an allowance above zero: a key holder can take
+  /// what it was given whenever it likes, an allowance measured against an
+  /// empty or unread balance is no limit (the account can be filled after
+  /// the approval, by the same transaction or the next), and a program
+  /// address the review cannot tie to a listed program may belong to one the
+  /// website deployed.
+  ///
+  /// The one exception is a change a listed program's own code made (see
+  /// [_holder]): a marketplace that takes a listed NFT into its keeping is
+  /// what the user came to do. It gets no card and nothing extra is asked;
+  /// an approval stays an action row and a change of authority becomes an
+  /// account row.
+  bool _hasRiskCard(AccountChange change, Map<String, String> labels) {
+    if (change.kind != AccountChangeKind.approve &&
+        change.kind != AccountChangeKind.authority) {
+      return false;
+    }
+    if (_evm) return true;
+    final allowance = change.rawAllowance;
+    // An allowance of zero grants nothing.
+    if (change.kind == AccountChangeKind.approve &&
+        allowance != null &&
+        allowance <= BigInt.zero) {
+      return false;
+    }
+    return _holder(change, labels) != _Holder.listedProgram;
+  }
+
+  /// Whether [next] replaces [previous] as the one report of a grant both
+  /// describe (same account, delegate and power).
+  ///
+  /// Within one transaction the decoded call and the simulated state report
+  /// the same grant, and the simulated state says what it became. A batch
+  /// concatenates its transactions' reports, each simulated on its own, and
+  /// any of them may be the one that stands: the website chooses the order
+  /// they land in and which it sends at all. So across a batch the stronger
+  /// report is kept, never the first.
+  bool _supersedes(
+    AccountChange next,
+    AccountChange previous,
+    Map<String, String> labels,
+  ) {
+    final simulatedFirst = previous.evidence != ReviewEvidence.simulatedState;
+    if (!_batch || next.kind != AccountChangeKind.approve) {
+      return simulatedFirst;
+    }
+    int card(AccountChange change) => _hasRiskCard(change, labels) ? 1 : 0;
+    final cards = card(next).compareTo(card(previous));
+    if (cards != 0) return cards > 0;
+    // An allowance that was not read is not known to be small.
+    final a = next.rawAllowance, b = previous.rawAllowance;
+    if (a == null || b == null) {
+      return a == null && b == null ? simulatedFirst : a == null;
+    }
+    return a == b ? simulatedFirst : a > b;
+  }
+
+  /// Who holds the permission or the authority [change] hands over. A
+  /// program address counts as chosen by a listed program only when the
+  /// simulation ran, every program it called (cross-program calls included)
+  /// is on [labels], and every call that set this account's delegate or
+  /// authority came from a listed program that is not one of
+  /// [_passThroughPrograms]. A site that approves through the token program
+  /// or Token Metadata directly picks the holder itself, and could pick an
+  /// address of a program it deployed.
+  _Holder _holder(AccountChange change, Map<String, String> labels) {
+    final holder = change.beneficiary;
+    if (!_solana || holder == null || !isSolanaProgramAddress(holder)) {
+      return _Holder.wallet;
+    }
+    final traced = review.delegatedBy[change.address];
+    final origins = {
+      ...?traced,
+      // Calls that could not be tied to an account may have set this one.
+      ...?review.delegatedBy[kUntracedDelegations],
+    };
+    final listed =
+        review.execution == SimulationExecution.succeeded &&
+        traced != null &&
+        traced.isNotEmpty &&
+        origins.every(
+          (p) => labels.containsKey(p) && !_passThroughPrograms.contains(p),
+        ) &&
+        review.programCalls.isNotEmpty &&
+        review.programCalls.every((c) => labels.containsKey(c.program));
+    return listed ? _Holder.listedProgram : _Holder.program;
+  }
+
+  /// [programLabels], else the published list when the app has one.
+  ValueListenable<Map<String, String>>? get _labels =>
+      programLabels ??
+      (sl.isRegistered<ProgramLabelService>()
+          ? sl<ProgramLabelService>().labels
+          : null);
 
   /// The asset an account change is about: its own mint, else one a sibling
   /// change or a balance change on the same account names.
@@ -143,6 +300,11 @@ class SimulationReviewSheet extends StatelessWidget {
       (review.nftMetadata.containsKey(id) ||
           review.nfts.any((n) => n.assetId == id));
 
+  /// Whether [change] is about an NFT. One that names what its delegate may
+  /// do is, whatever else the review knows of the asset.
+  bool _isNftChange(AccountChange change) =>
+      change.power != null || _isNft(_assetOf(change));
+
   /// A Solana delegation of everything the token account holds: a nonzero
   /// allowance over an NFT, which is the whole of it, or an allowance of at
   /// least the account's balance. The delegate can then move all of it, even
@@ -151,7 +313,7 @@ class SimulationReviewSheet extends StatelessWidget {
     if (_evm || change.kind != AccountChangeKind.approve) return false;
     final allowance = change.rawAllowance;
     if (allowance != null && allowance <= BigInt.zero) return false;
-    if (_isNft(_assetOf(change))) return true;
+    if (_isNftChange(change)) return true;
     final balance = change.balance;
     return allowance != null &&
         balance != null &&
@@ -163,15 +325,28 @@ class SimulationReviewSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final expiry = this.expiry;
-    if (expiry == null) return _build(context, null);
-    return ValueListenableBuilder<TransactionExpiry>(
-      valueListenable: expiry.state,
-      builder: (context, state, _) => _build(context, state),
+    final labels = _labels;
+    if (labels == null) return _withExpiry(context, const {});
+    return ValueListenableBuilder<Map<String, String>>(
+      valueListenable: labels,
+      builder: (context, names, _) => _withExpiry(context, names),
     );
   }
 
-  Widget _build(BuildContext context, TransactionExpiry? expiryState) {
+  Widget _withExpiry(BuildContext context, Map<String, String> labels) {
+    final expiry = this.expiry;
+    if (expiry == null) return _build(context, null, labels);
+    return ValueListenableBuilder<TransactionExpiry>(
+      valueListenable: expiry.state,
+      builder: (context, state, _) => _build(context, state, labels),
+    );
+  }
+
+  Widget _build(
+    BuildContext context,
+    TransactionExpiry? expiryState,
+    Map<String, String> labels,
+  ) {
     final c = context.mallowColors;
     final expiry = this.expiry;
     final expired = expiryState is ExpiryPassed;
@@ -182,14 +357,35 @@ class SimulationReviewSheet extends StatelessWidget {
               a.kind == AccountChangeKind.authority,
         )
         .toList();
-    final remaining = review.accounts
-        .where(
-          (a) =>
-              !permissions.contains(a) &&
-              !_isAction(a) &&
-              a.kind != AccountChangeKind.contractCall,
-        )
-        .toList();
+    // One card per grant: the decoded call and the simulated state can both
+    // report the same one. See [_supersedes] for which report is kept.
+    final grants = <String, AccountChange>{};
+    for (final permission in permissions) {
+      final key =
+          '${permission.kind.name}:${permission.address}:${permission.beneficiary}:${permission.power?.name}';
+      final previous = grants[key];
+      if (previous == null || _supersedes(permission, previous, labels)) {
+        grants[key] = permission;
+      }
+    }
+    final risks = grants.values.where((p) => _hasRiskCard(p, labels)).toList();
+    // A review that was not checked, or one that hands over something that
+    // outlasts the transaction: reject-first, and approving takes the hold.
+    final needsCaution = _unchecked || risks.isNotEmpty;
+    final remaining = [
+      ...review.accounts.where(
+        (a) =>
+            !permissions.contains(a) &&
+            !_isAction(a) &&
+            a.kind != AccountChangeKind.contractCall,
+      ),
+      // A change of authority a listed program made has no card. It is a
+      // row here, or the review would not show it at all.
+      ...grants.values.where(
+        (p) =>
+            p.kind == AccountChangeKind.authority && !_hasRiskCard(p, labels),
+      ),
+    ];
     final deltas = review.funds.where((f) => f.isNet).toList()
       ..sort(
         (a, b) => (b.rawAmount.isNegative ? 1 : 0).compareTo(
@@ -197,9 +393,14 @@ class SimulationReviewSheet extends StatelessWidget {
         ),
       );
     final transfers = review.funds.where((f) => !f.isNet).toList();
+    final simulated = review.execution == SimulationExecution.succeeded;
+    final unreadPrograms = review.warnings
+        .where((w) => w.startsWith(_unreadProgramsWarning))
+        .firstOrNull;
     final warnings = review.warnings
         .where((w) => !w.startsWith('Some effects could not be decoded.'))
         .where((w) => w != kSimulationSnapshotSlotsWarning)
+        .where((w) => !(simulated && w.startsWith(_unreadProgramsWarning)))
         .toSet()
         .toList();
     final mixedSlots = review.warnings.contains(
@@ -214,7 +415,36 @@ class SimulationReviewSheet extends StatelessWidget {
             !movementFunds.any((f) => f.asset.id == nft.assetId))
           _nftMovement(context, nft),
     ];
-    final actions = _actionChanges(context);
+    final actions = _actionChanges(context, labels);
+    final nftRows = [
+      for (final nft in review.nfts)
+        if (!_isNftMovement(nft) &&
+            !(nft.kind == NftChangeKind.transfer &&
+                movementFunds.any((f) => f.asset.id == nft.assetId)))
+          nft,
+    ];
+    // A simulation that ran and found the network fee and nothing else. What
+    // a program keeps for the wallet outside its balances is not something a
+    // simulation shows, so the review says that this is all it found.
+    final fee = review.feeLamports;
+    final moved = movementFunds.where((f) => f.rawAmount != BigInt.zero);
+    final feeOnly =
+        _solana &&
+        review.execution == SimulationExecution.succeeded &&
+        fee != null &&
+        permissions.isEmpty &&
+        actions.isEmpty &&
+        nftRows.isEmpty &&
+        remaining.isEmpty &&
+        movements.length == 1 &&
+        moved.length == 1 &&
+        moved.single.isNet &&
+        moved.single.asset.id == solMint &&
+        moved.single.rawAmount == -BigInt.from(fee);
+    // With nothing else to go on, the programs that run are the review: they
+    // are listed without being asked for.
+    final programsOpen =
+        _solana && (feeOnly || (movements.isEmpty && actions.isEmpty));
     final identity = wallet ?? ReviewWalletIdentity.resolve(review.address);
 
     return SigningReviewLayout(
@@ -231,7 +461,7 @@ class SimulationReviewSheet extends StatelessWidget {
               onReject: onReject,
               onApprove: onApprove!,
               approveLabel: approveLabel,
-              holdToApprove: _needsCaution,
+              holdToApprove: needsCaution,
             ),
       children: [
         const SizedBox(height: 4),
@@ -249,8 +479,8 @@ class SimulationReviewSheet extends StatelessWidget {
         ],
         // "Review carefully" urges caution before approving; a view-only
         // review has nothing to approve.
-        ReviewTitle(_needsCaution && !_viewOnly ? 'Review carefully' : title),
-        if (_needsCaution && !_viewOnly && title != _defaultTitle)
+        ReviewTitle(needsCaution && !_viewOnly ? 'Review carefully' : title),
+        if (needsCaution && !_viewOnly && title != _defaultTitle)
           Padding(
             padding: const EdgeInsets.only(top: 6),
             child: Text(
@@ -282,7 +512,7 @@ class SimulationReviewSheet extends StatelessWidget {
           const SizedBox(height: 14),
           ReviewCautionCard(messages: warnings),
         ],
-        for (final permission in permissions.where(_hasRiskCard)) ...[
+        for (final permission in risks) ...[
           const SizedBox(height: 14),
           _riskCard(context, permission),
         ],
@@ -306,11 +536,24 @@ class SimulationReviewSheet extends StatelessWidget {
           const SizedBox(height: 14),
           const ReviewInfoLine('No asset changes could be identified.'),
         ],
-        for (final nft in review.nfts)
-          if (!_isNftMovement(nft) &&
-              !(nft.kind == NftChangeKind.transfer &&
-                  movementFunds.any((f) => f.asset.id == nft.assetId)))
-            _nftRow(context, nft),
+        // One plain line on what a simulation that ran cannot vouch for. A
+        // statement, not a caution: nearly every website's transaction runs
+        // a program the wallet has no reader for, and a card on each would
+        // teach people to ignore the cards that matter.
+        if (feeOnly) ...[
+          const SizedBox(height: 14),
+          const ReviewInfoLine(
+            'No change to what your wallet holds was found beyond the network fee. The programs below run with your signature.',
+            key: Key('review-fee-only'),
+          ),
+        ] else if (simulated && unreadPrograms != null) ...[
+          const SizedBox(height: 14),
+          ReviewInfoLine(
+            unreadPrograms,
+            key: const Key('review-unread-programs'),
+          ),
+        ],
+        for (final nft in nftRows) _nftRow(context, nft),
         if (remaining.isNotEmpty) ...[
           const ReviewSectionLabel('Account changes'),
           for (final change in remaining) _accountRow(context, change),
@@ -371,20 +614,63 @@ class SimulationReviewSheet extends StatelessWidget {
               style: reviewMonoStyle.copyWith(color: c.textPrimary),
             ),
           ),
-        ReviewDisclosure(
-          key: const Key('review-program-calls'),
-          label: 'Program calls',
-          child: _ProgramCalls(
+        if (programsOpen) ...[
+          const ReviewSectionLabel('Program calls'),
+          _ProgramCalls(
+            key: const Key('review-program-calls'),
             review: review,
-            labels:
-                programLabels ??
-                (sl.isRegistered<ProgramLabelService>()
-                    ? sl<ProgramLabelService>().labels
-                    : null),
+            names: labels,
             openExternal: openExternal,
           ),
-        ),
+        ] else
+          ReviewDisclosure(
+            key: const Key('review-program-calls'),
+            label: 'Program calls',
+            child: _ProgramCalls(
+              review: review,
+              names: labels,
+              openExternal: openExternal,
+            ),
+          ),
       ],
+    );
+  }
+
+  /// [allowance] in the token's own units and symbol, when the review knows
+  /// them. The permission names a token account, not a mint; the symbol is
+  /// borrowed from a balance change on the same account when there is one.
+  /// An EVM allowance names the token contract itself.
+  ({String symbol, String amount}) _allowance(
+    AccountChange change,
+    BigInt allowance,
+  ) {
+    final asset =
+        review.funds
+            .where(
+              (f) =>
+                  f.address == change.address ||
+                  (_evm && f.asset.id == change.assetId),
+            )
+            .map((f) => f.asset)
+            .firstOrNull ??
+        review.assets[change.assetId] ??
+        // A token the app knows needs no balance change to be named.
+        switch (_evm ? null : tokenByMint(change.assetId)) {
+          final token? when isRegistryMint(token.mint) => ReviewAsset(
+            id: token.mint,
+            symbol: token.symbol,
+            decimals: token.decimals,
+          ),
+          _ => null,
+        };
+    final symbol = asset == null
+        ? 'token'
+        : _symbol(asset, review.tokenMetadata);
+    return (
+      symbol: symbol,
+      amount: asset?.decimals == null
+          ? '$allowance base units'
+          : '${groupThousands(formatReviewAmount(allowance, asset!.decimals))} $symbol',
     );
   }
 
@@ -455,15 +741,33 @@ class SimulationReviewSheet extends StatelessWidget {
     final assetId = _assetOf(change);
     if (!_evm &&
         change.kind == AccountChangeKind.approve &&
-        _isNft(assetId) &&
+        assetId != null &&
+        _isNftChange(change) &&
         _coversHolding(change)) {
       final frozen = review.accounts.any(
         (a) =>
             a.kind == AccountChangeKind.freeze && a.address == change.address,
       );
+      final name = _nftName(assetId);
+      final (title, can) = switch (change.power) {
+        NftDelegatePower.burn => (
+          'Permission to burn $name',
+          ' can destroy this NFT at any time, until the permission is revoked.',
+        ),
+        NftDelegatePower.freeze => (
+          'Permission to lock $name',
+          ' can lock this NFT in your wallet at any time, so that you cannot move it until they unlock it.',
+        ),
+        _ => (
+          'Permission to transfer $name',
+          frozen
+              ? ' can transfer this NFT out of your wallet at any time, until the permission is revoked. It is also frozen, so you cannot move it yourself until it is unlocked.'
+              : ' can transfer this NFT out of your wallet at any time, until the permission is revoked.',
+        ),
+      };
       return ReviewRiskCard(
         tag: 'Permission',
-        title: 'Permission to transfer ${_nftName(assetId!)}',
+        title: title,
         body: Text.rich(
           TextSpan(
             children: [
@@ -471,38 +775,16 @@ class SimulationReviewSheet extends StatelessWidget {
                 reviewAddressSpan(context, beneficiary)
               else
                 const TextSpan(text: 'Another account'),
-              TextSpan(
-                text: frozen
-                    ? ' can transfer this NFT out of your wallet at any time, until the permission is revoked. It is also frozen, so you cannot move it yourself until it is unlocked.'
-                    : ' can transfer this NFT out of your wallet at any time, until the permission is revoked.',
-              ),
+              TextSpan(text: can),
             ],
           ),
         ),
       );
     }
     if (change.kind == AccountChangeKind.approve && allowance != null) {
-      // The permission names a token account, not a mint; borrow the symbol
-      // from a balance change on the same account when there is one. An EVM
-      // allowance names the token contract itself.
-      final asset =
-          review.funds
-              .where(
-                (f) =>
-                    f.address == change.address ||
-                    (_evm && f.asset.id == change.assetId),
-              )
-              .map((f) => f.asset)
-              .firstOrNull ??
-          review.assets[change.assetId];
-      final symbol = asset == null
-          ? 'token'
-          : _symbol(asset, review.tokenMetadata);
+      final (:symbol, :amount) = _allowance(change, allowance);
       final unlimited = _isUnlimited(allowance);
       final whole = !unlimited && _coversHolding(change);
-      final amount = asset?.decimals == null
-          ? '$allowance base units'
-          : '${groupThousands(formatReviewAmount(allowance, asset!.decimals))} $symbol';
       return ReviewRiskCard(
         tag: 'Permission',
         title: unlimited ? 'Unlimited $symbol allowance' : '$amount allowance',
@@ -627,23 +909,44 @@ class SimulationReviewSheet extends StatelessWidget {
     );
   }
 
-  List<BalanceChange> _actionChanges(BuildContext context) {
-    final grouped = <String, Map<AccountChangeKind, AccountChange>>{};
+  List<BalanceChange> _actionChanges(
+    BuildContext context,
+    Map<String, String> labels,
+  ) {
+    // One row per action on an account. In a batch each delegate keeps its
+    // own row, with the allowance [_supersedes] keeps: the one that may
+    // stand, not the first one reported. A Core NFT's transfer, burn and
+    // freeze delegates stand side by side, so each keeps a row too.
+    final grouped = <String, Map<String, AccountChange>>{};
     for (final change in review.accounts.where(_isAction)) {
       final group = grouped.putIfAbsent(
         '${change.program}:${change.address}',
         () => {},
       );
-      if (group[change.kind]?.evidence != ReviewEvidence.simulatedState) {
-        group[change.kind] = change;
+      final power = change.power == null ? '' : ':${change.power!.name}';
+      final slot = _batch && change.kind == AccountChangeKind.approve
+          ? '${change.kind.name}:${change.beneficiary}$power'
+          : '${change.kind.name}$power';
+      final previous = group[slot];
+      if (previous == null || _supersedes(change, previous, labels)) {
+        group[slot] = change;
       }
     }
     final result = <BalanceChange>[];
-    for (final group in grouped.values) {
+    for (final slots in grouped.values) {
+      final group = slots.values.toList();
+      List<AccountChange> take(AccountChangeKind kind) {
+        final taken = group.where((a) => a.kind == kind).toList();
+        group.removeWhere((a) => a.kind == kind);
+        return taken;
+      }
+
+      bool has(AccountChangeKind kind) => group.any((a) => a.kind == kind);
+
       void add(String label, AccountChange change) {
         final id =
             change.assetId ??
-            group.values
+            slots.values
                 .map((a) => a.assetId)
                 .whereType<String>()
                 .firstOrNull ??
@@ -652,10 +955,7 @@ class SimulationReviewSheet extends StatelessWidget {
                 .firstOrNull
                 ?.asset
                 .id;
-        final nft =
-            id != null &&
-            (review.nftMetadata.containsKey(id) ||
-                review.nfts.any((n) => n.assetId == id));
+        final nft = id != null && (change.power != null || _isNft(id));
         result.add(
           BalanceChange(
             label: label,
@@ -675,7 +975,13 @@ class SimulationReviewSheet extends StatelessWidget {
                 if (nft &&
                     change.kind == AccountChangeKind.approve &&
                     (change.rawAllowance ?? BigInt.one) > BigInt.zero)
-                  const TextSpan(text: ' can transfer it until revoked'),
+                  TextSpan(
+                    text: switch (change.power) {
+                      NftDelegatePower.burn => ' can burn it until revoked',
+                      NftDelegatePower.freeze => ' can lock it until revoked',
+                      _ => ' can transfer it until revoked',
+                    },
+                  ),
               ],
               if (change.rawAllowance != null && !nft)
                 TextSpan(
@@ -686,18 +992,20 @@ class SimulationReviewSheet extends StatelessWidget {
         );
       }
 
-      if (group.containsKey(AccountChangeKind.approve) &&
-          group.containsKey(AccountChangeKind.freeze)) {
+      if (has(AccountChangeKind.approve) && has(AccountChangeKind.freeze)) {
         // Freezing stops the owner, not the delegate: the label names both.
-        add('Lock and delegate', group.remove(AccountChangeKind.approve)!);
-        group.remove(AccountChangeKind.freeze);
+        for (final approval in take(AccountChangeKind.approve)) {
+          add('Lock and delegate', approval);
+        }
+        take(AccountChangeKind.freeze);
       }
-      if (group.containsKey(AccountChangeKind.thaw) &&
-          group.containsKey(AccountChangeKind.revoke)) {
-        add('Unlock', group.remove(AccountChangeKind.revoke)!);
-        group.remove(AccountChangeKind.thaw);
+      if (has(AccountChangeKind.thaw) && has(AccountChangeKind.revoke)) {
+        for (final revocation in take(AccountChangeKind.revoke)) {
+          add('Unlock', revocation);
+        }
+        take(AccountChangeKind.thaw);
       }
-      for (final change in group.values) {
+      for (final change in group) {
         add(switch (change.kind) {
           AccountChangeKind.approve => 'Delegating',
           AccountChangeKind.revoke => 'Revoking',
@@ -738,6 +1046,12 @@ class SimulationReviewSheet extends StatelessWidget {
         ? units * price
         : null;
     final counterparty = fund.rawAmount.isNegative ? fund.to : fund.from;
+    // A Solana token transfer whose mint is not known is recorded under the
+    // token account it leaves: there is no token to name, only where it is.
+    final unknownMint =
+        _solana &&
+        fund.evidence == ReviewEvidence.requestedInstruction &&
+        fund.asset.id == fund.address;
     return BalanceChange(
       label: fund.rawAmount.isNegative ? 'You send' : 'You receive',
       amount: _amount(amount, fund.asset, review.tokenMetadata),
@@ -752,7 +1066,12 @@ class SimulationReviewSheet extends StatelessWidget {
           : Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                if (!_verified(fund.asset))
+                if (unknownMint)
+                  _detailLine(context, [
+                    const TextSpan(text: 'Unknown token · from account '),
+                    reviewAddressSpan(context, fund.address),
+                  ])
+                else if (!_verified(fund.asset))
                   _detailLine(context, [
                     const TextSpan(text: 'Unverified token · '),
                     reviewAddressSpan(context, fund.asset.id),
@@ -775,7 +1094,12 @@ class SimulationReviewSheet extends StatelessWidget {
     return _ShortRow(
       icon: _glyphTile(context, switch (change.kind) {
         AccountChangeKind.create => ReviewGlyph.plus,
-        AccountChangeKind.close ||
+        // A transfer between two accounts that are not the wallet's is
+        // listed under the same kind; the cross is for an account that
+        // goes away.
+        AccountChangeKind.close
+            when !change.description.startsWith('Transfer of ') =>
+          ReviewGlyph.cross,
         AccountChangeKind.revoke => ReviewGlyph.cross,
         _ => ReviewGlyph.code,
       }),
@@ -786,7 +1110,12 @@ class SimulationReviewSheet extends StatelessWidget {
             TextSpan(text: _evm ? 'Contract ' : 'Account '),
             reviewAddressSpan(context, change.address),
             if (beneficiary != null) ...[
-              const TextSpan(text: ' · to '),
+              // A new account names the program that will own it.
+              TextSpan(
+                text: change.kind == AccountChangeKind.create
+                    ? ' · owned by '
+                    : ' · to ',
+              ),
               reviewAddressSpan(context, beneficiary),
             ],
           ],
@@ -1048,22 +1377,18 @@ Future<void> _launch(Uri url) =>
 /// when it does not, so a name never hides the thing it names. A batch gets one section per
 /// transaction, each with its own calls and link.
 class _ProgramCalls extends StatelessWidget {
-  const _ProgramCalls({required this.review, this.labels, this.openExternal});
+  const _ProgramCalls({
+    required this.review,
+    required this.names,
+    this.openExternal,
+    super.key,
+  });
   final SimulationReview review;
-  final ValueListenable<Map<String, String>>? labels;
+  final Map<String, String> names;
   final Future<void> Function(Uri url)? openExternal;
 
   @override
   Widget build(BuildContext context) {
-    final labels = this.labels;
-    if (labels == null) return _build(context, const {});
-    return ValueListenableBuilder<Map<String, String>>(
-      valueListenable: labels,
-      builder: (context, names, _) => _build(context, names),
-    );
-  }
-
-  Widget _build(BuildContext context, Map<String, String> names) {
     final transactions = review.transactions;
     if (transactions.length > 1) {
       final c = context.mallowColors;
@@ -1285,6 +1610,13 @@ class _WalletRow extends StatelessWidget {
 /// network) and placeholders for the effects and fee. [onApprove] approves
 /// without waiting for the review; without it the footer is a lone Close, as
 /// on a view-only review.
+///
+/// Approving here takes a press-and-hold, and Reject is the primary action.
+/// Nothing has been checked yet, and the website that asks can keep it that
+/// way for as long as it likes by keeping the node busy, so signing unseen
+/// must be a deliberate act and never the tap a finger was already making.
+/// Nobody is made to wait: once the result is in, a clean review is a plain
+/// tap again.
 class SimulationPendingSheet extends StatelessWidget {
   const SimulationPendingSheet({
     required this.origin,
@@ -1339,6 +1671,11 @@ class SimulationPendingSheet extends StatelessWidget {
               onReject: onReject,
               onApprove: approve,
               approveLabel: approveLabel,
+              holdToApprove: true,
+              // Names the action, as the tap button would: holding here
+              // may sign, sign several, or sign and send.
+              holdLabel:
+                  'Hold to ${approveLabel.toLowerCase()} without the review',
             ),
       children: [
         const SizedBox(height: 4),
@@ -1351,7 +1688,7 @@ class SimulationPendingSheet extends StatelessWidget {
           child: ReviewInfoLine(
             approve == null
                 ? 'Simulating this transaction…'
-                : 'Simulating this transaction… You can approve without waiting for the review.',
+                : 'Simulating this transaction… Hold to approve without waiting for the review.',
           ),
         ),
         if (expiry != null &&

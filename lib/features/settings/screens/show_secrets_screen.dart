@@ -13,6 +13,7 @@ import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/widgets/account_avatar.dart';
 import '../../../shared/widgets/app_snack_bar.dart';
 import '../../../shared/widgets/secret_row.dart';
+import '../../../shared/widgets/wallet_type_badge.dart';
 import '../widgets/settings_page_scaffold.dart';
 
 /// "Your secrets" — the settings surface for revealing recovery phrases and
@@ -24,6 +25,14 @@ import '../widgets/settings_page_scaffold.dart';
 ///   the shared word grid (warning → words).
 /// • **Private keys** — one row per imported private-key account. Tapping
 ///   reveals the raw key (warning → key + copy).
+///
+/// Google and Apple wallets appear here too, each with its wallet-type badge.
+/// A social vault wallet holds a recovery phrase and is listed with the
+/// phrases. A wallet from the older sign-in (the one run by Web3Auth, marked
+/// on its badge) holds two raw keys and is listed with the keys, one row per
+/// key: exporting them is how its owner keeps a copy that does not depend on
+/// that sign-in. Either export is the only way back to the wallet if the
+/// Google or Apple account itself is lost.
 ///
 /// Empty sections are omitted entirely.
 ///
@@ -51,6 +60,8 @@ class _ShowSecretsScreenState extends State<ShowSecretsScreen> {
   List<_PhraseEntry> _phrases = const [];
   // Imported private-key accounts.
   List<Account> _keyAccounts = const [];
+  // Raw keys of Google and Apple wallets that have no recovery phrase.
+  List<_SocialKeyEntry> _socialKeys = const [];
 
   @override
   void initState() {
@@ -120,8 +131,104 @@ class _ShowSecretsScreenState extends State<ShowSecretsScreen> {
       );
     }
 
+    // Google and Apple wallets: the recovery phrase of a social vault
+    // wallet, else the two raw keys a wallet from the older sign-in has.
+    final storage = sl<SecureWalletStorage>();
+    final socialKeys = <_SocialKeyEntry>[];
+    for (final account in all.where((a) => a.kind == AccountKind.social)) {
+      final social = account.wallets
+          .where((w) => w.walletType == WalletType.social)
+          .toList();
+      if (social.isEmpty) continue;
+      final provider = social.first.socialProvider == 'apple'
+          ? 'Apple'
+          : 'Google';
+      final vaultId = social
+          .map((w) => w.socialVaultId)
+          .whereType<String>()
+          .firstOrNull;
+      // The phrase lives with the vault, or with the account once its vault
+      // was deleted.
+      final vaultPhrase = vaultId == null
+          ? null
+          : await storage.loadSocialVaultMnemonic(vaultId);
+      final accountPhrase = (vaultPhrase?.isNotEmpty ?? false)
+          ? null
+          : await storage.loadSocialAccountMnemonic(account.id);
+      if (!mounted) return;
+      if ((vaultPhrase?.isNotEmpty ?? false) ||
+          (accountPhrase?.isNotEmpty ?? false)) {
+        phrases.add(
+          _PhraseEntry(
+            label: '${account.name} · $provider',
+            seedPhraseId: null,
+            socialVaultId: (vaultPhrase?.isNotEmpty ?? false) ? vaultId : null,
+            socialAccountId: (vaultPhrase?.isNotEmpty ?? false)
+                ? null
+                : account.id,
+            badge: account.typeBadge,
+            addresses: _dedupe(social.map((w) => w.address).toList()),
+          ),
+        );
+        continue;
+      }
+      WalletInfo? on(String chain) =>
+          social.where((w) => w.chain == chain).firstOrNull;
+      final solana = on('solana');
+      final ethereum = on('ethereum');
+      final tezos = on('tezos');
+      if (solana != null) {
+        socialKeys.add(
+          _SocialKeyEntry(
+            account: account,
+            title: '${account.name} · $provider · Solana',
+            walletId: solana.id,
+            addresses: [solana.address],
+          ),
+        );
+      }
+      // A wallet from the older sign-in has one secp256k1 key behind both
+      // Ethereum and Tezos (Tezos uses it as an Ed25519 seed); a phrase
+      // wallet derives them separately. The stored keys tell which this is.
+      final ethKey = ethereum == null
+          ? null
+          : await storage.loadPrivateKey(ethereum.id);
+      final tezKey = tezos == null
+          ? null
+          : await storage.loadPrivateKey(tezos.id);
+      // Two missing keys are not one shared key.
+      final sharedKey = ethKey != null && ethKey.isNotEmpty && ethKey == tezKey;
+      if (!mounted) return;
+      if (sharedKey) {
+        socialKeys.add(
+          _SocialKeyEntry(
+            account: account,
+            title: '${account.name} · $provider · Ethereum and Tezos',
+            walletId: ethereum!.id,
+            addresses: [ethereum.address, tezos!.address],
+          ),
+        );
+      } else {
+        for (final (wallet, chain) in [
+          (ethereum, 'Ethereum'),
+          (tezos, 'Tezos'),
+        ]) {
+          if (wallet == null) continue;
+          socialKeys.add(
+            _SocialKeyEntry(
+              account: account,
+              title: '${account.name} · $provider · $chain',
+              walletId: wallet.id,
+              addresses: [wallet.address],
+            ),
+          );
+        }
+      }
+    }
+
     setState(() {
       _phrases = phrases;
+      _socialKeys = socialKeys;
       _keyAccounts = all
           .where((a) => a.kind == AccountKind.privateKey)
           .toList();
@@ -145,6 +252,25 @@ class _ShowSecretsScreenState extends State<ShowSecretsScreen> {
 
   Future<void> _revealPhrase(_PhraseEntry entry) async {
     final storage = sl<SecureWalletStorage>();
+    final socialVaultId = entry.socialVaultId;
+    final socialAccountId = entry.socialAccountId;
+    if (socialVaultId != null || socialAccountId != null) {
+      final phrase = socialVaultId != null
+          ? await storage.loadSocialVaultMnemonic(socialVaultId)
+          : await storage.loadSocialAccountMnemonic(socialAccountId!);
+      if (!mounted) return;
+      if (phrase == null || phrase.isEmpty) {
+        AppSnackBar.show(
+          context,
+          'Recovery phrase not found for this account.',
+        );
+        return;
+      }
+      unawaited(
+        context.push(AppRoutes.recoveryPhraseWarning, extra: phrase.split(' ')),
+      );
+      return;
+    }
     var mnemonic = entry.seedPhraseId == null
         ? await storage.loadMnemonic()
         : await storage.loadMnemonicForSeedPhrase(entry.seedPhraseId!);
@@ -183,6 +309,16 @@ class _ShowSecretsScreenState extends State<ShowSecretsScreen> {
     unawaited(context.push(AppRoutes.privateKeyWarning, extra: key));
   }
 
+  Future<void> _revealSocialKey(_SocialKeyEntry entry) async {
+    final key = await sl<SecureWalletStorage>().loadPrivateKey(entry.walletId);
+    if (!mounted) return;
+    if (key == null || key.isEmpty) {
+      AppSnackBar.show(context, 'Private key not found for this account.');
+      return;
+    }
+    unawaited(context.push(AppRoutes.privateKeyWarning, extra: key));
+  }
+
   // ── Build ────────────────────────────────────────────────────────────────
 
   @override
@@ -206,6 +342,7 @@ class _ShowSecretsScreenState extends State<ShowSecretsScreen> {
           SecretRow(
             leading: const SecretGlyphAvatar(),
             title: phrase.label,
+            titleBadge: WalletTypeBadge(phrase.badge, size: 12),
             addresses: phrase.addresses,
             onTap: () => _revealPhrase(phrase),
           ),
@@ -213,9 +350,20 @@ class _ShowSecretsScreenState extends State<ShowSecretsScreen> {
       }
     }
 
-    if (_keyAccounts.isNotEmpty) {
+    if (_keyAccounts.isNotEmpty || _socialKeys.isNotEmpty) {
       if (children.isNotEmpty) children.add(const SizedBox(height: 24));
       children.add(_sectionHeader(context, 'Private keys'));
+      for (final entry in _socialKeys) {
+        children.add(
+          SecretRow(
+            leading: AccountAvatar(seed: entry.account.avatarSeed, size: 24),
+            title: entry.title,
+            titleBadge: WalletTypeBadge(entry.account.typeBadge, size: 12),
+            addresses: entry.addresses,
+            onTap: () => _revealSocialKey(entry),
+          ),
+        );
+      }
       for (final account in _keyAccounts) {
         children.add(
           SecretRow(
@@ -270,9 +418,38 @@ class _PhraseEntry {
     required this.label,
     required this.seedPhraseId,
     required this.addresses,
+    this.socialVaultId,
+    this.socialAccountId,
+    this.badge,
   });
 
   final String label;
+
+  /// The wallet-type badge of a Google or Apple wallet's phrase; null for a
+  /// seed phrase, which can back several accounts.
+  final WalletBadge? badge;
   final String? seedPhraseId;
+  final List<String> addresses;
+
+  /// Set for a Google or Apple wallet's phrase, which is stored per vault.
+  final String? socialVaultId;
+
+  /// Set instead for a Google or Apple wallet whose vault was deleted: its
+  /// phrase is then stored per account.
+  final String? socialAccountId;
+}
+
+/// One raw key of a Google or Apple wallet that has no recovery phrase.
+class _SocialKeyEntry {
+  const _SocialKeyEntry({
+    required this.account,
+    required this.title,
+    required this.walletId,
+    required this.addresses,
+  });
+
+  final Account account;
+  final String title;
+  final String walletId;
   final List<String> addresses;
 }

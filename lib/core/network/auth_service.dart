@@ -21,6 +21,16 @@ import '../../shared/utils/chain.dart';
 
 const _tag = 'AuthService';
 
+/// Dio request `extra` key: set it to `true` on a request that must never
+/// re-sign on a 401 "Signature required" / "Signature expired".
+///
+/// For background reads — a fetch the user did not ask for, such as the block
+/// list a profile view loads. The re-sign on a hardware wallet opens the verify
+/// sheet, so a background read without this would ask for a signature every
+/// time it ran. The 401 reaches the caller instead. The "Please log in" refresh
+/// still runs, because it prompts nobody.
+const String kSkipSignatureRetryExtra = 'skipSignatureRetry';
+
 /// Session state for UI binding.
 enum SessionState {
   /// Not yet initialized
@@ -41,14 +51,19 @@ enum SessionState {
 /// Handles wallet-based authentication and session management.
 /// Extends ChangeNotifier to allow UI to react to session state changes.
 ///
-/// The `/v0/login` endpoint is called:
+/// A session is started with `POST /v2/session` and the user read from
+/// `GET /v0/currentUser`:
 /// - On every app startup (after unlock)
 /// - After onboarding completion (before showing home)
 /// - When switching wallets (multi-wallet support)
 ///
-/// The login token is stored and sent with subsequent API requests,
-/// but login is still called every time to ensure fresh data and
-/// trigger backend indexing jobs.
+/// `/v2/session` is not a login and proves nothing: it sets the `login-token`
+/// cookie for an address and returns only `{address, expiresAt}`. The user
+/// comes from `/v0/currentUser`, privileged (with following, likes and gumball
+/// invites) only when the request carries a valid `wallet-sig` for the address;
+/// otherwise it is the public render and those fields are empty — the
+/// anonymous view, never a signature prompt just to fill them. The session is
+/// started every time to ensure fresh data and trigger backend indexing jobs.
 @lazySingleton
 class AuthService extends ChangeNotifier {
   AuthService(this._api, this._walletManager, this._storage, this._dio) {
@@ -69,8 +84,58 @@ class AuthService extends ChangeNotifier {
   /// in-flight or queued silently logs the user straight back in.
   int _sessionGeneration = 0;
 
-  // Wallet-sig cookie cache (address → JWT), used for dual-sig auth flows
+  /// Bumped every time the session is cleared, which is what a wallet switch
+  /// and a logout both start with. A login captures it when it starts and
+  /// stops the moment it differs: a login is two requests with state assigned
+  /// after the second, so one that was overtaken (a resume refresh for the
+  /// previous wallet, still on the wire when the user switched) would
+  /// otherwise finish last and put its own address and login token over the
+  /// newer session's.
+  int _loginGeneration = 0;
+
+  /// The `wallet-sig` proofs the auth interceptor sends on every API request
+  /// (cookie address → JWT), least recently used first.
+  ///
+  /// 🛑 Bounded, by [maxSharedWalletProofs] and [maxSharedWalletProofBytes],
+  /// because the whole map is one `Cookie` header and servers refuse a header
+  /// that grows too large: unbounded, a device with a few dozen wallets fails
+  /// every request it makes. Write it only through [_rememberWalletSig], which
+  /// keeps the bound. What it holds, in order of claim:
+  ///
+  /// 1. the logged-in wallet's proof, and the link flow's — always;
+  /// 2. proofs a caller asked for or signed this run, most recent first;
+  /// 3. the rest of the session's wallets, in the session's own order, while
+  ///    there is room ([_hydrateSessionWalletSigs]).
+  ///
+  /// A proof left out is still on disk: [hasValidWalletSigForAny] brings it
+  /// back, at the cost of the least recently used one.
   final Map<String, String> _walletSigCookies = {};
+
+  /// How many proofs the shared cookies carry at most. With the byte cap below
+  /// this leaves room in the header for the login token and for the
+  /// proofs a single request adds for itself (a push sync carries eight).
+  @visibleForTesting
+  static const maxSharedWalletProofs = 8;
+
+  /// The most bytes of `Cookie` header the shared proofs may take, names and
+  /// separators included. A proof is about 300 bytes; this holds if they grow.
+  @visibleForTesting
+  static const maxSharedWalletProofBytes = 3072;
+
+  final ValueNotifier<int> _walletSigRevision = ValueNotifier(0);
+
+  /// Fires each time the auth interceptor is rebuilt, which is when the set
+  /// of `wallet-sig` cookies the next request carries may have changed: a
+  /// fresh signature, a proof pulled in from disk, or a new login token.
+  ///
+  /// A background read that waits for a proof listens to this, then asks
+  /// [canSendBackgroundSignedRead] again. The event does not say a proof
+  /// exists.
+  Listenable get walletSigChanges => _walletSigRevision;
+
+  /// Set while [loginForLinkFlow] has the login token of an address other than
+  /// [currentAddress] installed. A read sent then would run as that profile.
+  String? _linkFlowAddress;
 
   // Session state
   SessionState _sessionState = SessionState.initial;
@@ -162,28 +227,139 @@ class AuthService extends ChangeNotifier {
     return false;
   }
 
+  /// Whether a signed read the user did not ask for (the block list behind a
+  /// profile view, the drawer's unread badge) may go out now without any
+  /// chance of a signature prompt.
+  ///
+  /// True only when there is a logged-in address, it holds a valid
+  /// `wallet-sig` (memory or disk, see [hasValidWalletSigForAny]), and the
+  /// installed login token is that address's own — not the one
+  /// [loginForLinkFlow] swaps in for the profile being linked into. Such a read
+  /// also sends [kSkipSignatureRetryExtra], so a proof the server no longer
+  /// accepts is a quiet 401 rather than a prompt.
+  Future<bool> canSendBackgroundSignedRead() async {
+    final address = _currentAddress;
+    if (address == null || _linkFlowAddress != null) return false;
+    final valid = await hasValidWalletSigForAny([address]);
+    // Re-read after the await: a switch or a link flow may have started.
+    return valid && _currentAddress == address && _linkFlowAddress == null;
+  }
+
   /// Look up a single [address]'s `wallet-sig` in the in-memory cache, then on
   /// disk, hydrating a valid disk-only hit into [_walletSigCookies] WITHOUT
   /// refreshing the interceptor. Returns whether a valid sig was found and
   /// whether a disk value was hydrated — so the caller can refresh the
   /// interceptor once (rather than once per hit) after the lookups complete.
   ///
-  /// Future.wait-safe: touches only this address's distinct cookie key.
+  /// Either hit counts as a use: the proof becomes the most recently used one,
+  /// and a hydrated one may push the least recently used out
+  /// ([_rememberWalletSig]).
   Future<({bool valid, bool hydrated})> _lookupWalletSig(String address) async {
     if (address.isEmpty) return (valid: false, hydrated: false);
     final cookieAddress = _cookieAddress(address);
 
     final inMemory = _walletSigCookies[cookieAddress];
     if (inMemory != null && inMemory.isNotEmpty && !_isJwtExpired(inMemory)) {
+      _rememberWalletSig(cookieAddress, inMemory);
       return (valid: true, hydrated: false);
     }
 
     final disk = await _storage.loadWalletSigCookie(cookieAddress);
     if (disk != null && disk.isNotEmpty && !_isJwtExpired(disk)) {
-      _walletSigCookies[cookieAddress] = disk;
+      _rememberWalletSig(cookieAddress, disk);
       return (valid: true, hydrated: true);
     }
     return (valid: false, hydrated: false);
+  }
+
+  /// Put [jwt] in the shared cookies as [cookieAddress]'s proof and the most
+  /// recently used one, then drop the least recently used proofs that no
+  /// longer fit. Never drops the one just added, the logged-in wallet's, or
+  /// the link flow's.
+  void _rememberWalletSig(String cookieAddress, String jwt) {
+    _walletSigCookies.remove(cookieAddress);
+    _walletSigCookies[cookieAddress] = jwt;
+
+    final pinned = {
+      cookieAddress,
+      if (_currentAddress case final active?) _cookieAddress(active),
+      if (_linkFlowAddress case final linked?) _cookieAddress(linked),
+    };
+    for (final candidate in _walletSigCookies.keys.toList()) {
+      if (_sharedWalletSigsFit(_walletSigCookies)) break;
+      if (!pinned.contains(candidate)) _walletSigCookies.remove(candidate);
+    }
+  }
+
+  /// Whether [proofs] is within both caps on the shared cookies.
+  static bool _sharedWalletSigsFit(Map<String, String> proofs) {
+    if (proofs.length > maxSharedWalletProofs) return false;
+    var bytes = 0;
+    for (final MapEntry(key: address, value: jwt) in proofs.entries) {
+      bytes += _walletSigCookie(address, jwt).length + 2; // "; "
+    }
+    return bytes <= maxSharedWalletProofBytes;
+  }
+
+  /// One proof as it is written in a `Cookie` header.
+  static String _walletSigCookie(String cookieAddress, String jwt) =>
+      'wallet-sig-$cookieAddress=$jwt';
+
+  /// [address]'s `wallet-sig` proof from disk as a `Cookie` header fragment, for
+  /// one request that needs it, or null when it has none.
+  ///
+  /// Read-only. 🛑 This must not put the proof in [_walletSigCookies]: the
+  /// interceptor sends that map on every API request, and it has room for a
+  /// few proofs only. One for every wallet on a device with many of them would
+  /// push out the proofs the session's own reads need.
+  Future<String?> storedWalletProofCookie(String address) async {
+    final cookieAddress = _cookieAddress(address);
+    final jwt = await _storage.loadWalletSigCookie(cookieAddress);
+    if (jwt == null || jwt.isEmpty || _isJwtExpired(jwt)) return null;
+    return _walletSigCookie(cookieAddress, jwt);
+  }
+
+  /// Sign for [address]'s proof without prompting and return it as
+  /// [storedWalletProofCookie] does. Kept out of [_walletSigCookies] too, unless
+  /// [address] is the logged-in wallet.
+  ///
+  /// Null when the wallet cannot sign without the user: a hardware wallet, or a
+  /// social wallet whose key needs an interactive re-login. Throws when the
+  /// handshake fails.
+  Future<String?> signWalletProofCookie(String address) async {
+    if (await _walletManager.isHardwareWallet(address) ||
+        await _walletManager.needsSocialKeyRecovery(address)) {
+      return null;
+    }
+    // The logged-in wallet's proof belongs in the shared cookies: the session's
+    // own reads need it, and one wallet cannot outgrow the header limit.
+    final active = _currentAddress;
+    final jwt = await _signAndCacheWalletSig(
+      address,
+      keepInSharedCookies:
+          active != null && _cookieAddress(active) == _cookieAddress(address),
+    );
+    return jwt == null ? null : _walletSigCookie(_cookieAddress(address), jwt);
+  }
+
+  /// Delete [address]'s stored proof after the backend refused it, so the next
+  /// sign makes a fresh one. Its local expiry says nothing about a proof the
+  /// backend no longer accepts for reasons of its own.
+  ///
+  /// Only if it is still the one [sentCookie] carried: a re-sign that finished
+  /// while the request was out has stored a good proof, which on a hardware
+  /// wallet took an approval.
+  Future<void> discardWalletProof(String address, String sentCookie) async {
+    final cookieAddress = _cookieAddress(address);
+    final stored = await _storage.loadWalletSigCookie(cookieAddress);
+    if (stored == null ||
+        _walletSigCookie(cookieAddress, stored) != sentCookie) {
+      return;
+    }
+    await _storage.deleteWalletSigCookie(cookieAddress);
+    if (_walletSigCookies.remove(cookieAddress) != null) {
+      _refreshAuthInterceptor();
+    }
   }
 
   /// True when any of [addresses] currently holds a non-expired `wallet-sig`
@@ -226,7 +402,30 @@ class AuthService extends ChangeNotifier {
     AppLogger.debug(_tag, 'initializeSession called');
     final address = await _walletManager.getAddress();
     AppLogger.debug(_tag, 'Got address: $address');
-    return _loginWithAddress(address);
+    return _loginOrJoinNewer(address);
+  }
+
+  /// [_loginWithAddress] for a caller that wants a session, not this one
+  /// login: the startup login and the resume refresh.
+  ///
+  /// If a wallet switch overtakes the login, the session it asked for exists
+  /// all the same — the switch's. So the caller gets that login's result
+  /// rather than an error for a session that is, in fact, up: the startup
+  /// screen would otherwise offer "retry" over a logged-in app. Overtaken by a
+  /// logout there is no session to hand over, and the error stands.
+  ///
+  /// Not for [switchWallet]'s own login: a switch that was overtaken must
+  /// fail, not adopt a later one's session and then tear it down.
+  Future<LoginResult> _loginOrJoinNewer(String address) async {
+    try {
+      return await _loginWithAddress(address);
+    } on _SupersededLogin {
+      final switching = _pendingSwitchCompleter;
+      if (switching != null && !switching.isCompleted) return switching.future;
+      final current = _lastLoginResult;
+      if (hasSession && current != null) return current;
+      rethrow;
+    }
   }
 
   /// Switch to a different wallet address and re-login.
@@ -282,6 +481,7 @@ class AuthService extends ChangeNotifier {
         throw AuthException('Wallet switch abandoned — session was ended');
       }
       await _clearSession();
+      _pruneWalletSigsToSession(newAddress);
       final result = await _loginWithAddress(newAddress);
       // ...and a logout that lands *during* the login must win too, or the
       // completed login re-populates the session it just tore down.
@@ -315,11 +515,30 @@ class AuthService extends ChangeNotifier {
   ///
   /// Re-calls login to get fresh data. Use after returning from
   /// background or when session might be stale.
+  ///
+  /// 🛑 A no-op while [loginForLinkFlow] has another profile's login token
+  /// installed. The link flow signs on hardware (a Seed Vault approval
+  /// backgrounds the app), so the resume refresh lands in the middle of it,
+  /// and re-logging the active wallet in there would put ITS token on
+  /// `approveLinkRequestV2`, linking the new wallet to the wrong profile. The
+  /// flow's own restore call puts the active wallet's token back.
+  ///
+  /// While a wallet switch is in flight or queued this returns that switch's
+  /// login instead of starting one: the switch is already fetching fresh data,
+  /// and a second login beside it could be for a different address (the
+  /// session is cleared mid-switch, so this would fall back to whatever wallet
+  /// is selected) and finish after it. A refresh that started BEFORE the
+  /// switch is stopped by [_loginGeneration], and answers with the switch's
+  /// login too ([_loginOrJoinNewer]).
   Future<LoginResult> refresh() async {
+    final last = _lastLoginResult;
+    if (_linkFlowAddress != null && last != null) return last;
+    final switching = _pendingSwitchCompleter;
+    if (switching != null && !switching.isCompleted) return switching.future;
     if (_currentAddress == null) {
       return initializeSession();
     }
-    return _loginWithAddress(_currentAddress!);
+    return _loginOrJoinNewer(_currentAddress!);
   }
 
   /// Logout - clear cached user and session.
@@ -342,8 +561,9 @@ class AuthService extends ChangeNotifier {
     await _clearSession();
     // The per-address ownership proofs go with the session. Not inside
     // _clearSession: the wallet-switch path clears the session too, and there
-    // the map must survive — multi-wallet reads legitimately widen across the
-    // sigs of every wallet the user holds.
+    // the proofs of the session being switched to must survive — multi-wallet
+    // reads legitimately widen across its wallets
+    // ([_pruneWalletSigsToSession]).
     _walletSigCookies.clear();
     notifyListeners();
   }
@@ -393,14 +613,56 @@ class AuthService extends ChangeNotifier {
   /// data, or notify listeners. Used by the wallet link flow to ensure the
   /// login-token identifies the target profile without side effects.
   Future<void> loginForLinkFlow(String address) async {
-    final response = await _dio.post<Map<String, dynamic>>(
-      '${Config.apiBaseUrl}/v0/login',
-      data: {'address': address},
-    );
+    final response = await _postSession(address);
+    // A swap is flagged before the token goes in: installing it notifies
+    // [walletSigChanges], and a background read must not run as the profile
+    // being linked into. The flow's second call, back to the active address,
+    // clears the flag only once that address's own token is installed — until
+    // then the swapped one is still what requests carry.
+    final active = _currentAddress;
+    final ownToken =
+        active != null && _cookieAddress(active) == _cookieAddress(address);
+    if (!ownToken) _linkFlowAddress = address;
     await _extractAndStoreLoginToken(response.headers);
+    if (ownToken) _endLinkFlowToken();
     // Also run signature verification for this address so the wallet-sig
     // cookie is fresh for the subsequent approveLinkRequestV2 call.
     await _verifySignatureIfPossible(address);
+  }
+
+  /// True while [loginForLinkFlow] has another profile's login token
+  /// installed.
+  bool get linkFlowActive => _linkFlowAddress != null;
+
+  /// Whether the installed login token is [address]'s: the profile
+  /// [loginForLinkFlow] swapped in, or else the logged-in address's own. The
+  /// link flow checks it before `approveLinkRequestV2`, which acts on whoever
+  /// the login token names — a wallet switch mid-flow would make that someone
+  /// else.
+  bool loginTokenIsFor(String address) {
+    final installed = _linkFlowAddress ?? _currentAddress;
+    return installed != null &&
+        _cookieAddress(installed) == _cookieAddress(address);
+  }
+
+  /// Drops the login token [loginForLinkFlow] swapped in, when the flow could
+  /// not put the active wallet's back (its `/v2/session` failed, or there is no
+  /// logged-in address to restore). Left in place, the flag would keep the
+  /// resume refresh and the background reads off and send every "Please log
+  /// in" retry to the linked profile until a switch or logout.
+  ///
+  /// Like a logout of that profile only: the session, the user and every
+  /// `wallet-sig` proof stay. With no login token the next request answers
+  /// "Please log in", and the ordinary retry logs the active wallet in.
+  Future<void> abandonLinkFlowToken() async {
+    if (_linkFlowAddress == null) return;
+    _dio.interceptors.removeWhere((i) => i is _AuthInterceptor);
+    try {
+      await _storage.deleteLoginToken();
+    } catch (e) {
+      AppLogger.warn(_tag, 'dropping the link-flow login token failed: $e');
+    }
+    _endLinkFlowToken();
   }
 
   /// Request an auth token, sign it with [walletId], and verify with the
@@ -431,7 +693,7 @@ class AuthService extends ChangeNotifier {
         await _storage.deleteWalletSigCookie(cookieAddress);
         _walletSigCookies.remove(cookieAddress);
       } else {
-        _walletSigCookies[cookieAddress] = cached;
+        _rememberWalletSig(cookieAddress, cached);
         _refreshAuthInterceptor();
         AppLogger.debug(_tag, 'Wallet-sig already cached for $cookieAddress');
         return;
@@ -493,12 +755,15 @@ class AuthService extends ChangeNotifier {
     final jwt = _extractWalletSigCookie(response.headers, cookieAddress);
     if (jwt != null) {
       await _storage.storeWalletSigCookie(cookieAddress, jwt);
-      _walletSigCookies[cookieAddress] = jwt;
+      _rememberWalletSig(cookieAddress, jwt);
       _refreshAuthInterceptor();
       AppLogger.debug(_tag, 'Wallet-sig JWT cached for $cookieAddress');
     }
 
     await _adoptPrivilegedUser(response.data, cookieAddress);
+    // Not awaited: this runs inside the 401 re-sign, and the original
+    // request's replay must not wait on a second read.
+    unawaited(_reloadPersonalData(cookieAddress));
   }
 
   /// Legacy Ethereum and Tezos challenge prefix.
@@ -555,9 +820,10 @@ class AuthService extends ChangeNotifier {
     final jwt = _extractWalletSigCookie(headers, address);
     if (jwt != null) {
       await _storage.storeWalletSigCookie(address, jwt);
-      _walletSigCookies[address] = jwt;
+      _rememberWalletSig(address, jwt);
       _refreshAuthInterceptor();
       AppLogger.debug(_tag, 'Wallet-sig JWT cached for $address (Ledger)');
+      unawaited(_reloadPersonalData(address));
     }
 
     // Store session expiry if present — not available from headers alone,
@@ -568,46 +834,82 @@ class AuthService extends ChangeNotifier {
   // Private Methods
   // ---------------------------------------------------------------------------
 
-  /// POST the `/v0/login` request for [address] — the active signing wallet,
-  /// the one that produces the `wallet-sig` and acts on its behalf across the
-  /// backend.
+  /// `POST /v2/session` for [address] — the active signing wallet, the one
+  /// that produces the `wallet-sig` and acts on its behalf across the backend.
   ///
-  /// The backend renders the user privileged only when the request already
-  /// carries a valid `wallet-sig` cookie for [address] (see
-  /// [_primeWalletSigCookie]). The [_AuthInterceptor] that normally attaches it
-  /// is installed from a login's own Set-Cookie and removed again by
-  /// [_clearSession], so on a cold start — and on every [switchWallet] — there
-  /// is no interceptor to send a primed sig. Attach it here in exactly that
-  /// case; when the interceptor IS installed it already sends the same map, and
-  /// adding the pair again would only duplicate it.
-  Future<Response<Map<String, dynamic>>> _postLogin(String address) {
-    final cookieAddress = _cookieAddress(address);
-    final sig = _dio.interceptors.whereType<_AuthInterceptor>().isEmpty
-        ? _walletSigCookies[cookieAddress]
-        : null;
-    return _dio.post<Map<String, dynamic>>(
-      '${Config.apiBaseUrl}/v0/login',
-      data: {'address': address},
-      options: sig == null
-          ? null
-          : Options(headers: {'Cookie': 'wallet-sig-$cookieAddress=$sig'}),
+  /// Sets the `login-token` cookie (scraped by [_extractAndStoreLoginToken])
+  /// and answers `{result: {address, expiresAt}}`, nothing else. Raw Dio, not
+  /// a retrofit client, because the token is read off `Set-Cookie`.
+  Future<Response<Map<String, dynamic>>> _postSession(String address) =>
+      _dio.post<Map<String, dynamic>>(
+        '${Config.apiV2BaseUrl}/session',
+        data: {'address': address},
+      );
+
+  /// `GET /v0/currentUser` — the user behind the installed login token, and
+  /// its `result` map.
+  ///
+  /// Privileged (the private user fields, plus `following`,
+  /// `likesByContentType`, `subscriptions` and `invitedGumballCount`) only when
+  /// the request carries a valid `wallet-sig` for the address, which the auth
+  /// interceptor attaches from [_walletSigCookies] (see
+  /// [_primeWalletSigCookie]); the public render otherwise.
+  Future<Map<String, dynamic>> _getCurrentUser() async {
+    final response = await _dio.get<Map<String, dynamic>>(
+      '${Config.apiBaseUrl}/v0/currentUser',
     );
+    final result = response.data?['result'];
+    if (result is! Map<String, dynamic> || result['user'] is! Map) {
+      throw AuthException('Invalid currentUser response');
+    }
+    return result;
+  }
+
+  /// After a proof was obtained for the active wallet, re-read the signed
+  /// `/v0/currentUser` for the personal fields — `following`, likes, gumball
+  /// invites — which the session start left empty when it had no proof yet.
+  /// Best-effort and fire-and-forget at every call site (it logs its own
+  /// failure): the user and details were already adopted, and a re-sign's
+  /// replay of the original request must not wait on it.
+  Future<void> _reloadPersonalData(String cookieAddress) async {
+    final address = _currentAddress;
+    if (address == null || _cookieAddress(address) != cookieAddress) return;
+    // Mid link flow the installed token is the linked profile's: the read
+    // would answer for that account.
+    if (_linkFlowAddress != null) return;
+    try {
+      final result = await _getCurrentUser();
+      if (_currentAddress != address) return;
+      if (!_isPrivilegedUserJson(result['user'] as Map<String, dynamic>?)) {
+        return;
+      }
+      final signed = LoginResult.fromJson(result);
+      final last = _lastLoginResult;
+      _lastLoginResult = (last ?? signed).copyWith(
+        following: signed.following,
+        likesByContentType: signed.likesByContentType,
+        invitedGumballCount: signed.invitedGumballCount,
+      );
+      notifyListeners();
+    } catch (e) {
+      AppLogger.warn(_tag, 'personal data reload failed: $e');
+    }
   }
 
   /// Pull [address]'s valid on-disk `wallet-sig` into the in-memory cookie cache
-  /// BEFORE the `/v0/login` POST, so the login itself is signed.
+  /// BEFORE the session starts, so the interceptor the session installs sends
+  /// it and the `/v0/currentUser` read that follows is the signed render.
   ///
-  /// `/v0/login` renders the user privileged only when the request already
-  /// carries that sig. Historically a returning launch never did: the POST went
-  /// out first, and the signature handshake that follows it short-circuits on
+  /// `/v0/currentUser` renders the user privileged only when the request
+  /// carries that sig. Historically a returning launch never did: the request
+  /// went out first, and the signature handshake that follows it short-circuits on
   /// exactly this cached sig ([_verifySignatureIfPossible]) — so
   /// `/v0/authToken/verify` never ran and nothing ever upgraded the public
   /// render. `currentUser.perks` then stayed empty for the whole session and an
   /// owned perk read as unowned. Priming costs one disk read and no extra round
   /// trip, and it covers the wallets that skip the handshake entirely —
   /// hardware wallets, and a social row whose key needs an interactive
-  /// re-login — for which the login response is the only route to a privileged
-  /// render.
+  /// re-login — for which this read is the only route to a privileged render.
   ///
   /// Best-effort: a storage failure must not break login.
   Future<void> _primeWalletSigCookie(String address) async {
@@ -631,7 +933,22 @@ class AuthService extends ChangeNotifier {
       (userJson.containsKey('showNsfw') ||
           userJson.containsKey('disabledChains'));
 
+  /// Log [address] in: start the session, read its user, and only then assign
+  /// the session state.
+  ///
+  /// 🛑 Every step after an `await` is behind `ensureCurrent()`. A login that
+  /// was overtaken by a wallet switch or a logout ([_loginGeneration]) must
+  /// install no login token, assign no address or user, and report no state —
+  /// not even `error`, which would land on top of the newer session. However
+  /// it ends, it ends with a [_SupersededLogin] and leaves everything as the
+  /// newer one set it.
   Future<LoginResult> _loginWithAddress(String address) async {
+    final generation = _loginGeneration;
+    bool isCurrent() => generation == _loginGeneration;
+    void ensureCurrent() {
+      if (!isCurrent()) throw _SupersededLogin();
+    }
+
     _sessionState = SessionState.loading;
     notifyListeners();
 
@@ -639,39 +956,43 @@ class AuthService extends ChangeNotifier {
       // Sign the login request with a sig we already hold, so the response is
       // the privileged render rather than one nothing later upgrades.
       await _primeWalletSigCookie(address);
+      ensureCurrent();
 
-      // Use raw Dio to access response headers for cookie extraction.
-      final response = await _postLogin(address);
+      // Raw Dio, for the Set-Cookie header.
+      final response = await _postSession(address);
+      ensureCurrent();
 
-      AppLogger.debug(_tag, 'Response received, extracting token...');
-      // Extract login token from Set-Cookie header
-      await _extractAndStoreLoginToken(response.headers);
+      AppLogger.debug(_tag, 'Session started, extracting token...');
+      await _extractAndStoreLoginToken(response.headers, isCurrent: isCurrent);
+      ensureCurrent();
 
-      AppLogger.debug(_tag, 'Parsing response body...');
-      // Parse response body
       final data = response.data;
       if (data == null) {
-        throw AuthException('Empty response from login');
+        throw AuthException('Empty response from session');
       }
-
-      // Check for API error
-      final err = data['err'];
+      // The legacy `{err}` envelope on a 200; the Rust route answers errors
+      // with a status and `{error}`, which Dio throws (handled below).
+      final err = data['err'] ?? data['error'];
       if (err != null) {
-        final message = err['message'] as String? ?? 'Login failed';
+        final message =
+            (err is Map ? err['message'] as String? : null) ?? 'Login failed';
         _sessionState = SessionState.error;
         notifyListeners();
         throw AuthException(message);
       }
-
-      // Parse result
-      final resultData = data['result'] as Map<String, dynamic>?;
-      if (resultData == null) {
-        throw AuthException('Invalid login response');
+      final session = data['result'] as Map<String, dynamic>?;
+      if (session == null) {
+        throw AuthException('Invalid session response');
       }
 
-      AppLogger.debug(_tag, 'Parsing LoginResult from: $resultData');
-      final result = LoginResult.fromJson(resultData);
-      AppLogger.debug(_tag, 'LoginResult parsed successfully');
+      // The user, from the route that renders it privileged only for a caller
+      // holding this address's proof (primed above).
+      final resultData = await _getCurrentUser();
+      ensureCurrent();
+      final result = LoginResult.fromJson({
+        ...resultData,
+        'expiresAt': session['expiresAt'],
+      });
 
       // Cache everything
       _currentAddress = address;
@@ -687,15 +1008,18 @@ class AuthService extends ChangeNotifier {
       // seed-import chain filter reflect the profile. See
       // [_hydrateActiveNetworksForProfile].
       await _hydrateActiveNetworksForProfile();
+      ensureCurrent();
 
       // Likewise mirror the profile's server-side NSFW visibility into the
       // device preference the blur overlays read.
       await _hydrateShowNsfwForProfile();
+      ensureCurrent();
 
       // Store session expiry
       if (result.expiresAt != null) {
         AppLogger.debug(_tag, 'Storing session expiry...');
         await _storage.storeSessionExpiry(result.expiresAt!);
+        ensureCurrent();
       }
 
       _sessionState = SessionState.authenticated;
@@ -712,24 +1036,37 @@ class AuthService extends ChangeNotifier {
 
       // Attempt signature-based verification (every wallet that signs silently)
       await _verifySignatureIfPossible(address);
+      ensureCurrent();
 
-      // Cold-start hydration: pull EVERY other session wallet's valid on-disk
-      // sig into the in-memory cookie cache the interceptor sends.
+      // Cold-start hydration: pull the other session wallets' valid on-disk
+      // sigs into the in-memory cookie cache the interceptor sends, as far as
+      // it has room.
       await _hydrateSessionWalletSigs();
+      ensureCurrent();
 
       return result;
+    } on _SupersededLogin {
+      AppLogger.debug(_tag, 'Login superseded by a wallet switch or logout');
+      rethrow;
     } on DioException catch (e, stack) {
+      // The state belongs to whichever login is current: a superseded one
+      // failing late must not mark the newer session as failed, and its
+      // failure is of no interest to anyone.
+      if (!isCurrent()) throw _SupersededLogin();
       AppLogger.warn(_tag, 'DioException during login: $e');
       AppLogger.warn(_tag, 'Stack: $stack');
       _sessionState = SessionState.error;
       notifyListeners();
 
+      final body = e.response?.data;
+      final envelope = body is Map ? (body['error'] ?? body['err']) : null;
       final message =
-          e.response?.data?['err']?['message'] as String? ??
+          (envelope is Map ? envelope['message'] as String? : null) ??
           e.message ??
           'Network error';
       throw AuthException(message);
     } catch (e, stack) {
+      if (!isCurrent()) throw _SupersededLogin();
       AppLogger.warn(_tag, 'login error: $e');
       AppLogger.warn(_tag, 'Stack: $stack');
       _sessionState = SessionState.error;
@@ -798,37 +1135,98 @@ class AuthService extends ChangeNotifier {
     }
   }
 
-  /// Hydrate the in-memory `wallet-sig` cookie cache from disk for every wallet
-  /// in the current session — not just the active one [_verifySignatureIfPossible]
-  /// covers.
+  /// Hydrate the in-memory `wallet-sig` cookie cache from disk for the wallets
+  /// in the current session — not just the active one
+  /// [_verifySignatureIfPossible] covers.
   ///
   /// The Dio interceptor attaches only the in-memory snapshot, so after a cold
-  /// start a non-active session wallet's proof would sit on disk while its
-  /// hidden-state / sig-gated reads go out cookieless. This runs one cheap disk
-  /// pass at login via [_lookupWalletSig] per address so every valid sig is
-  /// hydrated — not just the first. The per-address lookups touch distinct
-  /// cookie keys and are independent, so they run in parallel via [Future.wait],
-  /// and the interceptor is refreshed once at the end (rather than per hit) if
-  /// anything was hydrated.
+  /// start a non-active session wallet's proof would sit on disk while the
+  /// reads that widen across the session's wallets — a profile's private
+  /// curations, hidden artworks — go out without it. This runs one disk pass at
+  /// login: the reads are independent and run in parallel, and the interceptor
+  /// is refreshed once at the end if anything was hydrated.
+  ///
+  /// 🛑 It only fills the room the shared cookies have left
+  /// ([maxSharedWalletProofs]), in the session's own wallet order, and never
+  /// pushes out a proof that is already there: push sync stores a proof for
+  /// every wallet the app holds a key for, so "every proof on disk" can be
+  /// more than one `Cookie` header may carry. A proof that was used this run
+  /// outranks one that was merely found. A wallet left out here still gets its
+  /// proof when a caller asks for it ([hasValidWalletSigForAny]).
   ///
   /// Best-effort: [SessionManager] is looked up lazily via [GetIt] (like the
   /// other login-time hydration helpers) and any failure must not break login.
   Future<void> _hydrateSessionWalletSigs() async {
     try {
       final session = GetIt.instance<SessionManager>();
-      final results = await Future.wait(
-        session.sessionAddresses.map(_lookupWalletSig),
+      final missing = session.sessionAddresses
+          .map(_cookieAddress)
+          .where((a) => a.isNotEmpty && !_walletSigCookies.containsKey(a))
+          .toSet()
+          .toList();
+      final stored = await Future.wait(
+        missing.map(_storage.loadWalletSigCookie),
       );
-      if (results.any((r) => r.hydrated)) {
-        _refreshAuthInterceptor();
+
+      // Taken in the session's order while they fit.
+      final found = <String, String>{};
+      for (final (i, cookieAddress) in missing.indexed) {
+        final jwt = stored[i];
+        if (jwt == null || jwt.isEmpty || _isJwtExpired(jwt)) continue;
+        if (_walletSigCookies.containsKey(cookieAddress)) continue;
+        final withIt = {...found, cookieAddress: jwt, ..._walletSigCookies};
+        if (!_sharedWalletSigsFit(withIt)) break;
+        found[cookieAddress] = jwt;
       }
+      if (found.isEmpty) return;
+
+      // Found, not used: they go in front of the proofs already there, last
+      // one first, because the front is the end an eviction takes from. So a
+      // later use gives up the session's last wallet before its first, and
+      // any of these before a proof a caller asked for.
+      final used = Map.of(_walletSigCookies);
+      _walletSigCookies
+        ..clear()
+        ..addEntries(found.entries.toList().reversed)
+        ..addAll(used);
+      _refreshAuthInterceptor();
     } catch (e) {
       AppLogger.warn(_tag, 'session wallet-sig hydrate failed: $e');
     }
   }
 
+  /// On a wallet or account switch, drop the shared proofs that belong to
+  /// neither [newAddress] nor a wallet of the session being switched to, and
+  /// any that expired.
+  ///
+  /// The proofs widen reads across the wallets of ONE session. Kept across
+  /// switches they pile up for the whole run — every account the user visited
+  /// — and each request to the API then carries proofs for wallets the session
+  /// it is made in has nothing to do with. [SessionManager] already describes
+  /// the new session when the switch reaches here; with none to ask, only the
+  /// wallet being logged in keeps its proof.
+  void _pruneWalletSigsToSession(String newAddress) {
+    final keep = {_cookieAddress(newAddress)};
+    if (GetIt.instance.isRegistered<SessionManager>()) {
+      keep.addAll(
+        GetIt.instance<SessionManager>().sessionAddresses.map(_cookieAddress),
+      );
+    }
+    _walletSigCookies.removeWhere(
+      (address, jwt) => !keep.contains(address) || _isJwtExpired(jwt),
+    );
+  }
+
   /// Extract login token from Set-Cookie response header and store it.
-  Future<void> _extractAndStoreLoginToken(Headers headers) async {
+  ///
+  /// [isCurrent], when given, is asked again after the write: a session cleared
+  /// while the token was being stored has removed the interceptor and deleted
+  /// the token, and installing this one now would put the previous wallet's
+  /// login back on every request.
+  Future<void> _extractAndStoreLoginToken(
+    Headers headers, {
+    bool Function()? isCurrent,
+  }) async {
     final cookies = headers['set-cookie'];
     if (cookies == null) return;
 
@@ -841,6 +1239,7 @@ class AuthService extends ChangeNotifier {
         final token = tokenPart.substring(eqIndex + 1);
         if (token.isNotEmpty) {
           await _storage.storeLoginToken(token);
+          if (isCurrent != null && !isCurrent()) return;
           // Update Dio interceptor with new token
           _setupAuthInterceptor(token);
         }
@@ -859,6 +1258,7 @@ class AuthService extends ChangeNotifier {
         mallowHosts: Config.sessionHosts,
       ),
     );
+    _walletSigRevision.value++;
   }
 
   /// Refresh the auth interceptor with latest wallet-sig cookies.
@@ -876,6 +1276,7 @@ class AuthService extends ChangeNotifier {
           mallowHosts: Config.sessionHosts,
         ),
       );
+      _walletSigRevision.value++;
     }
   }
 
@@ -907,7 +1308,7 @@ class AuthService extends ChangeNotifier {
             await _storage.deleteWalletSigCookie(cookieAddress);
             _walletSigCookies.remove(cookieAddress);
           } else {
-            _walletSigCookies[cookieAddress] = cached;
+            _rememberWalletSig(cookieAddress, cached);
             _refreshAuthInterceptor();
             AppLogger.debug(
               _tag,
@@ -939,17 +1340,17 @@ class AuthService extends ChangeNotifier {
 
       // A social wallet signs locally and silently from the key stored on this
       // device, so it falls through and signs like any imported-key wallet.
-      // Only the restore case defers: a social row whose key is missing (wiped
-      // keystore, restored DB, or a pre-migration row whose key never existed
-      // here) sends every signing entry point into an interactive Web3Auth
-      // re-login ([SocialAuthService.recoverKeysForAccount]).
+      // Only the restore case defers: a social row whose key is missing (a
+      // wiped keystore, or a restored DB) sends every signing entry point
+      // into a key recovery ([SocialAuthService.recoverKeysForAccount]),
+      // which can show a sign-in sheet or a passkey prompt.
       //
       // 🛑 Every caller of this method signs unprompted — the post-login
       // warm-up, [verifySessionWallet], [loginForLinkFlow], and the 401 retry
       // interceptor ([_handleSignatureRetry]) — so it must NEVER go
       // interactive. Hence the
       // presence probe before the sign, not a try/catch around it: the catch
-      // would run only after the OAuth tab had already opened. The deferred
+      // would run only after the sign-in sheet had already opened. The deferred
       // case is repaired by [signAndVerifyForWallet], which runs from a user
       // action where a login prompt is expected.
       if (await _walletManager.needsSocialKeyRecovery(address)) {
@@ -988,7 +1389,14 @@ class AuthService extends ChangeNotifier {
   ///
   /// Throws on failure (including [ViewOnlyWalletException] from the signer);
   /// [_verifySignatureIfPossible] is what makes a background attempt non-fatal.
-  Future<void> _signAndCacheWalletSig(String address) async {
+  ///
+  /// With [keepInSharedCookies] false the proof goes to disk only, so it does not
+  /// join the cookies sent on every request ([signWalletProofCookie]). Returns
+  /// the proof, or null when the response set none.
+  Future<String?> _signAndCacheWalletSig(
+    String address, {
+    bool keepInSharedCookies = true,
+  }) async {
     final cookieAddress = _cookieAddress(address);
     final isSolana = Chain.fromAddress(address) == Chain.solana;
 
@@ -1026,8 +1434,10 @@ class AuthService extends ChangeNotifier {
     final jwt = _extractWalletSigCookie(response.headers, cookieAddress);
     if (jwt != null) {
       await _storage.storeWalletSigCookie(cookieAddress, jwt);
-      _walletSigCookies[cookieAddress] = jwt;
-      _refreshAuthInterceptor();
+      if (keepInSharedCookies) {
+        _rememberWalletSig(cookieAddress, jwt);
+        _refreshAuthInterceptor();
+      }
       AppLogger.debug(_tag, 'Wallet-sig JWT cached for $cookieAddress');
     }
 
@@ -1039,14 +1449,19 @@ class AuthService extends ChangeNotifier {
     }
 
     await _adoptPrivilegedUser(response.data, cookieAddress);
+    // Not awaited: this runs inside the 401 re-sign, and the original
+    // request's replay must not wait on a second read.
+    unawaited(_reloadPersonalData(cookieAddress));
+    return jwt;
   }
 
   /// Replace the cached user with the privileged render `/v0/authToken/verify`
   /// returns for [cookieAddress], if it carries one.
   ///
-  /// `/v0/login` withholds the private fields — `perks`, the full `roles`,
-  /// `showNsfw`, `disabledChains` — unless the request already carries a valid
-  /// `wallet-sig` cookie for the address. [_primeWalletSigCookie] supplies one
+  /// `/v0/currentUser` withholds the private fields — `perks`, the full
+  /// `roles`, `showNsfw`, `disabledChains`, and the following/likes/invites —
+  /// unless the request already carries a valid `wallet-sig` cookie for the
+  /// address. [_primeWalletSigCookie] supplies one
   /// whenever a valid sig is already on disk, but the first login for a wallet
   /// (and any login after the 30-day sig lapses) has none, so that response is
   /// the public render and a perk the account owns reads as absent. Verify is
@@ -1122,13 +1537,35 @@ class AuthService extends ChangeNotifier {
   /// Unlike [_loginWithAddress], this does not touch [_sessionState], cached
   /// user data, or notify listeners — it only refreshes the login-token cookie
   /// so the failed request can be retried transparently.
+  ///
+  /// The token is dropped if a wallet switch or logout cleared the session
+  /// while the request was out: it is [address]'s, and installing it would put
+  /// that wallet's login on the requests of whoever is logged in now.
   Future<void> _refreshLoginToken(String address) async {
-    final response = await _postLogin(address);
-    await _extractAndStoreLoginToken(response.headers);
+    final generation = _loginGeneration;
+    bool isCurrent() => generation == _loginGeneration;
+    final response = await _postSession(address);
+    if (!isCurrent()) return;
+    await _extractAndStoreLoginToken(response.headers, isCurrent: isCurrent);
+  }
+
+  /// The installed login token is the current address's own again: the link
+  /// flow's restore call. A switch or logout clears the flag in
+  /// [_clearSession]; [refresh] does not run mid-flow, and the "Please log in"
+  /// refresh re-logs the linked profile in, not the active wallet. Lets the
+  /// background reads that waited out the swap run, by notifying
+  /// [walletSigChanges] after the flag is down.
+  void _endLinkFlowToken() {
+    if (_linkFlowAddress == null) return;
+    _linkFlowAddress = null;
+    _walletSigRevision.value++;
   }
 
   Future<void> _clearSession() async {
+    // First, before any await: every login still on the wire is now stale.
+    _loginGeneration++;
     _currentAddress = null;
+    _linkFlowAddress = null;
     _currentUser = null;
     _currentUserDetails = null;
     _currentUserIsPrivileged = false;
@@ -1146,6 +1583,24 @@ class AuthService extends ChangeNotifier {
   }
 }
 
+/// Whether [uri] is a route on the API hosts that is no part of the wallet
+/// session: the social-vault routes, which authenticate by the provider's
+/// identity token or by a vault-key signature and by nothing else.
+///
+/// Such a request gets no session cookies. A vault is opened before any wallet
+/// is logged in and belongs to an identity, not to a wallet; sending the login
+/// token and the `wallet-sig` proofs with it would tell the server which
+/// wallets were logged in on the device that opened which vault, for no
+/// purpose. It is also never retried as a session failure: a `401` from these
+/// routes is about the identity token or the vault signature, and re-signing
+/// a wallet proof (on a hardware wallet, a prompt) cannot mend either.
+///
+/// Matched on the path segment, not a full prefix: the `/v2` base path is
+/// configurable. The build-identifying headers and the API key are other
+/// interceptors' and are unaffected.
+@visibleForTesting
+bool isSessionlessRoute(Uri uri) => uri.pathSegments.contains('social-vault');
+
 /// Dio interceptor that adds the login token and any wallet-sig cookies.
 ///
 /// 🛑 Host-guarded. These cookies are the session itself — `login-token` is the
@@ -1161,6 +1616,12 @@ class AuthService extends ChangeNotifier {
 /// `FIRST_PARTY_HOSTS` and is wider; it carries headers that identify the
 /// build. These cookies identify the *user*, so no build configuration may
 /// widen where they travel.
+///
+/// On those hosts, the routes [isSessionlessRoute] names get none either.
+///
+/// The header this adds is bounded: one login token and at most
+/// [AuthService.maxSharedWalletProofs] proofs, because servers refuse a
+/// header that grows too large (see [AuthService._walletSigCookies]).
 class _AuthInterceptor extends Interceptor {
   _AuthInterceptor(
     this.token,
@@ -1179,13 +1640,14 @@ class _AuthInterceptor extends Interceptor {
 
   @override
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
-    if (!mallowHosts.contains(options.uri.host)) {
+    if (!mallowHosts.contains(options.uri.host) ||
+        isSessionlessRoute(options.uri)) {
       return handler.next(options);
     }
 
     final parts = <String>['login-token=$token'];
     for (final entry in walletSigCookies.entries) {
-      parts.add('wallet-sig-${entry.key}=${entry.value}');
+      parts.add(AuthService._walletSigCookie(entry.key, entry.value));
     }
 
     final existing = options.headers['Cookie'] as String? ?? '';
@@ -1198,7 +1660,7 @@ class _AuthInterceptor extends Interceptor {
 
 /// Dio interceptor that catches 401 responses and automatically retries:
 ///
-/// - **"Please log in"** — login token expired; silently re-calls `/v0/login`
+/// - **"Please log in"** — login token expired; silently re-calls `/v2/session`
 ///   to get a fresh token, then retries the original request.
 /// - **"Signature required" / "Signature expired"** — wallet-sig JWT expired;
 ///   re-signs and verifies, then retries.
@@ -1218,6 +1680,10 @@ class _SignatureRetryInterceptor extends Interceptor {
   void onError(DioException err, ErrorInterceptorHandler handler) async {
     final response = err.response;
     if (response == null || response.statusCode != 401) {
+      return handler.next(err);
+    }
+    // Not a session failure, whatever its message says.
+    if (isSessionlessRoute(err.requestOptions.uri)) {
       return handler.next(err);
     }
 
@@ -1264,7 +1730,11 @@ class _SignatureRetryInterceptor extends Interceptor {
       return handler.next(err);
     }
 
-    final address = _authService._currentAddress;
+    // Mid link flow the installed token is the target profile's, and the
+    // request being retried (`approveLinkRequestV2`) must keep it: logging the
+    // active wallet in instead would link to the wrong profile.
+    final address =
+        _authService._linkFlowAddress ?? _authService._currentAddress;
     if (address == null) {
       return handler.next(err);
     }
@@ -1318,6 +1788,12 @@ class _SignatureRetryInterceptor extends Interceptor {
   ) async {
     // Prevent infinite retry loop
     if (err.requestOptions.extra['_signatureRetry'] == true) {
+      return handler.next(err);
+    }
+
+    // A background read opted out: on a hardware wallet the re-sign below is a
+    // verify sheet the user never asked for (see [kSkipSignatureRetryExtra]).
+    if (err.requestOptions.extra[kSkipSignatureRetryExtra] == true) {
       return handler.next(err);
     }
 
@@ -1449,6 +1925,12 @@ class AuthException implements Exception {
 
   @override
   String toString() => 'AuthException: $message';
+}
+
+/// A login that a wallet switch or logout overtook. Thrown to unwind it without
+/// touching the session state, which belongs to whatever replaced it.
+class _SupersededLogin extends AuthException {
+  _SupersededLogin() : super('Login superseded by a wallet switch or logout');
 }
 
 /// Exception thrown when a 401 "Signature required" cannot be resolved

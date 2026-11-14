@@ -462,7 +462,7 @@ void main() {
     //
     // 6 s is long enough that the skeleton cannot fall between two pumps, and
     // short enough not to matter against the job budget.
-    await MockControl.fault(path: r'/v0/login', delayMs: 6000);
+    await MockControl.fault(path: r'/v2/session', delayMs: 6000);
     await restartApp(tester, wipe: false);
     await unlockApp(tester);
 
@@ -687,7 +687,7 @@ void main() {
     // in" once. The app must coalesce it, re-login under the UI and retry the
     // original request — no logout, no error wall. Asserted on the wire,
     // because a silent refresh is by definition invisible on screen.
-    final loginsBefore = await _countRequests(r'/v0/login');
+    final loginsBefore = await _countRequests(r'/v2/session');
     final readsBefore = await _countRequests(_kArtworkRead);
     // Scoped to the portfolio tab's artwork query rather than all of `/v2/`:
     // it is the one read the tap below provably issues, and issues exactly
@@ -705,7 +705,7 @@ void main() {
     await _tapNavTab(tester, 1);
     await _pumpUntilRequestCount(
       tester,
-      r'/v0/login',
+      r'/v2/session',
       atLeast: loginsBefore + 1,
       label: 'a silent re-login triggered by the 401',
     );
@@ -858,7 +858,7 @@ Future<void> _pumpSeconds(WidgetTester tester, int seconds) async {
 Future<void> _waitOutConfigCooldown(WidgetTester tester) =>
     _pumpSeconds(tester, _kConfigRefreshFloor.inSeconds);
 
-/// Waits for the boot-time `POST /v0/login` to be attempted AND to have
+/// Waits for the boot-time `POST /v2/session` to be attempted AND to have
 /// finished failing.
 ///
 /// The request log is written when a request ARRIVES, so counting it only
@@ -869,7 +869,7 @@ Future<void> _waitOutConfigCooldown(WidgetTester tester) =>
 Future<void> _settleFailedLogin(WidgetTester tester) async {
   await _pumpUntilRequestCount(
     tester,
-    r'/v0/login',
+    r'/v2/session',
     atLeast: 1,
     label: 'the boot login attempt',
   );

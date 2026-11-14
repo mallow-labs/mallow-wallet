@@ -78,6 +78,8 @@ void main() {
     walletType: WalletType.social,
     chain: 'solana',
     accountId: 'acct-3',
+    socialProvider: 'google',
+    socialVaultId: 'vault-1',
   );
   const ledgerWallet = WalletInfo(
     id: 'w-1',
@@ -271,11 +273,13 @@ void main() {
     expect(find.text('home'), findsOneWidget);
   });
 
-  testWidgets('a social wallet is told it can be signed back in, not to back '
-      'up a phrase it never had', (tester) async {
+  testWidgets('a social vault wallet is told it can be signed back in, not to '
+      'back up a phrase it never had', (tester) async {
     when(() => repo.getWalletById('w-1')).thenAnswer((_) async => socialWallet);
 
     await pumpScreen(tester);
+    // A vault wallet is not described as one from the older sign-in.
+    expect(find.textContaining('Web3Auth'), findsNothing);
     await openRemoveSheet(tester);
 
     expect(
@@ -283,6 +287,73 @@ void main() {
       findsOneWidget,
     );
     expect(find.textContaining('backed up your recovery phrase'), findsNothing);
+  });
+
+  testWidgets('a wallet from the older sign-in says what it is, and is not '
+      'told that signing in again brings it back', (tester) async {
+    // Signing in again here makes a new wallet; this one comes back only
+    // through the older sign-in on the website.
+    when(() => repo.getWalletById('w-1')).thenAnswer(
+      (_) async =>
+          socialWallet.copyWith(socialVaultId: null, legacySocial: true),
+    );
+
+    await pumpScreen(tester);
+    expect(
+      find.text(
+        'Older sign-in, run by Web3Auth: your Google account alone can open '
+        'this wallet.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('legacy-sign-in-mark')), findsOneWidget);
+
+    await openRemoveSheet(tester);
+    expect(find.textContaining('You can add it back'), findsNothing);
+    expect(
+      find.textContaining('older sign-in on the mallow website'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Show secrets'), findsOneWidget);
+  });
+
+  testWidgets('an Apple wallet from the older sign-in names the Apple '
+      'account', (tester) async {
+    when(() => repo.getWalletById('w-1')).thenAnswer(
+      (_) async => socialWallet.copyWith(
+        socialVaultId: null,
+        legacySocial: true,
+        socialProvider: 'apple',
+      ),
+    );
+
+    await pumpScreen(tester);
+    expect(
+      find.text(
+        'Older sign-in, run by Web3Auth: your Apple account alone can open '
+        'this wallet.',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a vault wallet whose backup was deleted is told its phrase is '
+      'the way back, and is not marked as older', (tester) async {
+    when(
+      () => repo.getWalletById('w-1'),
+    ).thenAnswer((_) async => socialWallet.copyWith(socialVaultId: null));
+
+    await pumpScreen(tester);
+    expect(find.textContaining('Web3Auth'), findsNothing);
+    expect(find.byKey(const ValueKey('legacy-sign-in-mark')), findsNothing);
+
+    await openRemoveSheet(tester);
+    expect(find.textContaining('You can add it back'), findsNothing);
+    expect(find.textContaining('older sign-in'), findsNothing);
+    expect(
+      find.textContaining('Save its recovery phrase from Show secrets'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('a Ledger wallet says the key stays on the device that holds '

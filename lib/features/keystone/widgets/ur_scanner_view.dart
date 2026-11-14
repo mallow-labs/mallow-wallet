@@ -8,6 +8,7 @@ import '../../../core/observability/app_logger.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/widgets/mallow_button.dart';
 import '../../../shared/widgets/mallow_svg_icon.dart';
+import '../../../shared/widgets/permission_disclosure.dart';
 import '../../../shared/widgets/permission_settings_sheet.dart';
 
 /// A camera view that reads a (possibly animated) UR code off a Keystone's
@@ -219,10 +220,12 @@ class _UrScannerViewState extends State<UrScannerView>
             // send scanner — the literal is deliberate.
             child: ColoredBox(
               color: Colors.black,
-              child: MobileScanner(
-                controller: _controller,
-                onDetect: _onDetect,
-                errorBuilder: (context, error) => _CameraError(error: error),
+              child: CameraDisclosureGate(
+                child: MobileScanner(
+                  controller: _controller,
+                  onDetect: _onDetect,
+                  errorBuilder: (context, error) => _CameraError(error: error),
+                ),
               ),
             ),
           ),

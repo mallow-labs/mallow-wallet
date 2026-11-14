@@ -122,7 +122,7 @@ class _OffersViewState extends State<_OffersView> {
   /// The re-point must **fully settle before the dispatch**: [MarketBloc]
   /// reads the authority off `AuthService.currentAddress` at build time
   /// (`MarketplaceActionFlow.prepare`), and that is synchronously nulled while
-  /// the switch's `/v0/login` is in flight. [ensureSigner] awaits it via the
+  /// the switch's `/v2/session` is in flight. [ensureSigner] awaits it via the
   /// atomic `SessionManager.selectSourceWallet`, so dispatching after it
   /// returns is what makes accepting an offer on art held by a non-active
   /// session wallet work at all.
@@ -145,7 +145,7 @@ class _OffersViewState extends State<_OffersView> {
     // the same two builders the artwork detail screen dispatches, so it reads
     // the same two cells (🔓 offer-cancel stays separate so killing
     // offer-accept can't strand an escrowed bid). Before `_switchSigner`: the
-    // switch is a `/v0/login` round trip, and making a user wait through one
+    // switch is a `/v2/session` round trip, and making a user wait through one
     // only to be told the action is off is the wall exists to remove.
     if (await guardFlowDisabled(
       context,
@@ -854,7 +854,7 @@ class _OffersViewState extends State<_OffersView> {
   }
 
   /// Progress + tap barrier for the signer re-point. `selectSourceWallet`
-  /// awaits a `/v0/login`, so a View tap can hang for seconds before the sheet
+  /// awaits a `/v2/session`, so a View tap can hang for seconds before the sheet
   /// opens; without this the row reads as unresponsive and a second tap starts
   /// a competing switch.
   Widget _switchingOverlay(MallowColors colors) => Positioned.fill(

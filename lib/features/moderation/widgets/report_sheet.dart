@@ -9,6 +9,7 @@ import '../../../shared/widgets/mallow_sheet.dart';
 import '../../../shared/widgets/mallow_textarea_field.dart';
 import '../../../shared/widgets/sheet_drag_handle.dart';
 import '../../../shared/widgets/tap_target_expander.dart';
+import '../../artwork/services/active_wallet_verification.dart';
 import '../data/moderation_repository.dart';
 import '../models/moderation_models.dart';
 import '../services/report_context.dart';
@@ -81,6 +82,19 @@ class _ReportSheetState extends State<_ReportSheet> {
       _submitting = true;
       _error = null;
     });
+
+    // `POST /v2/reports` takes a signed login. Prove the active wallet here,
+    // on the tap, so a social wallet missing its key gets its re-login rather
+    // than a failed send (see [ensureActiveWalletVerified]).
+    final verifyError = await ensureActiveWalletVerified();
+    if (!mounted) return;
+    if (verifyError != null) {
+      setState(() {
+        _submitting = false;
+        _error = verifyError;
+      });
+      return;
+    }
 
     final reportContext = await buildReportContext(screen: widget.screen);
     final outcome = await sl<ModerationRepository>().submitReport(

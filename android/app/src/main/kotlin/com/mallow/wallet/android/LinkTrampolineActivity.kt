@@ -7,9 +7,9 @@ import android.net.Uri
 import android.os.Bundle
 
 /**
- * Receives every inbound `VIEW` link: the verified mallow.art App Links, the
- * `mallowwallet://` scheme, including the Web3Auth sign-in redirect, and
- * WalletConnect `wc:` pairing links.
+ * Receives every inbound `VIEW` link: the verified mallow.art App Links (the
+ * return of Sign in with Apple's web flow among them), the `mallowwallet://`
+ * scheme and WalletConnect `wc:` pairing links.
  *
  * This is a display-less trampoline rather than intent filters on MainActivity.
  * An app that sends the link without FLAG_ACTIVITY_NEW_TASK starts the
@@ -22,7 +22,7 @@ import android.os.Bundle
  *
  * [openInMainActivity] hands the link to the one existing MainActivity
  * instead. This activity logs nothing: a link can carry private query
- * parameters, and the sign-in redirect carries the login handshake.
+ * parameters, a pairing key, a one-time completion token or an ID token.
  */
 class LinkTrampolineActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -42,14 +42,14 @@ class LinkTrampolineActivity : Activity() {
 
 /**
  * Delivers [link] to MainActivity in mallow's own task as a `VIEW` intent, the
- * shape app_links and the Web3Auth plugin read: as the launch intent on a cold
- * start, through onNewIntent otherwise.
+ * shape app_links reads: as the launch intent on a cold start, through
+ * onNewIntent otherwise.
  *
  * NEW_TASK alone is not enough. It finds mallow's task, but delivers to
  * onNewIntent only when MainActivity is that task's top activity. Otherwise it
  * stacks a second MainActivity on top. Something else is on top whenever the
- * link comes back from a Custom Tab that mallow opened (the sign-in redirect),
- * or from mallow's own share sheet, where the share trampoline is itself still
+ * link comes back from a Custom Tab that mallow opened (the X connect
+ * callback, the Sign in with Apple return), or from mallow's own share sheet, where the share trampoline is itself still
  * on top. CLEAR_TOP plus SINGLE_TOP keeps the existing instance, delivers to
  * onNewIntent and finishes everything above it, so such a Custom Tab closes.
  */

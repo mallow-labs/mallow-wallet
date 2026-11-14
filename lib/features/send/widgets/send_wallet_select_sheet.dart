@@ -27,7 +27,7 @@ import '../../../shared/utils/chain.dart';
 /// persistence) happens inside the sheet so a failed re-login keeps it open for
 /// retry rather than advancing the flow. For that
 /// chain this resolves only once the switch settles — including the awaited
-/// `/v0/login`, so `AuthService.currentAddress` is the chosen wallet by then.
+/// `/v2/session`, so `AuthService.currentAddress` is the chosen wallet by then.
 ///
 /// Tezos and Ethereum sign by explicit wallet id, so the picker just returns
 /// the selection and the caller threads it into `SendEvent.setSource`. Nothing

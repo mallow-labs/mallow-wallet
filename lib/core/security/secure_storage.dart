@@ -567,6 +567,144 @@ class SecureWalletStorage {
   }
 
   // ---------------------------------------------------------------------------
+  // Social vault (per vault id)
+  // ---------------------------------------------------------------------------
+  //
+  // A social wallet's per-chain keys are stored like any imported key (see
+  // [storePrivateKey]), so signing never touches the vault. These keep the two
+  // things the vault itself needs on this device: the data key (to sign vault
+  // writes and add or remove sign-in keys without unlocking again) and, for a
+  // wallet created with a recovery phrase, the phrase (for export). Both are
+  // secrets and both live in the this-device-only vault; neither is ever
+  // synced, and the platform slot store never sees them.
+
+  static String _socialVaultDataKeyKey(String vaultId) =>
+      'mallow_social_vault_key_$vaultId';
+  static String _socialVaultMnemonicKey(String vaultId) =>
+      'mallow_social_vault_mnemonic_$vaultId';
+  static String _socialVaultCacheKey(String vaultId) =>
+      'mallow_social_vault_cache_$vaultId';
+
+  /// Store a vault's data key (base64url).
+  Future<void> storeSocialVaultDataKey(String vaultId, String dataKey) =>
+      _vault.write(_socialVaultDataKeyKey(vaultId), dataKey);
+
+  Future<String?> loadSocialVaultDataKey(String vaultId) =>
+      _vault.read(_socialVaultDataKeyKey(vaultId));
+
+  Future<void> deleteSocialVaultDataKey(String vaultId) =>
+      _vault.delete(_socialVaultDataKeyKey(vaultId));
+
+  /// Store the recovery phrase of a social wallet created with one.
+  Future<void> storeSocialVaultMnemonic(String vaultId, String mnemonic) =>
+      _vault.write(_socialVaultMnemonicKey(vaultId), mnemonic);
+
+  Future<String?> loadSocialVaultMnemonic(String vaultId) =>
+      _vault.read(_socialVaultMnemonicKey(vaultId));
+
+  Future<void> deleteSocialVaultMnemonic(String vaultId) =>
+      _vault.delete(_socialVaultMnemonicKey(vaultId));
+
+  /// The recovery phrase of a Google or Apple wallet whose vault was deleted
+  /// (Delete wallet backup, or a deletion this device learned of), kept per
+  /// account so the wallet can still be exported: the phrase is then its
+  /// only backup.
+  Future<void> storeSocialAccountMnemonic(String accountId, String mnemonic) =>
+      _vault.write('mallow_social_account_mnemonic_$accountId', mnemonic);
+
+  Future<String?> loadSocialAccountMnemonic(String accountId) =>
+      _vault.read('mallow_social_account_mnemonic_$accountId');
+
+  Future<void> deleteSocialAccountMnemonic(String accountId) =>
+      _vault.delete('mallow_social_account_mnemonic_$accountId');
+
+  /// The last copy of a vault this device saw, as JSON: its revision, slot
+  /// list and labels, and the identity's email hint. Not a secret — it is what
+  /// the backend serves any sign-in for the identity, ciphertext included —
+  /// and re-creatable by the next sign-in, so it lives in the plugin store.
+  Future<void> storeSocialVaultCache(String vaultId, String json) =>
+      _write(_socialVaultCacheKey(vaultId), json);
+
+  Future<String?> loadSocialVaultCache(String vaultId) =>
+      _read(_socialVaultCacheKey(vaultId));
+
+  Future<void> deleteSocialVaultCache(String vaultId) =>
+      _delete(_socialVaultCacheKey(vaultId));
+
+  /// The vault creations this device started and never saw confirmed, as
+  /// JSON: for each, the vault id, the id of the platform entry written for
+  /// it and when. Not a secret (ids and a time), and losing it only means an
+  /// abandoned platform entry is never cleaned up, so it lives in the plugin
+  /// store. See `SocialVaultService.sweepAbandonedCreates`.
+  Future<void> storeSocialVaultPendingCreates(String json) =>
+      _write(_socialVaultPendingCreatesKey, json);
+
+  Future<String?> loadSocialVaultPendingCreates() =>
+      _read(_socialVaultPendingCreatesKey);
+
+  static const _socialVaultPendingCreatesKey =
+      'mallow_social_vault_pending_creates';
+
+  /// What this device knows about social vaults the backend answered "not
+  /// found" for, as JSON: when each linked vault was first reported missing,
+  /// and the vaults a wallet was unlinked from on such an answer, whose
+  /// platform entries are being kept for a while. Not a secret (ids, times
+  /// and an email hint). Losing it only means a "not found" is counted from
+  /// the start again and kept entries are never cleaned up, so it lives in
+  /// the plugin store. See `SocialVaultService.checkStatus` and
+  /// `checkRetired`.
+  Future<void> storeSocialVaultMissing(String json) =>
+      _write(_socialVaultMissingKey, json);
+
+  Future<String?> loadSocialVaultMissing() => _read(_socialVaultMissingKey);
+
+  static const _socialVaultMissingKey = 'mallow_social_vault_missing';
+
+  /// The data key of a vault a wallet was unlinked from because the backend
+  /// said the vault does not exist. Kept aside, under its own name, for one
+  /// purpose: signing the later status reads that decide whether the vault's
+  /// platform entries may be deleted — or find that the vault is there after
+  /// all. Nothing else reads it: to the rest of the app the wallet holds no
+  /// data key. A secret, so it lives in the this-device-only vault store.
+  static String _socialVaultRetiredKeyKey(String vaultId) =>
+      'mallow_social_vault_retired_key_$vaultId';
+
+  Future<void> storeSocialVaultRetiredKey(String vaultId, String dataKey) =>
+      _vault.write(_socialVaultRetiredKeyKey(vaultId), dataKey);
+
+  Future<String?> loadSocialVaultRetiredKey(String vaultId) =>
+      _vault.read(_socialVaultRetiredKeyKey(vaultId));
+
+  Future<void> deleteSocialVaultRetiredKey(String vaultId) =>
+      _vault.delete(_socialVaultRetiredKeyKey(vaultId));
+
+  /// What this device knows about the phone backup that carries its social
+  /// vault platform entries, as JSON: which entries are in the cloud backup,
+  /// since when the backup has been without end-to-end encryption, and
+  /// whether such a period was seen while entries were in it. Not a secret
+  /// (ids, flags and times). Losing it only means every entry is taken to be
+  /// in the cloud backup — the cautious reading — so it lives in the plugin
+  /// store. See `PlatformBackupGuard`.
+  Future<void> storeSocialVaultBackupState(String json) =>
+      _write(_socialVaultBackupStateKey, json);
+
+  Future<String?> loadSocialVaultBackupState() =>
+      _read(_socialVaultBackupStateKey);
+
+  static const _socialVaultBackupStateKey = 'mallow_social_vault_backup_state';
+
+  /// Delete every cached vault record (reset). The data keys and phrases are
+  /// MnemonicVault items, which the reset sweeps by listing.
+  Future<void> deleteAllSocialVaultCaches() async {
+    const prefix = 'mallow_social_vault_cache_';
+    final all = await _storage.readAll(
+      iOptions: _iosOptions,
+      aOptions: _androidOptions,
+    );
+    await Future.wait(all.keys.where((k) => k.startsWith(prefix)).map(_delete));
+  }
+
+  // ---------------------------------------------------------------------------
   // Wallet-Sig Cookie Cache (Per-Address JWT)
   // ---------------------------------------------------------------------------
 
@@ -1132,6 +1270,17 @@ class SecureWalletStorage {
       // Per-wallet sig cookies (catches orphan keys for addresses that
       // were already removed before reset).
       deleteAllWalletSigCookies(),
+      // Cached social vault records (not secret, but they name the identity's
+      // email and the user's devices).
+      deleteAllSocialVaultCaches(),
+      // The record of unconfirmed vault creations: the data keys it would be
+      // checked with go with the rest of the vault store.
+      _delete(_socialVaultPendingCreatesKey),
+      // What was known about vaults the backend reported missing; the data
+      // keys kept aside for them go with the rest of the vault store.
+      _delete(_socialVaultMissingKey),
+      // What was known about the phone backup of the platform entries.
+      _delete(_socialVaultBackupStateKey),
       // Per-wallet Ledger device IDs
       ...walletIds.map(deleteLedgerDeviceId),
       // Per-session Active Networks flags. Swept by prefix rather than by a

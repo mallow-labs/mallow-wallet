@@ -118,7 +118,8 @@ traffic and the logs are both yours.
 | **mallow-issued API key** | `MALLOW_API_KEY` | Nothing, if you run your own backend. Against a mallow-operated one it is the credential: unset, requests go out unauthenticated. Useless without `API_BASE_URL` |
 | **First-party hosts** | `FIRST_PARTY_HOSTS` | Nothing visibly. Your own proxies stop receiving the client-id header and are handled as anonymous traffic. **Read [Which hosts receive your credentials](#which-hosts-receive-your-credentials)** |
 | **Solana RPC with DAS** | `RPC_PROXY_BASE_URL` | Portfolio, all NFT lists, compressed-NFT proofs. **Read the section below** |
-| **Solana mainnet RPC** | `SOLANA_MAINNET_RPC_URL` | Nothing outright. `.sol` name resolution and native staking run on Solana's public mainnet node instead, at public rate limits |
+| **Solana mainnet RPC** | `SOLANA_MAINNET_RPC_URL` | Nothing outright. Solana name resolution (`.sns`, `.sol`, `.skr`) and native staking run on Solana's public mainnet node instead, at public rate limits |
+| **Solana review RPC** | `SOLANA_SIMULATION_URL` | Nothing. The in-app browser's transaction reviews read through the endpoints above instead. This lets their simulation, account read, DAS batch and fee calls go to an endpoint near the user. A review makes these calls one after another, so distance is most of its wait. A call it refuses falls back to the usual path |
 | **EVM simulation** | `EVM_SIMULATION_URL` | All EVM transfers. No default; fails closed by design. In the in-app browser a website's transaction is still reviewable without it, but only from the request itself, under a *Simulation unavailable* warning |
 | **EVM gas API** | `EVM_GAS_API_URL` | The Low/Market/High tiers on the EVM send sheet. No default; sends fall back to node-derived fees |
 | **Ethereum RPC** | `ETH_RPC_URL` | EVM balances, nonces, gas estimation, broadcast, and the in-app browser's Ethereum provider (a website's read-only calls go to this node too). Defaults to a public keyless node |
@@ -129,11 +130,14 @@ traffic and the logs are both yours.
 | **Image CDN** | `IMAGE_CDN_BASE_URL` | Nothing visibly. Images load from their own origin at full size instead of a resized bucket |
 | **Static asset CDN** | `ASSET_CDN_BASE_URL` | Rewards-store metadata, and the maintenance/broadcast banners |
 | **Program labels** | `PROGRAM_LABELS_URL` | Nothing — the signing review still names the compiled-in core programs and their instructions; other program calls show their address alone |
+| **Browser site list** | `BROWSER_SITES_URL` | Nothing — the address bar suggests the list bundled with the app |
 | **IPFS gateway** | `IPFS_GATEWAY_URL` | Direct IPFS fetches fall through to `ipfs.io`, then `dweb.link`. Defaults to `ipfs.io` |
 | **Arweave gateway** | `ARWEAVE_GATEWAY_URL` | The mirror retry for an Arweave 403. Defaults to `arweave.net`, which makes the retry a no-op |
 | **Avatar service** | `AVATAR_SERVICE_URL` | Nothing — defaults to DiceBear's public API |
 | **Firebase** | config files, not variables | Android build fails outright; iOS throws at startup |
-| **Web3Auth** (MetaMask Embedded Wallets) | `WEB3AUTH_CLIENT_ID` | Social sign-in cannot initialise |
+| **Google sign-in** | `GOOGLE_SERVER_CLIENT_ID`, `GOOGLE_IOS_CLIENT_ID` | Continue with Google reports it is unavailable. The backend's social-vault routes must accept these clients' ID tokens |
+| **Sign in with Apple** | `APPLE_SERVICES_ID` (Android only), plus the backend's Apple relay (`/v2/social-vault/apple/callback`, which Apple's servers call, not the app) and the site's `/auth/apple` page, claimed by the app as a verified App Link | Continue with Apple is unavailable on Android. With the variable set but App Link verification unhealthy for the installed package, the sign-in opens Apple's page and ends as a cancel. iOS needs only the Sign in with Apple entitlement |
+| **Passkeys** | `PASSKEY_RP_ID` | No passkeys: Google and Apple wallets rely on the platform backup alone, and the web cannot open them |
 | **Sentry** | `SENTRY_DSN` | No crash reports. Everything else works |
 | **WalletConnect** (Reown Cloud) | `WALLETCONNECT_PROJECT_ID` | WalletConnect is hidden: no entry point shows and a `wc:` link only shows a notice that WalletConnect is not available. Create the project as a *wallet* and list the app's bundle and package ids on it. The app then talks to Reown's relay and Verify service only; SDK telemetry is switched off in code |
 

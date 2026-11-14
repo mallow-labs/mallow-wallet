@@ -555,6 +555,23 @@ void main() {
       expect(service.nameOf(_jupiter), 'Jupiter Aggregator v6');
     });
 
+    test('names every Memo program with no list, v4 included', () async {
+      Config.debugOverrides['PROGRAM_LABELS_URL'] = '';
+      final service = await launch();
+      expect(
+        service.nameOf('Memo4c2pN8afCj432Lb7RMVKi9PbQnnW7ewFFaV3oAH'),
+        'Memo Program v4',
+      );
+      expect(
+        service.nameOf('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'),
+        'Memo Program',
+      );
+      expect(
+        service.nameOf('Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo'),
+        'Memo Program v1',
+      );
+    });
+
     test('a cached entry that borrows a canonical name is dropped', () async {
       const other = 'Other11111111111111111111111111111111111111';
       await prefs.setProgramLabelCache(

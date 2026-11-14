@@ -166,7 +166,11 @@ enum AppFlow {
   /// Reverse lookup by [wire] string. Null for a cell this build doesn't know
   /// (a newer server enum value) — such entries are dropped at parse time
   /// rather than guessed at.
-  static AppFlow? fromWire(String? wire) => _byWire[wire];
+  ///
+  /// The lookup is over THIS enum's own strings, never the generated
+  /// `MobileFlow`: that enum is a copy of the contract as it was vendored, and
+  /// this enum can hold a cell that copy does not list.
+  static AppFlow? fromWire(Object? wire) => _byWire[wire];
 
   static final Map<String, AppFlow> _byWire = {
     for (final flow in AppFlow.values) flow.wire: flow,
@@ -209,8 +213,8 @@ class FlowKey {
 /// Deliberately not the generated wire type: the app wants the folded
 /// `disabledMessages` map and the app-local [Chain], not the generated one.
 /// [RemoteConfig.fromWire] is the single boundary where the two are
-/// reconciled — the generated `Chain` / `MobileFlow` enums never travel past
-/// it.
+/// reconciled, and it reads the kill-switch cells off the raw JSON — the
+/// generated `Chain` / `MobileFlow` enums never see them.
 ///
 /// The payload is **sparse**: only currently-disabled cells appear in
 /// [disabledMessages]. Absent means enabled, so an empty response and a failed
@@ -241,17 +245,33 @@ sealed class RemoteConfig with _$RemoteConfig {
 
   const RemoteConfig._();
 
-  /// Fold the wire payload into the app's shape. Entries naming a chain or
-  /// flow this build doesn't know are dropped — an unrecognised cell can't be
-  /// gated anywhere, and guessing (e.g. [Chain.fromDbString]'s Solana
-  /// fallback) would kill the wrong cell.
-  factory RemoteConfig.fromWire(api.MobileConfigResponse response) {
+  /// Fold the raw `result` object of `GET /v2/config/mobile` into the app's
+  /// shape.
+  ///
+  /// 🛑 The cells in `disabledFlows` are matched on their raw wire strings,
+  /// against [AppFlow.wire] and the chain names this build knows. They must
+  /// not pass through the generated model first: its `MobileFlow` enum turns
+  /// every string it does not list into one "unknown" member with no value, so
+  /// a cell the vendored contract does not list would be dropped here, and the
+  /// operator's kill would stop nothing. The generated
+  /// model still parses the payload, for the force-upgrade fields and for its
+  /// shape check: a malformed body throws, and the caller keeps the config it
+  /// already had.
+  ///
+  /// Entries naming a chain or flow this build doesn't know are dropped — an
+  /// unrecognised cell can't be gated anywhere, and guessing (e.g.
+  /// [Chain.fromDbString]'s Solana fallback) would kill the wrong cell.
+  factory RemoteConfig.fromWire(Map<String, dynamic> json) {
+    final response = api.MobileConfigResponse.fromJson(json);
     final messages = <String, String>{};
-    for (final entry in response.disabledFlows) {
-      final chain = _chainFromWire(entry.chain.value);
-      final flow = AppFlow.fromWire(entry.flow.value);
-      if (chain == null || flow == null) continue;
-      messages['${chain.toDbString()}:${flow.wire}'] = entry.message;
+    final cells = json['disabledFlows'];
+    for (final entry in cells is List ? cells : const <Object?>[]) {
+      if (entry is! Map) continue;
+      final chain = _chainFromWire(entry['chain']);
+      final flow = AppFlow.fromWire(entry['flow']);
+      final message = entry['message'];
+      if (chain == null || flow == null || message is! String) continue;
+      messages['${chain.toDbString()}:${flow.wire}'] = message;
     }
     return RemoteConfig(
       disabledMessages: Map.unmodifiable(messages),
@@ -277,12 +297,11 @@ sealed class RemoteConfig with _$RemoteConfig {
       flow.isImplemented(chain) && disabledMessage(chain, flow) == null;
 }
 
-/// Generated-[api.Chain] -> app-local [Chain], by wire string. Null for an
-/// unknown value (including the generator's `swaggerGeneratedUnknown`, whose
-/// value is null). Deliberately not [Chain.fromDbString], which defaults
-/// unknown input to Solana — here that would kill a Solana flow because the
-/// server named a chain we've never heard of.
-Chain? _chainFromWire(String? wire) => switch (wire) {
+/// Wire chain name -> app-local [Chain]. Null for anything else. Deliberately
+/// not [Chain.fromDbString], which defaults unknown input to Solana — here
+/// that would kill a Solana flow because the server named a chain we've never
+/// heard of.
+Chain? _chainFromWire(Object? wire) => switch (wire) {
   'solana' => Chain.solana,
   'ethereum' => Chain.ethereum,
   'tezos' => Chain.tezos,

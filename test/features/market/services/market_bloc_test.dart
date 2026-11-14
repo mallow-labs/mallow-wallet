@@ -67,6 +67,23 @@ class _AllowAllAuthGate implements TransactionAuthGate {
   }) async => TransactionAuthOutcome.allowed;
 }
 
+/// Records what the gate is asked to value, then refuses: nothing past the gate
+/// matters to the tests that use it.
+class _RecordingAuthGate implements TransactionAuthGate {
+  final values = <double?>[];
+
+  @override
+  bool requiresAuth(double? usdValue) => true;
+  @override
+  Future<TransactionAuthOutcome> authorize({
+    required double? usdValue,
+    required FlowKey flow,
+  }) async {
+    values.add(usdValue);
+    return TransactionAuthOutcome.cancelled;
+  }
+}
+
 TransactionPipeline _makePipeline(
   WalletManager walletManager,
   SolanaRpcService rpcService,
@@ -3904,7 +3921,9 @@ void main() {
         int? royaltiesPluginBasisPoints,
         List<OnChainCreator> royaltiesPluginCreators = const [],
         List<OnChainCreator> tokenMetadataCreators = const [],
+        List<String> verifiedCreators = const [],
       }) => DigitalAsset(
+        verifiedCreators: verifiedCreators,
         id: testMintAccount,
         tokenStandard: standard,
         isMutable: true,
@@ -4056,10 +4075,11 @@ void main() {
           when(mockDasApi.getAsset(collectionMint)).thenAnswer(
             (_) async => gateAsset(
               standard: TokenStandard.coreCollection,
-              // owner == collection updateAuthority ⇒ primary sale. The seller
-              // must also be the holder or the eligibility gate refuses first,
-              // so both are the connected wallet.
+              // owner == collection updateAuthority, which signed ⇒ primary
+              // sale. The seller must also be the holder or the eligibility gate
+              // refuses first, so both are the connected wallet.
               updateAuthority: testWalletAddress,
+              verifiedCreators: const [testWalletAddress],
               royaltiesPluginBasisPoints: 500,
               royaltiesPluginCreators: const [
                 OnChainCreator(
@@ -4092,9 +4112,9 @@ void main() {
         },
       );
 
-      // The collection fetch is best-effort: if it throws, the gate degrades
-      // to asset-only computation (empty Core creators → toggle hidden) and
-      // never crashes the prepare.
+      // Without its collection a grouped Core sale cannot be classified, so
+      // after a second read the gate hides the toggle and estimates nothing.
+      // It never crashes the prepare.
       blocTest<MarketBloc, MarketState>(
         'hides the toggle without crashing when the Core collection fetch '
         'throws',
@@ -6206,6 +6226,56 @@ void main() {
       },
     );
   }
+  // What step-up auth is told each market action is worth. A priced flow keeps
+  // its outflow; a flow that gives up the NFT is unknown, because the amount it
+  // names is what the other side pays, not what the NFT is worth.
+  const cost = MarketPrice(rawAmount: 2000000, currencyMint: 'CURRENCY');
+  for (final (flow, actionType, totalCost, expected)
+      in <(AppFlow, String, MarketPrice, double?)>[
+        (AppFlow.offerAccept, 'accept-offer', cost, null),
+        (AppFlow.fixedPriceUpdate, 'update-listing', cost, null),
+        (AppFlow.nftBurn, 'burn', MarketPrice.zero(), null),
+        (AppFlow.fixedPriceBuy, 'buy', cost, 50.0),
+        (AppFlow.offerCreate, 'offer', cost, 50.0),
+        (AppFlow.fixedPriceCancel, 'cancel-listing', MarketPrice.zero(), 0.0),
+        (AppFlow.auctionSettle, 'settle-auction', MarketPrice.zero(), 0.0),
+      ]) {
+    final gate = _RecordingAuthGate();
+    blocTest<MarketBloc, MarketState>(
+      '$actionType is worth $expected to step-up auth',
+      setUp: () {
+        authGate = gate;
+        when(mockPriceService.usdValueOfRaw(any, any)).thenReturn(50.0);
+      },
+      build: () => MarketBloc(
+        mockApi,
+        mockApiV2,
+        mockWalletManager,
+        mockRpcService,
+        mockAuthService,
+        mockDasApi,
+        makeFlow(),
+        mockPriceService,
+        const FeeConfig(),
+        mockMarketplaceConfig,
+        mockMarketAccounts,
+        mockCurationAttribution,
+      ),
+      seed: () => TxFlowReady<MarketPrepData, MarketSuccessData>(
+        MarketPrepData(
+          transactionsBase64: [testTransactionBase64],
+          mintAccount: 'MINT',
+          actionType: actionType,
+          flow: flow,
+          totalCost: totalCost,
+          estimatedFeeLamports: 5000,
+        ),
+      ),
+      act: (bloc) => bloc.add(const MarketEvent.confirmAndSign()),
+      verify: (_) => expect(gate.values, [expected]),
+    );
+  }
+
   for (final actionType in [
     'withdraw-bid-refund',
     'recover-bid-refund-deposit',

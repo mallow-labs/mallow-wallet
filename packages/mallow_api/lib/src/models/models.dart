@@ -145,12 +145,14 @@ export '../generated/openapi.models.swagger.dart'
         PortfolioReceivedResult;
 
 // Generated `/v2/config/mobile` models (the mobile kill-switch + force-upgrade
-// payload). Parsed once, at `RemoteConfig.fromWire`, which folds `disabledFlows`
-// into a keyed map. The generated `Chain` / `MobileFlow` enums are deliberately
-// NOT re-exported: the barrel is imported unprefixed in a dozen files that also
-// use the app-local `Chain` (`lib/shared/utils/chain.dart`), and exporting the
-// generated one would make those imports ambiguous. The parse boundary reads
-// `.value` (the wire string) off it instead, which is all it needs.
+// payload). Parsed once, at `RemoteConfig.fromWire`, which takes the
+// force-upgrade fields from the model and folds `disabledFlows` into a keyed
+// map from the raw JSON: the generated enums collapse every value they do not
+// list into one valueless member, so a cell read through them could be lost.
+// The generated `Chain` enum is deliberately NOT re-exported: the barrel is
+// imported unprefixed in a dozen files that also use the app-local `Chain`
+// (`lib/shared/utils/chain.dart`), and exporting the generated one would make
+// those imports ambiguous.
 //
 // `MobileFlow` has no such clash and is exported so the client's `AppFlow` can
 // be drift-tested against the contract's cell list; app code uses `AppFlow`.
@@ -188,3 +190,25 @@ export '../generated/openapi.models.swagger.dart'
         OpenSeaPurchaseConfirmRequest,
         $OpenSeaPurchaseQuoteExtension,
         $OpenSeaPurchasePrepareResponse$ResultExtension;
+
+// Generated social-vault models: the encrypted store behind Google and Apple
+// sign-in. Every field is ciphertext, a wrapped key, a public key or a public
+// identifier — no request or response here can carry a secret.
+export '../generated/openapi.models.swagger.dart'
+    show
+        SocialVault,
+        SocialVaultSlot,
+        SocialVaultNewSlot,
+        SocialVaultOpenRequest,
+        SocialVaultOpenResponse,
+        SocialVaultCreateRequest,
+        SocialVaultAddSlotRequest,
+        SocialVaultRemoveSlotRequest,
+        SocialVaultRenameSlotRequest,
+        SocialVaultDeleteRequest,
+        SocialVaultRotateRequest,
+        SocialVaultStatusRequest,
+        SocialVaultCancelDeletionRequest,
+        SocialVaultPendingDeletion;
+
+export '../generated/openapi.enums.swagger.dart' show SocialVaultSlotKind, SocialVaultProvider;

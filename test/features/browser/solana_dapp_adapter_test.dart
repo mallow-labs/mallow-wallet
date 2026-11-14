@@ -11,6 +11,7 @@ import 'package:mallow_wallet/core/config/environment.dart';
 import 'package:mallow_wallet/core/crypto/wallet_manager.dart';
 import 'package:mallow_wallet/core/models/simulation_review.dart';
 import 'package:mallow_wallet/features/browser/models/dapp_request.dart';
+import 'package:mallow_wallet/features/browser/models/solana_offchain_message.dart';
 import 'package:mallow_wallet/features/browser/services/solana_dapp_adapter.dart';
 import 'package:mallow_wallet/features/browser/services/solana_dapp_transaction.dart';
 import 'package:mallow_wallet/features/browser/services/solana_lookup_table_cache.dart';
@@ -518,6 +519,63 @@ void main() {
       );
       expect(review.display, 'ff00fe');
       expect(review.text, isNull);
+    },
+  );
+  test(
+    'an off-chain message is signed over the whole built message and verifies',
+    () async {
+      final keypair = await Ed25519HDKeyPair.random();
+      final wallet = _Wallet();
+      when(
+        () => wallet.signMessageForWallet(
+          any(),
+          any(),
+          expectedAddress: any(named: 'expectedAddress'),
+          ensureActive: any(named: 'ensureActive'),
+          cancelled: any(named: 'cancelled'),
+        ),
+      ).thenAnswer(
+        (call) => keypair.sign(call.positionalArguments[1] as List<int>),
+      );
+      final adapter = SolanaDappAdapter(walletManager: wallet);
+      final built = SolanaOffchainMessage.build(
+        content: 'Approve order 42',
+        requiredSigners: [
+          Uint8List.fromList(keypair.publicKey.bytes),
+          Uint8List.fromList(_other.bytes),
+        ],
+      );
+      SolanaOffchainMessageReview prepare(Uint8List bytes, String address) =>
+          adapter.prepareOffchainMessage(
+            bytes: bytes,
+            origin: 'https://site.example',
+            address: address,
+            walletId: 'wallet',
+            chain: 'solana:mainnet',
+          );
+
+      final review = prepare(built.bytes, keypair.address);
+      expect(review.text, 'Approve order 42');
+      expect(review.coSigners, [_other.toBase58()]);
+      final signature = await adapter.signMessage(review, ensureActive: () {});
+      expect(
+        await verifySignature(
+          message: built.bytes,
+          signature: signature,
+          publicKey: keypair.publicKey,
+        ),
+        isTrue,
+      );
+
+      // Not a signer, or not a canonical message: refused before signing.
+      expect(
+        () => prepare(built.bytes, _signer.toBase58()),
+        throwsA(isA<DappException>()),
+      );
+      expect(
+        () => prepare(Uint8List.fromList(utf8.encode('hi')), keypair.address),
+        throwsA(isA<DappException>()),
+      );
     },
   );
   test('v1 transactions and messages are refused as messages', () {
@@ -1036,6 +1094,150 @@ void main() {
       expect(review.tokenMetadata, isEmpty);
     });
   }
+
+  group('a name its creator chose', () {
+    test('is kept as it is when it is plain text', () {
+      expect(solanaCreatorText('Moon Garden #7'), 'Moon Garden #7');
+      expect(solanaCreatorText('  Lune  é 月 🌙  '), 'Lune é 月 🌙');
+      // A joiner between two emoji makes one of them, and stays.
+      expect(solanaCreatorText('👩\u200D🚀'), '👩\u200D🚀');
+    });
+
+    test('loses control characters and the characters that reorder text', () {
+      // C0, DEL and C1 controls.
+      expect(
+        solanaCreatorText('Mo\u0000on\u001B Gar\u007Fden\u009F'),
+        'Moon Garden',
+      );
+      // Every direction control: the Arabic letter mark, the two marks, the
+      // embeddings and overrides, the isolates.
+      const direction = [
+        0x061C, 0x200E, 0x200F, //
+        0x202A, 0x202B, 0x202C, 0x202D, 0x202E, //
+        0x2066, 0x2067, 0x2068, 0x2069,
+      ];
+      for (final rune in direction) {
+        expect(
+          solanaCreatorText('Moon${String.fromCharCode(rune)}Garden'),
+          'MoonGarden',
+          reason: 'U+${rune.toRadixString(16)}',
+        );
+      }
+      // "gnp.exe" drawn as "exe.png" is the classic use of an override.
+      expect(solanaCreatorText('Free mint \u202Egnp.exe'), 'Free mint gnp.exe');
+      // Characters that take up no width.
+      expect(solanaCreatorText('Mo\u200Bon\u2060 Gar\uFEFFden'), 'Moon Garden');
+      // Half a surrogate pair, which cannot be drawn.
+      expect(
+        solanaCreatorText('Moon${String.fromCharCode(0xD83C)} Garden'),
+        'Moon Garden',
+      );
+    });
+
+    test('is one line: line breaks and tabs become a single space', () {
+      expect(
+        solanaCreatorText('Moon\r\n\tGarden\u2028#7\u2029\u0085x\n'),
+        'Moon Garden #7 x',
+      );
+      expect(solanaCreatorText('Moon   Garden'), 'Moon Garden');
+    });
+
+    test('is cut at 64 characters, with an ellipsis', () {
+      expect(solanaCreatorText('a' * 64), 'a' * 64);
+      expect(solanaCreatorText('a' * 65), '${'a' * 64}…');
+      expect(solanaCreatorText('a' * 5000), '${'a' * 64}…');
+      // Counted in characters, so one outside the basic plane is not cut in
+      // half; and no space is left before the ellipsis.
+      expect(solanaCreatorText('🌙' * 70), '${'🌙' * 64}…');
+      expect(solanaCreatorText('${'a' * 63} bcd'), '${'a' * 63}…');
+      // Counted after cleaning.
+      expect(solanaCreatorText('\u202E' * 100 + 'Moon'), 'Moon');
+    });
+
+    test('is no name when nothing readable is left', () {
+      for (final value in <Object?>[
+        null,
+        7,
+        const ['Moon'],
+        '',
+        '   ',
+        '\n\t',
+        '\u202E\u2066\u200B\u0000',
+        '\u200D\u200C',
+      ]) {
+        expect(solanaCreatorText(value), isNull, reason: '$value');
+      }
+    });
+
+    test('an NFT an asset lookup names enters the review cleaned', () async {
+      final review = await _nestedDelegateReview([
+        {
+          'id': _other.toBase58(),
+          'interface': 'V1_NFT',
+          'content': {
+            'metadata': {'name': 'Moon\u202E Garden\n${'x' * 200}'},
+          },
+        },
+      ]);
+      expect(
+        review.nftMetadata[_other.toBase58()]?.name,
+        'Moon Garden ${'x' * 52}…',
+      );
+    });
+
+    test('a Core asset\'s own name enters the review cleaned', () async {
+      Map<String, Object?> asset(Ed25519HDPublicKey owner) {
+        final name = utf8.encode('Moon\u202E\nGarden');
+        return {
+          'owner': solanaCoreProgram,
+          'lamports': 1,
+          'data': [
+            base64Encode([
+              1,
+              ...owner.bytes,
+              0,
+              name.length,
+              0,
+              0,
+              0,
+              ...name,
+              ...List.filled(5, 0),
+            ]),
+            'base64',
+          ],
+        };
+      }
+
+      final adapter = SolanaDappAdapter(
+        walletManager: _Wallet(),
+        rpc: (chain, method, params) async => switch (method) {
+          'getMultipleAccounts' => {
+            'context': {'slot': 10},
+            'value': [_account(2000000000), asset(_signer), _account(1)],
+          },
+          'simulateTransaction' => {
+            'context': {'slot': 10},
+            'value': {
+              'err': null,
+              'accounts': [_account(1000000000), asset(_other), _account(1)],
+            },
+          },
+          'getFeeForMessage' => {'value': 5000},
+          'getAssetBatch' => <Object?>[],
+          _ => throw StateError('unexpected $method'),
+        },
+      );
+      final review = (await adapter.prepareTransaction(
+        transaction: _wire(_tx()),
+        walletId: 'wallet',
+        address: _signer.toBase58(),
+        origin: 'https://site.example',
+        chain: 'solana:mainnet',
+      )).review;
+      expect(review.nfts.single.kind, NftChangeKind.transfer);
+      expect(review.nftMetadata[_other.toBase58()]?.name, 'Moon Garden');
+    });
+  });
 
   test('unverified fungible tokens carry their own symbol and image', () async {
     final review = await _nestedDelegateReview([
@@ -1578,6 +1780,190 @@ void main() {
         expect(sol.rawAmount, BigInt.from(1 - 3000000000));
         expect(result.warnings, contains(kSimulationSnapshotSlotsWarning));
       }
+    });
+  });
+
+  group('DAS for the review', () {
+    final mint = Ed25519HDPublicKey(List.filled(32, 9)).toBase58();
+    final outside = Ed25519HDPublicKey(List.filled(32, 8)).toBase58();
+    final token = Ed25519HDPublicKey.fromBase58(solanaTokenProgram);
+
+    /// A call to the token program, so the review may name assets.
+    SignedTx tokenTx() {
+      final tx = _tx();
+      final message = tx.compiledMessage;
+      return tx.copyWith(
+        compiledMessage: message.copyWith(
+          accountKeys: [_signer, Ed25519HDPublicKey.fromBase58(mint), token],
+        ),
+      );
+    }
+
+    Map<String, Object?> balance(int index, String mint, String amount) => {
+      'accountIndex': index,
+      'mint': mint,
+      'owner': _signer.toBase58(),
+      'uiTokenAmount': {'amount': amount, 'decimals': 6},
+    };
+
+    Map<String, Object?> fungible(String id) => {
+      'id': id,
+      'interface': 'FungibleToken',
+      'token_info': {'decimals': 6, 'supply': 1000},
+      'content': {
+        'metadata': {'symbol': 'TKN'},
+      },
+    };
+
+    Future<(SimulationReview, List<List<Object?>>)> review({
+      required List<String> moved,
+      required FutureOr<Object?> Function(List<Object?> ids) das,
+      Completer<void>? simulationGate,
+    }) async {
+      final batches = <List<Object?>>[];
+      final adapter = SolanaDappAdapter(
+        walletManager: _Wallet(),
+        rpc: (chain, method, params) async {
+          switch (method) {
+            case 'getMultipleAccounts':
+              return {
+                'context': {'slot': 10},
+                'value': [_account(2), _account(1), _account(1)],
+              };
+            case 'simulateTransaction':
+              await simulationGate?.future;
+              return {
+                'context': {'slot': 10},
+                'value': {
+                  'err': null,
+                  'fee': 5000,
+                  'accounts': [_account(1), _account(1), _account(1)],
+                  'preBalances': [2, 1, 1],
+                  'postBalances': [1, 1, 1],
+                  'preTokenBalances': [
+                    for (final (i, id) in moved.indexed)
+                      balance(i + 1, id, '5'),
+                  ],
+                  'postTokenBalances': [
+                    for (final (i, id) in moved.indexed)
+                      balance(i + 1, id, '2'),
+                  ],
+                },
+              };
+            case 'getAssetBatch':
+              final ids = params.first! as List<Object?>;
+              batches.add(ids);
+              return das(ids);
+          }
+          throw StateError(method);
+        },
+      );
+      final prepared = await adapter.prepareTransaction(
+        transaction: _wire(tokenTx()),
+        walletId: 'wallet',
+        address: _signer.toBase58(),
+        origin: 'https://site.example',
+        chain: 'solana:mainnet',
+      );
+      return (prepared.review, batches);
+    }
+
+    test('is asked for the inspected accounts with the simulation', () async {
+      final gate = Completer<void>();
+      var asked = 0;
+      final reviewed = review(
+        moved: [mint],
+        simulationGate: gate,
+        das: (ids) {
+          asked++;
+          return [for (final id in ids) id == mint ? fungible(mint) : null];
+        },
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(asked, 1, reason: 'sent before the simulation answered');
+      gate.complete();
+      final (result, batches) = await reviewed;
+      expect(batches, [
+        [mint, solanaTokenProgram],
+      ]);
+      expect(result.tokenMetadata[mint]?.symbol, 'TKN');
+    });
+
+    test(
+      'asks again only for an asset outside the inspected accounts',
+      () async {
+        final (result, batches) = await review(
+          moved: [mint, outside],
+          das: (ids) => [
+            for (final id in ids)
+              if (id == mint || id == outside) fungible(id as String),
+          ],
+        );
+        expect(batches, [
+          [mint, solanaTokenProgram],
+          [outside],
+        ]);
+        expect(result.tokenMetadata.keys, containsAll([mint, outside]));
+      },
+    );
+
+    test('names only the assets the review shows', () async {
+      final (result, _) = await review(
+        moved: [],
+        das: (ids) => [fungible(mint)],
+      );
+      expect(result.tokenMetadata, isEmpty);
+      expect(result.nftMetadata, isEmpty);
+    });
+
+    test('asks for every asset when the first batch failed', () async {
+      var first = true;
+      final (result, batches) = await review(
+        moved: [mint],
+        das: (ids) {
+          if (first) {
+            first = false;
+            throw const SolanaDappRpcException(-32000);
+          }
+          return [fungible(mint)];
+        },
+      );
+      expect(batches, [
+        [mint, solanaTokenProgram],
+        [mint],
+      ]);
+      expect(result.tokenMetadata[mint]?.symbol, 'TKN');
+    });
+
+    test('is not asked about a System transfer', () async {
+      final calls = <String>[];
+      final adapter = SolanaDappAdapter(
+        walletManager: _Wallet(),
+        rpc: (chain, method, params) async {
+          calls.add(method);
+          return method == 'getMultipleAccounts'
+              ? {
+                  'context': {'slot': 10},
+                  'value': [_account(2), _account(0), _account(1)],
+                }
+              : {
+                  'context': {'slot': 10},
+                  'value': {
+                    'err': null,
+                    'fee': 5000,
+                    'accounts': [_account(1), _account(1), _account(1)],
+                  },
+                };
+        },
+      );
+      await adapter.prepareTransaction(
+        transaction: _wire(_tx()),
+        walletId: 'wallet',
+        address: _signer.toBase58(),
+        origin: 'https://site.example',
+        chain: 'solana:mainnet',
+      );
+      expect(calls, isNot(contains('getAssetBatch')));
     });
   });
 }

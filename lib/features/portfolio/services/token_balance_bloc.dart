@@ -114,9 +114,10 @@ class TokenBalanceBloc extends Bloc<TokenBalanceEvent, TokenBalanceState>
   final WalletManager walletManager;
 
   /// When true (set only by the TabNavigator-scoped instance that drives the
-  /// header + tokens tab), a Profile session aggregates token balances across
-  /// every Solana wallet linked to the active profile, so the portfolio total
-  /// matches the drawer's per-profile aggregate. Per-signer instances (swap,
+  /// header + tokens tab), token balances aggregate across every Solana wallet
+  /// in the session — a Profile's linked wallets, or an Account's standard and
+  /// legacy-path wallets — so the portfolio total matches the drawer's
+  /// per-account / per-profile aggregate. Per-signer instances (swap,
   /// send, mint, …) leave this false so spendable balances stay scoped to the
   /// active signing wallet.
   bool aggregateAcrossSession = false;
@@ -267,15 +268,14 @@ class TokenBalanceBloc extends Bloc<TokenBalanceEvent, TokenBalanceState>
   // ---------------------------------------------------------------------------
 
   /// The wallet addresses whose balances make up the current view. A flagged
-  /// Profile session spanning more than one Solana wallet returns the whole set
-  /// (the aggregate); every other case is the single active signing wallet — so
-  /// per-signer instances and Account sessions are byte-for-byte unchanged.
+  /// instance returns every Solana wallet in the session (the aggregate); a
+  /// per-signer instance returns the single active signing wallet.
   Future<List<String>> _resolveAddresses() async {
-    final profileAddresses = aggregateAcrossSession
-        ? _aggregator.profilePortfolioAddresses()
+    final sessionAddresses = aggregateAcrossSession
+        ? _aggregator.portfolioSolanaAddresses()
         : null;
-    if (profileAddresses != null && profileAddresses.isNotEmpty) {
-      return profileAddresses;
+    if (sessionAddresses != null && sessionAddresses.isNotEmpty) {
+      return sessionAddresses;
     }
     // An Eth/Tezos-only session holds no Solana wallet. `getAddress()` would
     // then resolve the active *non-Solana* wallet's address, and the Solana

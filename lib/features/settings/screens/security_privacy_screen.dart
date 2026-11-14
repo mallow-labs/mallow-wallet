@@ -3,12 +3,14 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../../core/analytics/analytics_service.dart';
+import '../../../core/models/account.dart';
 import '../../../core/router/app_router.dart';
 import '../../../core/security/app_lock_bloc.dart';
 import '../../../core/security/biometric_auth.dart';
 import '../../../core/security/secure_storage.dart';
 import '../../../core/security/transaction_auth_gate.dart';
 import '../../../core/services/preferences_service.dart';
+import '../../../core/services/wallet_repository.dart';
 import '../../../di.dart';
 import '../../../shared/theme/mallow_theme.dart';
 import '../../../shared/widgets/app_snack_bar.dart';
@@ -290,6 +292,7 @@ class _Body extends StatelessWidget {
           // flag this push as pre-authenticated to avoid a second prompt.
           onTap: () => context.push(AppRoutes.recoveryPhrase, extra: true),
         ),
+        const _SignInKeysRow(),
         const SizedBox(height: 8),
         _ToggleRow(
           icon: const MallowSvgIcon(
@@ -327,6 +330,44 @@ class _Body extends StatelessWidget {
       ],
     );
   }
+}
+
+/// "Sign-in keys", shown only when this device holds a Google or Apple
+/// wallet — the only kind that has any.
+class _SignInKeysRow extends StatefulWidget {
+  const _SignInKeysRow();
+
+  @override
+  State<_SignInKeysRow> createState() => _SignInKeysRowState();
+}
+
+class _SignInKeysRowState extends State<_SignInKeysRow> {
+  late final Future<bool> _hasSocial = () async {
+    try {
+      return (await sl<WalletRepository>().getAllWallets()).any(
+        (w) => w.walletType == WalletType.social,
+      );
+    } catch (_) {
+      return false;
+    }
+  }();
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<bool>(
+    future: _hasSocial,
+    builder: (context, snapshot) => snapshot.data != true
+        ? const SizedBox.shrink()
+        : Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: _MenuItem(
+              iconAsset: 'assets/icons/key.svg',
+              label: 'Sign-in keys',
+              // Pre-authenticated: this screen's own entry gate was just
+              // cleared. Every other way into Sign-in keys is challenged.
+              onTap: () => context.push(AppRoutes.signInKeys, extra: true),
+            ),
+          ),
+  );
 }
 
 class _MenuItem extends StatelessWidget {

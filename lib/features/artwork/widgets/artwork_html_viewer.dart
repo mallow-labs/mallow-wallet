@@ -82,6 +82,12 @@ const Duration _paintTimeout = Duration(seconds: 25);
 /// within [_paintTimeout], moves to the next one; when none paints,
 /// [onFailed] fires and the caller shows its still poster instead.
 ///
+/// Inline and fullscreen alike, every touch that starts on a painted page
+/// belongs to that page. Left to the gesture arena, the enclosing scroll view
+/// won every vertical swipe, so an artwork could never receive one. Inline, the
+/// box takes half the screen height, and the screen still scrolls from outside
+/// it.
+///
 /// [placeholder] covers the view until the page paints. It also stands in
 /// whenever the view is torn down: while a page route covers this one, and
 /// while the app is in the background. Either would otherwise leave the
@@ -92,18 +98,12 @@ class ArtworkHtmlViewer extends StatefulWidget {
     required this.sources,
     required this.placeholder,
     super.key,
-    this.interactive = false,
     this.onSourcePainted,
     this.onFailed,
   });
 
   final List<String> sources;
   final Widget placeholder;
-
-  /// True claims every gesture for the page (the fullscreen viewer). False
-  /// leaves drags to the enclosing scroll view, so an inline artwork does not
-  /// trap the page's scroll. Taps still reach it.
-  final bool interactive;
 
   /// The source that painted. A later viewer of the same artwork can start
   /// from it rather than retrying the gateways that already failed.
@@ -283,13 +283,11 @@ class _ArtworkHtmlViewerState extends State<ArtworkHtmlViewer>
         InAppWebView(
           key: ValueKey<int>(attempt),
           initialUrlRequest: URLRequest(url: WebUri(source)),
-          gestureRecognizers: widget.interactive
-              ? const <Factory<OneSequenceGestureRecognizer>>{
-                  Factory<OneSequenceGestureRecognizer>(
-                    EagerGestureRecognizer.new,
-                  ),
-                }
-              : null,
+          // Eager: the view wins the gesture arena on pointer-down, before the
+          // enclosing scroll view's drag recognizer can.
+          gestureRecognizers: const <Factory<OneSequenceGestureRecognizer>>{
+            Factory<OneSequenceGestureRecognizer>(EagerGestureRecognizer.new),
+          },
           // Defaults that are part of the sandbox are spelled out, so a plugin
           // upgrade that changes one cannot quietly loosen it.
           initialSettings: InAppWebViewSettings(
@@ -318,6 +316,9 @@ class _ArtworkHtmlViewerState extends State<ArtworkHtmlViewer>
             transparentBackground: true,
             verticalScrollBarEnabled: false,
             horizontalScrollBarEnabled: false,
+            // A page that fits its box must not rubber-band on iOS: the pan
+            // would take the swipe away from the artwork's own handlers.
+            disallowOverScroll: true,
             isInspectable: kDebugMode,
           ),
           onWebViewCreated: (_) => _startTimeout(attempt),
@@ -361,8 +362,9 @@ class _ArtworkHtmlViewerState extends State<ArtworkHtmlViewer>
           onJsPrompt: (_, _) async => artworkJsPromptResponse(),
           onJsBeforeUnload: (_, _) async => artworkJsBeforeUnloadResponse(),
         ),
-        // Covers the view until the page paints. IgnorePointer is not needed:
-        // nothing on an unpainted page is worth tapping.
+        // Covers the view until the page paints. It keeps the touches, so the
+        // enclosing page still scrolls from the box while there is nothing in
+        // it to interact with.
         if (!_painted) widget.placeholder,
       ],
     );

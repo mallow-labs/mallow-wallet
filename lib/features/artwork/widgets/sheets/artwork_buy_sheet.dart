@@ -7,12 +7,20 @@ import '../../../../shared/utils/price_format.dart';
 import '../../../../shared/utils/balance_check.dart';
 import '../../../../shared/widgets/mallow_button.dart';
 import '../../../portfolio/services/token_balance_bloc.dart';
+import '../../../send/widgets/send_sheet_widgets.dart';
 import '../../services/artwork_action_state.dart' show ArtworkBuyBlock;
 import '../../services/artwork_bloc.dart';
 import 'artwork_funding_source.dart';
 import 'artwork_sheet_frame.dart';
 import 'listing_disclosures.dart';
 import 'offer_action_buttons.dart';
+
+/// Shown to a buyer of a Core listing whose asset or collection has a permanent
+/// delegate. A sale is final, and the plugins stay on the asset the buyer now holds.
+const kCoreListingPermanentDelegateWarning =
+    'This artwork or its collection has a permanent delegate that could burn, '
+    "move or freeze it after you buy it. If that happens, the purchase can't be "
+    'refunded.';
 
 /// Persistent bottom sheet for listed 1/1s and edition prints. Shows the
 /// listing price, a supply-progress bar (when applicable), and a Buy CTA.
@@ -31,6 +39,7 @@ class ArtworkBuySheet extends StatelessWidget {
     this.block,
     this.showOffers = true,
     this.checkListedBalance = true,
+    this.showPermanentDelegateWarning = false,
     super.key,
   });
 
@@ -52,6 +61,10 @@ class ArtworkBuySheet extends StatelessWidget {
 
   final VoidCallback onMakeOffer;
   final VoidCallback onCancelOffer;
+
+  /// Shows [kCoreListingPermanentDelegateWarning]. It only informs: buying stays
+  /// available whatever this says.
+  final bool showPermanentDelegateWarning;
 
   @override
   Widget build(BuildContext context) {
@@ -110,6 +123,12 @@ class ArtworkBuySheet extends StatelessWidget {
           // store build that hides commerce keeps the price and status above
           // and, when the viewer already holds an offer, the way to cancel it.
           if (showNftCommerce) ...[
+            if (showPermanentDelegateWarning) ...[
+              const SizedBox(height: MallowTheme.spacingMd),
+              const SendWarningNotice(
+                message: kCoreListingPermanentDelegateWarning,
+              ),
+            ],
             const SizedBox(height: MallowTheme.spacingMd),
             // Both CTAs are funded in the listing currency, so one source line
             // covers the pair. The affordability check below re-derives off

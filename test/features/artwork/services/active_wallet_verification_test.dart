@@ -1,6 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mallow_wallet/core/crypto/exceptions.dart';
 import 'package:mallow_wallet/core/models/account.dart';
 import 'package:mallow_wallet/core/network/auth_service.dart';
+import 'package:mallow_wallet/core/services/seed_vault_service.dart';
 import 'package:mallow_wallet/core/session/session_manager.dart';
 import 'package:mallow_wallet/di.dart';
 import 'package:mallow_wallet/features/artwork/services/active_wallet_verification.dart';
@@ -126,6 +128,46 @@ void main() {
       expect(
         await ensureActiveWalletVerified(),
         'Hardware wallet not verified',
+      );
+    });
+
+    // A social wallet whose key is missing re-logs in through the browser
+    // inside signAndVerifyForWallet. Closing that browser throws the signer's
+    // cancellation, whose own text says "Transaction aborted" — wrong for a
+    // block or a profile delete.
+    test('cancelled social re-login → readable copy', () async {
+      stubUnverifiedActive(WalletType.social);
+      when(() => auth.signAndVerifyForWallet(any(), any())).thenThrow(
+        TransactionAuthCancelledException(
+          'Sign-in was cancelled. Transaction aborted.',
+        ),
+      );
+
+      final error = await ensureActiveWalletVerified();
+      expect(error, 'Sign-in was cancelled');
+      verify(() => auth.signAndVerifyForWallet('id-$active', active)).called(1);
+    });
+
+    // Seed Vault's approval screen dismissed: the same cancel copy, not the
+    // exception text.
+    test('cancelled Seed Vault approval screen → readable copy', () async {
+      stubUnverifiedActive(WalletType.seedVault);
+      when(
+        () => auth.signAndVerifyForWallet(any(), any()),
+      ).thenThrow(const SeedVaultApprovalCancelledException());
+
+      expect(await ensureActiveWalletVerified(), 'Sign-in was cancelled');
+    });
+
+    test('unrecoverable legacy social wallet → its own message', () async {
+      stubUnverifiedActive(WalletType.social);
+      when(
+        () => auth.signAndVerifyForWallet(any(), any()),
+      ).thenThrow(LegacySocialWalletException());
+
+      expect(
+        await ensureActiveWalletVerified(),
+        LegacySocialWalletException().message,
       );
     });
 

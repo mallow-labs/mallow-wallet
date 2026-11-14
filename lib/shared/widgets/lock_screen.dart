@@ -8,6 +8,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../core/security/app_lock_bloc.dart';
+import '../../core/security/pin_attempt_verifier.dart';
 import '../theme/mallow_theme.dart';
 import 'custom_number_pad.dart';
 import 'mallow_svg_icon.dart';
@@ -157,7 +158,7 @@ class _LockScreenState extends State<LockScreen> {
                   if (isInCooldown) ...[
                     const SizedBox(height: MallowTheme.spacingMd),
                     Text(
-                      _formatCooldownMessage(cooldownUntil),
+                      pinCooldownMessage(cooldownUntil),
                       style: MallowTheme.uiLabel.copyWith(
                         color: context.mallowColors.error,
                       ),
@@ -296,18 +297,6 @@ class _LockScreenState extends State<LockScreen> {
         );
       }),
     );
-  }
-
-  String _formatCooldownMessage(DateTime cooldownUntil) {
-    final remaining = cooldownUntil.difference(DateTime.now());
-    if (remaining.isNegative) return 'You can try again now.';
-
-    if (remaining.inMinutes >= 1) {
-      final mins = remaining.inMinutes;
-      final secs = remaining.inSeconds % 60;
-      return 'Too many failed attempts.\nTry again in ${mins}m ${secs}s.';
-    }
-    return 'Too many failed attempts.\nTry again in ${remaining.inSeconds}s.';
   }
 
   void _onNumberTap(String number) {

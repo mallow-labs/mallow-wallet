@@ -97,6 +97,9 @@ extension _ArtworkDetailLoaders on _ArtworkDetailViewState {
         _optimisticPermissionPins.remove(artwork.mintAccount);
       }
       setState(() {
+        if (!perms.resolveFailed) {
+          _corePermanentDelegate.value = perms.hasCorePermanentDelegate;
+        }
         if (!preserveOptimistic) _permissions = perms;
         _resolvedOptionsPermissions = perms;
         _resolvedOptionsCanSign = canSign;

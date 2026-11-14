@@ -75,6 +75,80 @@ test('transaction-only account omits message signing without hiding transaction 
   );
 });
 
+test('off-chain message signing sends the text and signers and returns the bytes the wallet built', async () => {
+  const built = Buffer.from([0xff, ...Buffer.from('solana offchain'), 1, 1, ...Buffer.alloc(32), ...Buffer.from('hi')]).toString('base64');
+  const {wallet, requests} = fixture({responder: async request => request.method === 'connect'
+    ? {publicKey: address, chains: ['solana:mainnet'], canSign: true, canSignMessages: false, canSignOffchainMessages: true}
+    : {signature, publicKey: address, signedMessage: built}});
+  await wallet.features['standard:connect'].connect();
+  const account = wallet.accounts[0];
+  assert.deepEqual(
+    [...account.features],
+    ['solana:signTransaction', 'solana:signAndSendTransaction', 'solana:signOffchainMessage', 'solana:signIn'],
+  );
+  const feature = wallet.features['solana:signOffchainMessage'];
+  assert.equal(feature.version, '1.0.0');
+  assert.deepEqual([...feature.supportedMessageVersions], [1]);
+
+  const [output] = await feature.signOffchainMessage({messageVersion: 1, account, message: 'hi', requiredSigners: [account.publicKey]});
+  const sent = requests.at(-1);
+  assert.equal(sent.method, 'signOffchainMessage');
+  assert.deepEqual(JSON.parse(JSON.stringify(sent.params)), {message: 'hi', requiredSigners: [Buffer.alloc(32).toString('base64')], account: address});
+  assert.equal(Buffer.from(output.signedOffchainMessage).toString('base64'), built);
+  assert.equal(Buffer.from(output.signature).toString('base64'), signature);
+  assert.equal(output.signatureType, 'ed25519');
+
+  const count = requests.length;
+  await assert.rejects(feature.signOffchainMessage({messageVersion: 0, account, message: 'hi', requiredSigners: [account.publicKey]}));
+  await assert.rejects(feature.signOffchainMessage({messageVersion: 1, account, message: new Uint8Array([1]), requiredSigners: [account.publicKey]}));
+  await assert.rejects(feature.signOffchainMessage({messageVersion: 1, account, message: 'hi', requiredSigners: [new Uint8Array(31)]}));
+  assert.equal(requests.length, count, 'malformed inputs never reach native');
+});
+
+test('connecting sends only a connect request, never a sign-in', async () => {
+  const {window, wallet, requests} = fixture();
+  await wallet.features['standard:connect'].connect();
+  await wallet.features['standard:connect'].connect({silent: true});
+  await window.solana.connect();
+  await window.solana.connect({onlyIfTrusted: true});
+  assert.deepEqual(requests.map(request => request.method), ['connect', 'connect', 'connect', 'connect']);
+});
+
+test('sign-in connects, forwards only the known fields and returns the signed message', async () => {
+  const text = `example.org wants you to sign in with your Solana account:\n${address}`;
+  const {window, wallet, requests} = fixture({responder: async request => request.method === 'signIn'
+    ? {signature, signedMessage: Buffer.from(text).toString('base64'), publicKey: address, chains: ['solana:mainnet'], canSign: true, canSignMessages: true, canSignOffchainMessages: true}
+    : {}});
+  const feature = wallet.features['solana:signIn'];
+  assert.equal(feature.version, '1.1.0');
+  assert.equal(wallet.accounts.length, 0, 'sign-in needs no prior connection');
+  const changes = [];
+  wallet.features['standard:events'].on('change', value => changes.push(value));
+
+  const [output] = await feature.signIn({nonce: 'abc12345', statement: 'Hi', resources: ['https://example.org/a'], other: 'dropped'});
+  const sent = requests.at(-1);
+  assert.equal(sent.method, 'signIn');
+  assert.deepEqual(JSON.parse(JSON.stringify(sent.params)), {statement: 'Hi', nonce: 'abc12345', resources: ['https://example.org/a']});
+  assert.equal(output.account.address, address);
+  assert.equal(output.account, wallet.accounts[0]);
+  assert.equal(Buffer.from(output.signedMessage).toString(), text);
+  assert.equal(Buffer.from(output.signature).toString('base64'), signature);
+  assert.equal(output.signedMessageFormat, undefined);
+  assert.equal(window.solana.publicKey.toBase58(), address);
+  assert.equal(changes.at(-1).accounts[0].address, address);
+  assert.ok(wallet.accounts[0].features.includes('solana:signIn'));
+
+  const [offchain] = await feature.signIn({useOffchainMessage: {messageVersion: 1}});
+  assert.deepEqual(JSON.parse(JSON.stringify(requests.at(-1).params)), {useOffchainMessage: {messageVersion: 1}});
+  assert.deepEqual({...offchain.signedMessageFormat}, {kind: 'offchainMessage', messageVersion: 1});
+
+  const count = requests.length;
+  await assert.rejects(feature.signIn({nonce: 42}));
+  await assert.rejects(feature.signIn({resources: 'https://example.org'}));
+  await assert.rejects(feature.signIn({useOffchainMessage: {messageVersion: 0}}));
+  assert.equal(requests.length, count, 'malformed inputs never reach native');
+});
+
 test('standard silent connect returns empty accounts only for the native ungranted sentinel', async () => {
   let granted = false;
   const {window, wallet} = fixture({responder: async request => {

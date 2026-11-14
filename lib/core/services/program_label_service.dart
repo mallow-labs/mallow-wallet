@@ -121,6 +121,9 @@ class ProgramLabelService {
     'AddressLookupTab1e1111111111111111111111111': 'Address Lookup Table',
     'BPFLoaderUpgradeab1e11111111111111111111111': 'BPF Upgradeable Loader',
     'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr': 'Memo Program',
+    'Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo': 'Memo Program v1',
+    // mallow builds every memo against v4, so the review names it offline too.
+    'Memo4c2pN8afCj432Lb7RMVKi9PbQnnW7ewFFaV3oAH': 'Memo Program v4',
     'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s': 'Metaplex Token Metadata',
     'CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d': 'Metaplex Core',
     'BGUMAp9Gq7iTEuizy4pqaxsTyUCBK68MDfK752saRPUY': 'Metaplex Bubblegum',

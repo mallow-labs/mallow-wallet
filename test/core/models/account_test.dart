@@ -145,6 +145,103 @@ void main() {
     });
   });
 
+  group('WalletInfo.isLegacySocialWallet', () {
+    // The one predicate for "a wallet from the older Google or Apple
+    // sign-in". It decides the mark on the icon, the sentence on the wallet's
+    // screens, the one-time notice and the recovery message, so a wrong
+    // answer either hides the mark from a wallet the sign-in account alone
+    // can open, or puts it on one it cannot.
+    WalletInfo social({
+      String? vaultId,
+      bool legacy = false,
+      String? provider = 'google',
+    }) => WalletInfo(
+      id: 'w',
+      address: 'addr',
+      name: 'Google Wallet',
+      walletType: WalletType.social,
+      chain: 'solana',
+      socialProvider: provider,
+      socialVaultId: vaultId,
+      legacySocial: legacy,
+    );
+
+    test('true for a marked social wallet', () {
+      expect(social(legacy: true).isLegacySocialWallet, isTrue);
+    });
+
+    test('false for a social vault wallet', () {
+      expect(social(vaultId: 'vault-1').isLegacySocialWallet, isFalse);
+    });
+
+    test('false for a vault wallet whose backup was deleted', () {
+      // No vault id any more — exactly what a wallet from the older sign-in
+      // looks like by that column alone, which is why the answer is a stored
+      // mark and not `socialVaultId == null`.
+      final unlinked = social(vaultId: 'vault-1').copyWith(socialVaultId: null);
+      expect(unlinked.socialVaultId, isNull);
+      expect(unlinked.isLegacySocialWallet, isFalse);
+    });
+
+    test('false by default, so a new wallet is never one', () {
+      expect(social().isLegacySocialWallet, isFalse);
+    });
+
+    test('false for every non-social type, whatever the stored mark', () {
+      for (final t in WalletType.values.where((t) => t != WalletType.social)) {
+        expect(
+          _wallet(
+            walletType: t,
+          ).copyWith(legacySocial: true).isLegacySocialWallet,
+          isFalse,
+          reason: '$t is not a Google or Apple wallet',
+        );
+      }
+    });
+
+    test('the badge carries the mark, per provider', () {
+      expect(social(vaultId: 'v').badge, WalletBadge.google);
+      expect(social(vaultId: 'v', provider: 'apple').badge, WalletBadge.apple);
+      expect(social(legacy: true).badge, WalletBadge.googleLegacy);
+      expect(
+        social(legacy: true, provider: 'apple').badge,
+        WalletBadge.appleLegacy,
+      );
+      // A social wallet with no recorded provider defaults to Google's mark.
+      expect(
+        social(legacy: true, provider: null).badge,
+        WalletBadge.googleLegacy,
+      );
+    });
+
+    test('an account is one when its wallets are, and names its provider', () {
+      final older = Account(
+        id: 'a',
+        name: 'Account 01',
+        kind: AccountKind.social,
+        wallets: [social(legacy: true, provider: 'apple')],
+      );
+      expect(older.isLegacySocial, isTrue);
+      expect(older.typeBadge, WalletBadge.appleLegacy);
+      expect(older.socialProviderName, 'Apple');
+
+      final vault = Account(
+        id: 'b',
+        name: 'Account 02',
+        kind: AccountKind.social,
+        wallets: [social(vaultId: 'vault-1')],
+      );
+      expect(vault.isLegacySocial, isFalse);
+      expect(vault.typeBadge, WalletBadge.google);
+      expect(vault.socialProviderName, 'Google');
+
+      expect(
+        const Account(id: 'c', name: 'Account 03').isLegacySocial,
+        isFalse,
+      );
+    });
+  });
+
   group('WalletInfo.canSign', () {
     test('view-only wallets cannot sign', () {
       expect(_wallet(walletType: WalletType.viewOnly).canSign, isFalse);

@@ -38,6 +38,7 @@ import '../services/browser_transaction_tracker.dart';
 import '../services/browser_ui_channel.dart';
 import '../services/browser_visibility.dart';
 import '../services/browser_wallet_selection.dart';
+import '../services/dapp_rpc_warmer.dart';
 import '../services/dapp_request_coordinator.dart';
 import '../services/ethereum_dapp_adapter.dart';
 import '../services/tezos_dapp_adapter.dart';
@@ -260,9 +261,12 @@ class _BrowserScreenState extends State<BrowserScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // A shared link can open the browser without its start page.
+    unawaited(browserSites.start());
     _visibleTab = _session.activeId;
     _coordinator = DappRequestCoordinator(
       permissions: browserPermissions,
+      onActivity: DappRpcWarmer.instance.touch,
       currentWallet: () => _wallet == null
           ? null
           : DappWallet(
@@ -651,6 +655,9 @@ class _BrowserScreenState extends State<BrowserScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // An inactive app (a Face ID prompt, Control Center) keeps its sockets.
+    if (state != AppLifecycleState.inactive)
+      DappRpcWarmer.instance.setForeground(state == AppLifecycleState.resumed);
     final cancel = _visibility.updateLifecycle(state);
     if (cancel) {
       _invalidate();
@@ -1971,6 +1978,7 @@ class _BrowserScreenState extends State<BrowserScreen>
                             maxScaleFactor: 1.5,
                             child: BrowserAddressField(
                               initial: _addressInitial,
+                              session: _session,
                               onOpen: _finishAddress,
                             ),
                           ),

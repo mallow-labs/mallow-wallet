@@ -16,8 +16,10 @@ mistake. They have separate base URLs and separate clients:
 | Covers | The older read and write surface, plus **all of session auth** | Transaction builders (`/tx/*`) and on-chain reads |
 
 **The older service carries more than `/v1`**, and the part that surprises
-people is that `/v0` is where the session lives. `POST /v0/login`,
-`POST /v0/authToken` and `POST /v0/authToken/verify` open a session; likes,
+people is that `/v0` is where most of the session lives. The session itself
+starts on the Rust service (`POST /v2/session`, which sets the login cookie and
+proves nothing); `GET /v0/currentUser`, `POST /v0/authToken` and
+`POST /v0/authToken/verify` read the user and prove the wallet; likes,
 follows, hides, wallet linking, whitelist eligibility and the marketplace-event
 reads sit there too. `/home`, `/exhibitions/explore` and `/exhibitions/{slug}`
 carry no version segment at all. All of them resolve against

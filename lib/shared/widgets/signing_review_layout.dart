@@ -131,6 +131,7 @@ class ReviewDecisionBar extends StatefulWidget {
     this.rejectLabel = 'Reject',
     this.approveLabel = 'Approve',
     this.holdToApprove = false,
+    this.holdLabel = 'Hold to approve anyway',
     super.key,
   });
 
@@ -142,6 +143,10 @@ class ReviewDecisionBar extends StatefulWidget {
   final Key rejectKey, approveKey;
   final String rejectLabel, approveLabel;
   final bool holdToApprove;
+
+  /// What the press-and-hold button says. "Anyway" fits a review that found
+  /// something; a caller with no review to show yet says what it skips.
+  final String holdLabel;
 
   @override
   State<ReviewDecisionBar> createState() => _ReviewDecisionBarState();
@@ -218,7 +223,7 @@ class _ReviewDecisionBarState extends State<ReviewDecisionBar>
           const SizedBox(height: 10),
           HoldToApproveButton(
             key: widget.approveKey,
-            label: 'Hold to approve anyway',
+            label: widget.holdLabel,
             accessibilityActionLabel: '${widget.approveLabel} anyway',
             onConfirmed: widget.onApprove,
           ),

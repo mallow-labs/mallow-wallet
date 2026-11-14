@@ -362,6 +362,66 @@ void main() {
     expect(find.byType(SendAmountStep), findsOneWidget);
   });
 
+  testWidgets('a display-name row is marked and fills the field with the '
+      'address, however long or handle-like the name', (tester) async {
+    // The name another account chose must not read as a handle, in the row or
+    // in the field. The longest name the backend allows must not push the mark
+    // out of the row either.
+    tester.view.physicalSize = const Size(390, 3000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final longName = '@alice${'-' * 42}';
+    final service = _FakeRecipientSearchService([
+      const RecipientSuggestion(address: _aliceMain, username: 'alice'),
+      RecipientSuggestion(address: _aliceSecond, displayName: longName),
+    ]);
+    await setUpSheet(service);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: MallowTheme.lightTheme,
+        home: Scaffold(
+          body: MultiBlocProvider(
+            providers: [
+              BlocProvider<TokenBalanceBloc>.value(value: tokenBalanceBloc),
+              BlocProvider<SendBloc>.value(value: sendBloc),
+            ],
+            child: SendSheet(initialToken: _solToken()),
+          ),
+        ),
+      ),
+    );
+    await flush(tester);
+
+    await type(tester, 'alice');
+
+    expect(find.text('@alice'), findsOneWidget);
+    final realRow = find.byKey(recipientSuggestionKey(_aliceMain));
+    final squatRow = find.byKey(recipientSuggestionKey(_aliceSecond));
+    expect(
+      find.descendant(of: realRow, matching: find.text('No username')),
+      findsNothing,
+    );
+    final mark = find.descendant(
+      of: squatRow,
+      matching: find.text('No username'),
+    );
+    expect(mark, findsOneWidget);
+    final rowRect = tester.getRect(squatRow);
+    final markRect = tester.getRect(mark);
+    expect(markRect.right, lessThanOrEqualTo(rowRect.right));
+    expect(markRect.left, greaterThanOrEqualTo(rowRect.left));
+    expect(find.textContaining('@alice-'), findsNothing);
+    expect(tester.takeException(), isNull);
+
+    await tester.tap(squatRow);
+    await flush(tester);
+
+    expect(
+      tester.widget<TextField>(find.byType(TextField).first).controller?.text,
+      _aliceSecond,
+    );
+  });
+
   testWidgets('dragging the results list scrolls it and keeps it open', (
     tester,
   ) async {

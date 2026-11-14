@@ -44,6 +44,7 @@ import '../../cast/services/cast_actions.dart';
 import '../../curations/data/curation_repository.dart';
 import '../../curations/services/curation_attribution_store.dart';
 import '../../moderation/services/moderation_actions.dart';
+import '../../moderation/services/moderation_filter.dart';
 import '../../moderation/services/report_context.dart';
 import '../../portfolio/services/portfolio_bloc.dart';
 import '../../portfolio/widgets/all_art_detail.dart';
@@ -147,6 +148,30 @@ class _CurationScreenState extends State<CurationScreen> {
   /// instant it leaves the wallet. See [initState].
   StreamSubscription<String>? _removalSignalSub;
 
+  /// Fires when the viewer blocks an account or reports something. See
+  /// [initState].
+  late final Listenable _moderationChanges;
+
+  /// Drops artworks by accounts the viewer blocked, and artworks they
+  /// reported, from someone else's curation. The viewer's own curation is
+  /// their own selection and is shown whole.
+  List<PortfolioArtwork> _visibleArtworks(List<PortfolioArtwork> artworks) {
+    final moderation = ModerationFilter.current();
+    final visible = moderation.visible(
+      artworks,
+      (a) => moderation.hidesMint(a.mintAccount),
+    );
+    if (visible.length == artworks.length || _isOwnCuration) return artworks;
+    return visible;
+  }
+
+  void _onModerationChanged() {
+    if (!mounted) return;
+    final visible = _visibleArtworks(_artworks);
+    if (visible.length == _artworks.length) return;
+    setState(() => _artworks = visible);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -157,7 +182,7 @@ class _CurationScreenState extends State<CurationScreen> {
     });
 
     if (widget.preloadedArtworks != null) {
-      _artworks = List.of(widget.preloadedArtworks!);
+      _artworks = List.of(_visibleArtworks(widget.preloadedArtworks!));
       _pinMosaicImages(_artworks);
       _loading = false;
     } else {
@@ -202,12 +227,18 @@ class _CurationScreenState extends State<CurationScreen> {
         });
       });
     }
+
+    // A block or a report made from a route on top of this one (an artwork's
+    // page, its artist's profile) takes effect on the list underneath.
+    _moderationChanges = ModerationFilter.current().changes
+      ..addListener(_onModerationChanged);
   }
 
   @override
   void dispose() {
     _editedSignalSub?.cancel();
     _removalSignalSub?.cancel();
+    _moderationChanges.removeListener(_onModerationChanged);
     _scrollController.dispose();
     _curatorTapRecognizer.dispose();
     super.dispose();
@@ -240,6 +271,7 @@ class _CurationScreenState extends State<CurationScreen> {
     try {
       final List<PortfolioArtwork> artworks;
       if (widget.customFetchArtworks != null) {
+        // Filtered where it is fetched (an exhibition's repository).
         artworks = await widget.customFetchArtworks!();
       } else {
         // The curation detail endpoint returns the full ordered artwork list
@@ -247,7 +279,19 @@ class _CurationScreenState extends State<CurationScreen> {
         final result = await sl<CurationRepository>().getCurationById(
           widget.group.id,
         );
-        artworks = result.artworks;
+        // The mapped list keeps only the mint, so the filter is shown each
+        // artwork with its creator here, where the detail still has it.
+        final moderation = ModerationFilter.current();
+        final hidden = {
+          for (final preview in result.detail.artworks)
+            if (moderation.hidesPreview(preview)) preview.mintAccount,
+        };
+        artworks = hidden.isEmpty || _isOwnCuration
+            ? result.artworks
+            : [
+                for (final a in result.artworks)
+                  if (!hidden.contains(a.mintAccount)) a,
+              ];
         _isPrivate = result.detail.visibility == 'private';
         // The moderation alert deep-links a reported curation as
         // `mallow.art/e/<slug>`, so the report's targetId is the slug, not the
@@ -710,6 +754,7 @@ class _CurationScreenState extends State<CurationScreen> {
     final reported = await runReportCurationFlow(
       context,
       curationSlug: _slug ?? widget.group.id,
+      curationId: widget.group.id,
       screen: currentScreenName(context),
     );
     if (reported && mounted) context.pop();

@@ -5,11 +5,12 @@ import 'package:injectable/injectable.dart';
 // OffersInboxItem is imported unprefixed because freezed's generated deep-copy
 // code can't reference prefixed types ($OffersInboxItemCopyWith must resolve).
 import 'package:mallow_api/mallow_api.dart'
-    show AuctionStatus, OffersInboxItem, OffersInboxSort;
+    show AuctionStatus, OffersInboxDirection, OffersInboxItem, OffersInboxSort;
 
 import '../../../core/result/result.dart';
 import '../../../core/session/session_manager.dart';
 import '../../../shared/utils/chain.dart';
+import '../../moderation/services/moderation_filter.dart';
 import '../data/offers_inbox_repository.dart';
 import '../models/bid_refund_balance.dart';
 
@@ -72,12 +73,46 @@ sealed class OffersInboxState with _$OffersInboxState {
 /// offers + bids (received and placed) into one merged, paginated feed.
 @injectable
 class OffersInboxBloc extends Bloc<OffersInboxEvent, OffersInboxState> {
-  OffersInboxBloc(this._repository, this._session)
-    : super(const OffersInboxState.initial()) {
+  OffersInboxBloc(
+    this._repository,
+    this._session, {
+    // Tests pass a filter over fake stores. Kept out of the generated
+    // construction, which uses the app's.
+    @ignoreParam ModerationFilter Function()? moderation,
+  }) : _moderation = moderation ?? ModerationFilter.current,
+       super(const OffersInboxState.initial()) {
     on<OffersInboxLoad>(_onLoad);
     on<OffersInboxRefresh>(_onRefresh);
     on<OffersInboxLoadMore>(_onLoadMore);
     on<OffersInboxSetSort>(_onSetSort);
+
+    // A block made while the inbox is on screen (from a bidder's profile,
+    // pushed on top of it) withholds that account's rows.
+    _moderationChanges = _moderation().changes..addListener(_onBlocksChanged);
+  }
+
+  final ModerationFilter Function() _moderation;
+  late final Listenable _moderationChanges;
+
+  /// Refetches the inbox when a row on screen is from an account the viewer
+  /// has just blocked. The refetch runs through [_withholdBlocked] and brings
+  /// back the backend's own count, so the disclosure row is right as well.
+  /// The rows stay up until it lands, as on any refresh.
+  void _onBlocksChanged() {
+    if (isClosed || state is! OffersInboxLoaded) return;
+    final moderation = _moderation();
+    final affected = _items.any(
+      (item) =>
+          item.direction == OffersInboxDirection.received &&
+          moderation.blocksAddress(item.actorAddress),
+    );
+    if (affected) add(const OffersInboxEvent.refresh(refreshRefunds: false));
+  }
+
+  @override
+  Future<void> close() {
+    _moderationChanges.removeListener(_onBlocksChanged);
+    return super.close();
   }
 
   /// How far past `endsAt` an auction must be before [_resolveEndedAuctions]
@@ -98,6 +133,10 @@ class OffersInboxBloc extends Bloc<OffersInboxEvent, OffersInboxState> {
   /// across the whole merged unpaged set, so it comes off the first page and
   /// is not accumulated as further pages land.
   int _hiddenByBlockCount = 0;
+
+  /// Rows this bloc withheld itself ([_withholdBlocked]), across the pages
+  /// loaded so far. Added to the backend's count for the disclosure row.
+  int _withheldHere = 0;
   List<BidRefundBalance> _bidRefunds = [];
   String? _bidRefundError;
   String? _inboxError;
@@ -113,8 +152,30 @@ class OffersInboxBloc extends Bloc<OffersInboxEvent, OffersInboxState> {
     inboxError: _inboxError,
     sort: _sort,
     hasMore: _hasMore,
-    hiddenByBlockCount: _hiddenByBlockCount,
+    hiddenByBlockCount: _hiddenByBlockCount + _withheldHere,
   );
+
+  /// Drops received rows whose counterparty the viewer blocked, counting them
+  /// into [_withheldHere] so the disclosure row still owns up to them.
+  ///
+  /// The backend does the same when the session has proven its wallet. A
+  /// hardware or Seed Vault session often has not, so this applies the block
+  /// list the device holds to whatever arrives.
+  ///
+  /// Same rule as the backend: the counterparty of a received row only. On a
+  /// placed row the actor is the viewer's own wallet, and their own offers
+  /// and bids are never withheld. A report alone withholds nothing here.
+  List<OffersInboxItem> _withholdBlocked(List<OffersInboxItem> items) {
+    final moderation = _moderation();
+    final kept = [
+      for (final item in items)
+        if (item.direction != OffersInboxDirection.received ||
+            !moderation.blocksAddress(item.actorAddress))
+          item,
+    ];
+    _withheldHere += items.length - kept.length;
+    return kept;
+  }
 
   OffersInboxState _settledState() => _inboxError != null && _bidRefunds.isEmpty
       ? OffersInboxState.error(message: _inboxError!)
@@ -173,9 +234,11 @@ class OffersInboxBloc extends Bloc<OffersInboxEvent, OffersInboxState> {
         _items = [];
         _cursor = null;
         _hiddenByBlockCount = 0;
+        _withheldHere = 0;
         _inboxError = result.errorOrNull?.message ?? 'Failed to load offers';
       } else {
-        _items = _resolveEndedAuctions(page.result);
+        _withheldHere = 0;
+        _items = _withholdBlocked(_resolveEndedAuctions(page.result));
         _cursor = page.nextPage;
         _hiddenByBlockCount = page.hiddenByBlockCount;
       }
@@ -260,7 +323,10 @@ class OffersInboxBloc extends Bloc<OffersInboxEvent, OffersInboxState> {
         page: page,
       );
       if (generation != _firstPageGeneration) return;
-      _items = [..._items, ..._resolveEndedAuctions(next.result)];
+      _items = [
+        ..._items,
+        ..._withholdBlocked(_resolveEndedAuctions(next.result)),
+      ];
       _cursor = next.nextPage;
     });
 

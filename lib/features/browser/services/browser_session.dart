@@ -8,6 +8,7 @@ import '../../../core/security/secure_storage.dart';
 import '../../../di.dart';
 import '../data/browser_repository.dart';
 import '../models/browser_models.dart';
+import 'browser_domain_policy.dart';
 import 'browser_site_icons.dart';
 
 /// Device-wide metadata. Only the selected tab has a live platform WebView.
@@ -42,7 +43,13 @@ class BrowserSession extends ChangeNotifier {
 
   /// Each origin's last title and icon, oldest first. Device-wide like the
   /// bookmarks: closing tabs keeps it, and "Clear browsing data" drops it.
+  /// Which of them the user typed is not device-wide: [clear] forgets it.
   final Map<String, BrowserSiteInfo> _sites = {};
+
+  /// The address the user just typed, until the next document commits. Only
+  /// the active tab has a WebView, so that commit is the typed navigation,
+  /// or, when it failed, a later one that [_sameSite] turns away.
+  Uri? _typedPending;
 
   /// Page screenshots for the tab switcher. Memory only, by design: they can
   /// show balances or addresses, so they are never written to storage and are
@@ -58,6 +65,7 @@ class BrowserSession extends ChangeNotifier {
   bool isLoaded = false;
   bool? _clearWhileLoading;
   bool _forgetSitesWhileLoading = false;
+  bool _forgetTypedWhileLoading = false;
   List<BrowserTab> get tabs => List.unmodifiable(_tabs);
   List<BrowserBookmark> get bookmarks => List.unmodifiable(_bookmarks);
   String? get activeId => _activeId;
@@ -68,6 +76,32 @@ class BrowserSession extends ChangeNotifier {
   /// What the browser last saw of [url]'s origin, or null.
   BrowserSiteInfo? site(Uri url) =>
       isBrowserUrl(url) ? _sites[url.origin] : null;
+
+  /// Sites the user typed their way to, most recent first.
+  List<BrowserSiteInfo> get typedSites => [
+    for (final site in _sites.values.toList().reversed)
+      if (site.typed) site,
+  ];
+
+  /// Records that the user typed [url] (or picked it from the suggestions),
+  /// just before the browser navigates to it. The site is remembered as typed
+  /// only once a document on the same site commits, so an address that never
+  /// loads is never offered again.
+  void noteTyped(Uri url) {
+    if (_retired || !isBrowserUrl(url)) return;
+    _typedPending = url;
+  }
+
+  /// One site for typing purposes: the address typed and the one it settled
+  /// on share a registrable domain (`jup.ag` landing on `www.jup.ag`).
+  static bool _sameSite(Uri typed, Uri committed) {
+    String site(Uri uri) {
+      final domain = BrowserDomainPolicy.registrableDomain(uri.host);
+      return domain.startsWith('www.') ? domain.substring(4) : domain;
+    }
+
+    return site(typed) == site(committed);
+  }
 
   Future<void> load() {
     if (_retired) return Future.value();
@@ -83,6 +117,7 @@ class BrowserSession extends ChangeNotifier {
         for (final site in data.sites) {
           _sites[site.origin] = site;
         }
+        if (_forgetTypedWhileLoading) _forgetTyped();
       }
       // The start page and tab switcher show these icons first; read the
       // stored drawings before they appear rather than just after.
@@ -111,6 +146,7 @@ class BrowserSession extends ChangeNotifier {
     if (_retired || generation != _generation) return;
     isLoaded = true;
     _forgetSitesWhileLoading = false;
+    _forgetTypedWhileLoading = false;
     if (_clearWhileLoading != null) {
       _clearWhileLoading = null;
       _changed();
@@ -188,7 +224,14 @@ class BrowserSession extends ChangeNotifier {
     if (_retired) return;
     final index = _tabs.indexWhere((t) => t.id == id);
     if (index < 0) return;
-    if (url != null) _pendingUrls.remove(id);
+    if (url != null) {
+      _pendingUrls.remove(id);
+      final typed = _typedPending;
+      _typedPending = null;
+      if (typed != null && isBrowserUrl(url) && _sameSite(typed, url)) {
+        _markTyped(url);
+      }
+    }
     final tab = _tabs[index] = _tabs[index].copyWith(
       url: url,
       title: title,
@@ -240,9 +283,45 @@ class BrowserSession extends ChangeNotifier {
       origin: url.origin,
       title: title.isEmpty || title == url.host ? previous?.title ?? '' : title,
       iconUrl: tab.iconUrl ?? previous?.iconUrl,
+      typed: previous?.typed ?? false,
     );
+    _trimSites();
+  }
+
+  void _markTyped(Uri url) {
+    final previous = _sites.remove(url.origin);
+    _sites[url.origin] = BrowserSiteInfo(
+      origin: url.origin,
+      title: previous?.title ?? '',
+      iconUrl: previous?.iconUrl,
+      typed: true,
+    );
+    _trimSites();
+  }
+
+  /// Forgets which sites were typed, keeping each one's title and icon: a
+  /// bookmark that stays may still be drawn with them.
+  void _forgetTyped() {
+    _typedPending = null;
+    for (final site in _sites.values.toList()) {
+      if (!site.typed) continue;
+      _sites[site.origin] = BrowserSiteInfo(
+        origin: site.origin,
+        title: site.title,
+        iconUrl: site.iconUrl,
+      );
+    }
+  }
+
+  /// Forgets the oldest site past capacity, sparing typed sites while any
+  /// other is left: they are what the address bar suggests.
+  void _trimSites() {
     while (_sites.length > BrowserRepository.siteCapacity) {
-      _sites.remove(_sites.keys.first);
+      final oldest = _sites.values.firstWhere(
+        (site) => !site.typed,
+        orElse: () => _sites.values.first,
+      );
+      _sites.remove(oldest.origin);
     }
   }
 
@@ -366,16 +445,25 @@ class BrowserSession extends ChangeNotifier {
     _changed();
   }
 
-  /// Closes every tab. [forgetSites] also drops the remembered site titles
-  /// and icons, as "Clear browsing data" does.
+  /// Closes every tab and forgets which sites were typed. The browser is
+  /// cleared when it passes to another Account or Profile, and the address
+  /// bar must not offer the next one the addresses the last one typed.
+  /// [forgetSites] also drops the remembered site titles and icons, as
+  /// "Clear browsing data" does.
   void clear({required bool keepBookmarks, bool forgetSites = false}) {
     if (_retired) return;
     if (!isLoaded) {
       _clearWhileLoading = (_clearWhileLoading ?? true) && keepBookmarks;
       _forgetSitesWhileLoading |= forgetSites;
+      _forgetTypedWhileLoading = true;
     }
     _tabs.clear();
-    if (forgetSites) _sites.clear();
+    if (forgetSites) {
+      _sites.clear();
+      _typedPending = null;
+    } else {
+      _forgetTyped();
+    }
     _pendingUrls.clear();
     _dropThumbnails();
     unawaited(BrowserSiteIcons.instance.clear(stored: forgetSites));
@@ -411,11 +499,13 @@ class BrowserSession extends ChangeNotifier {
     unawaited(BrowserSiteIcons.instance.clear(stored: true));
     _bookmarks.clear();
     _sites.clear();
+    _typedPending = null;
     _activeId = null;
     error = null;
     isLoaded = false;
     _clearWhileLoading = null;
     _forgetSitesWhileLoading = false;
+    _forgetTypedWhileLoading = false;
     notifyListeners();
   }
 

@@ -1726,6 +1726,14 @@ $_popupGestureScript
         }
         return NavigationActionPolicy.CANCEL;
       }
+      // A frame's own empty or inline document. It takes the origin of the
+      // page that made it, so it reaches nothing that page could not.
+      // Cloudflare's security check builds both inside its challenge frame
+      // and spins on "Verifying..." forever when either is refused.
+      if (!action.isForMainFrame &&
+          (raw == 'about:blank' || raw == 'about:srcdoc')) {
+        return NavigationActionPolicy.ALLOW;
+      }
       if (uri == null || !isBrowserUrl(uri)) {
         if (action.isForMainFrame)
           widget.onError(
@@ -1841,8 +1849,11 @@ $_popupGestureScript
           allow: false,
           retain: false,
         ),
-    // Android supports this callback. WKWebView file-input panels still require
-    // iOS device verification; no native upload capability is advertised.
+    // Android only. On iOS the plugin leaves file inputs to WebKit, whose own
+    // picker (Photo Library, Take Photo or Video, Choose File) handles uploads,
+    // such as an artwork file the web app mints from. That picker never takes
+    // the app out of `resumed`, so the browser's cover and the app lock stay
+    // down while it is open.
     onShowFileChooser: (_, _) async {
       widget.onError('File uploads are unavailable in this browser.');
       return ShowFileChooserResponse(handledByClient: true, filePaths: []);

@@ -703,6 +703,49 @@ void main() {
     });
   });
 
+  // A proof left behind is found again when the same address comes back as
+  // a watch-only wallet, and gives it a signed session until it expires.
+  group('removing a wallet deletes its stored ownership proof', () {
+    Iterable<String> proofs() =>
+        fssStore.keys.where((k) => k.startsWith('mallow_wallet_sig_'));
+
+    test('an Ethereum wallet: the row holds the checksummed address, the '
+        'proof is filed under the lowercased one', () async {
+      const checksummed = '0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed';
+      final wallet = await repo.addViewOnlyWallet(checksummed, 'Watching');
+      expect(wallet.address, checksummed);
+      // As the auth layer files it.
+      await storage.storeWalletSigCookie(checksummed.toLowerCase(), 'proof');
+      expect(proofs(), hasLength(1));
+
+      await repo.removeWallet(wallet.id);
+
+      expect(proofs(), isEmpty);
+      expect(
+        await storage.loadWalletSigCookie(checksummed.toLowerCase()),
+        isNull,
+      );
+    });
+
+    test('a proof filed under the address as the row spells it goes '
+        'too', () async {
+      const checksummed = '0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed';
+      final wallet = await repo.addViewOnlyWallet(checksummed, 'Watching');
+      await storage.storeWalletSigCookie(checksummed, 'proof');
+      await repo.removeWallet(wallet.id);
+      expect(proofs(), isEmpty);
+    });
+
+    test('a Solana wallet: under the address as it is, case and all', () async {
+      final wallet = await repo.addViewOnlyWallet('SoMeAddr111', 'Watching');
+      await storage.storeWalletSigCookie('SoMeAddr111', 'proof');
+      // Another wallet's proof is not this removal's to delete.
+      await storage.storeWalletSigCookie('someaddr111', 'another');
+      await repo.removeWallet(wallet.id);
+      expect(proofs(), ['mallow_wallet_sig_someaddr111']);
+    });
+  });
+
   group('addLedgerWallet', () {
     test('stores derivation scheme and device id', () async {
       final wallet = await repo.addLedgerWallet(
@@ -2807,6 +2850,308 @@ void main() {
         isA<RestoreRestored>(),
       );
       expect(await repo.getAllWallets(), isNotEmpty);
+    });
+
+    // That holds for a social row with no vault only while its stored key
+    // reads. Nothing in the app re-creates the key of a wallet from the older
+    // sign-in, or of a vault wallet whose backup was deleted, so with the key
+    // gone the row signs nothing and must not earn the offer.
+    test('a social wallet without a vault whose key is gone does not offer a '
+        'partial restore', () async {
+      final sp = await seedSingleWallet();
+      final social = (await addSocial()).wallets;
+      await repo.syncWalletGraph();
+      final graphJson = (await storage.loadAccountGraph())!;
+      await db.clearAll();
+      vaultStore.remove('mallow_mnemonic_seed_${sp.id}');
+      for (final w in social) {
+        vaultStore.remove('mallow_pk_${w.id}');
+      }
+
+      final aborted = await repo.restoreFromGraph(graphJson) as RestoreAborted;
+      expect(aborted.readableWallets, 0);
+      expect(aborted.hasReadable, isFalse);
+    });
+
+    test('a social wallet linked to a vault offers one even with its key '
+        'gone: signing in reopens the vault', () async {
+      final sp = await seedSingleWallet();
+      final social = (await repo.addSocialAccount(
+        provider: 'google',
+        name: 'Google Wallet',
+        solana: _socialSolana,
+        ethereum: _socialEthereum,
+        tezos: _socialTezos,
+        socialVaultId: 'vault-1',
+      )).wallets;
+      await repo.syncWalletGraph();
+      final graphJson = (await storage.loadAccountGraph())!;
+      await db.clearAll();
+      vaultStore.remove('mallow_mnemonic_seed_${sp.id}');
+      for (final w in social) {
+        vaultStore.remove('mallow_pk_${w.id}');
+      }
+
+      final aborted = await repo.restoreFromGraph(graphJson) as RestoreAborted;
+      expect(aborted.hasReadable, isTrue);
+    });
+
+    group('the older sign-in mark', () {
+      /// A device as an update leaves it: one social account from the older
+      /// sign-in (marked, no vault) and one social vault account.
+      Future<({String older, String vault})> seedBothKinds() async {
+        final older = (await addSocial()).wallets;
+        await db.customStatement(
+          "UPDATE wallets SET legacy_social = 1 WHERE wallet_type = 'social'",
+        );
+        final vault = (await repo.addSocialAccount(
+          provider: 'apple',
+          name: 'Apple Wallet',
+          solana: const SocialChainCredential(
+            address: 'VaultSolanaAddress1111111111111111111111111',
+            storedKey: 'vault-sol-key',
+          ),
+          ethereum: const SocialChainCredential(
+            address: '0x2222222222222222222222222222222222222222',
+            storedKey: 'vault-eth-key',
+          ),
+          tezos: const SocialChainCredential(
+            address: 'tz1VaultAddressxxxxxxxxxxxxxxxxxxxxxx',
+            storedKey: 'vault-tez-key',
+          ),
+          socialVaultId: 'vault-1',
+        )).wallets;
+        return (
+          older: older.singleWhere((w) => w.chain == 'solana').id,
+          vault: vault.singleWhere((w) => w.chain == 'solana').id,
+        );
+      }
+
+      test(
+        'is read off the row, and only the marked wallets carry it',
+        () async {
+          final ids = await seedBothKinds();
+
+          final older = await repo.getWalletById(ids.older);
+          expect(older?.isLegacySocialWallet, isTrue);
+          expect(older?.badge, WalletBadge.googleLegacy);
+          final vault = await repo.getWalletById(ids.vault);
+          expect(vault?.isLegacySocialWallet, isFalse);
+          expect(vault?.badge, WalletBadge.apple);
+
+          final accounts = await repo.getAccountViews();
+          expect(accounts.where((a) => a.isLegacySocial), hasLength(1));
+        },
+      );
+
+      test('survives a restore from the graph', () async {
+        final ids = await seedBothKinds();
+        await repo.syncWalletGraph();
+        final graphJson = (await storage.loadAccountGraph())!;
+        final entries =
+            (jsonDecode(graphJson) as Map<String, dynamic>)['wallets'] as List;
+        expect(
+          entries.every((e) => (e as Map).containsKey('legacySocial')),
+          isTrue,
+        );
+
+        await db.clearAll();
+        expect(await repo.restoreFromGraph(graphJson), isA<RestoreRestored>());
+
+        expect(
+          (await repo.getWalletById(ids.older))?.isLegacySocialWallet,
+          isTrue,
+        );
+        expect(
+          (await repo.getWalletById(ids.vault))?.isLegacySocialWallet,
+          isFalse,
+        );
+      });
+
+      test('a vault wallet whose backup was deleted is never one, on the row '
+          'or after a restore', () async {
+        final ids = await seedBothKinds();
+        final vaultAccount = (await repo.getWalletById(ids.vault))!.accountId!;
+        await repo.setSocialVaultId(vaultAccount, null);
+
+        final unlinked = await repo.getWalletById(ids.vault);
+        expect(unlinked?.socialVaultId, isNull);
+        expect(unlinked?.isLegacySocialWallet, isFalse);
+        expect(unlinked?.badge, WalletBadge.apple);
+
+        // The graph written by that unlink carries the answer, so a reinstall
+        // does not turn the wallet into one from the older sign-in.
+        final graphJson = (await storage.loadAccountGraph())!;
+        await db.clearAll();
+        expect(await repo.restoreFromGraph(graphJson), isA<RestoreRestored>());
+        expect(
+          (await repo.getWalletById(ids.vault))?.isLegacySocialWallet,
+          isFalse,
+        );
+        expect(
+          (await repo.getWalletById(ids.older))?.isLegacySocialWallet,
+          isTrue,
+        );
+      });
+
+      test('a graph written before the mark existed marks its social wallets '
+          'that have no vault', () async {
+        // What a release before this one wrote: no `legacySocial` key at all.
+        // No such release could create a vault, so a social entry without a
+        // vault id is a wallet from the older sign-in — the same answer the
+        // database migration gives the row.
+        final ids = await seedBothKinds();
+        final hd = (await seedSingleWallet());
+        await repo.syncWalletGraph();
+        final graph =
+            jsonDecode((await storage.loadAccountGraph())!)
+                as Map<String, dynamic>;
+        for (final entry in graph['wallets'] as List) {
+          (entry as Map<String, dynamic>).remove('legacySocial');
+        }
+
+        await db.clearAll();
+        expect(
+          await repo.restoreFromGraph(jsonEncode(graph)),
+          isA<RestoreRestored>(),
+        );
+
+        expect(
+          (await repo.getWalletById(ids.older))?.isLegacySocialWallet,
+          isTrue,
+        );
+        expect(
+          (await repo.getWalletById(ids.vault))?.isLegacySocialWallet,
+          isFalse,
+          reason: 'it has a vault id',
+        );
+        final seedWallets = await repo.getWalletsForSeedPhrase(hd.id);
+        expect(seedWallets, isNotEmpty);
+        expect(seedWallets.any((w) => w.isLegacySocialWallet), isFalse);
+      });
+    });
+
+    group('the sign-in identity of a vault link', () {
+      const identityId = '8ca57526739bfeac48d22f9d47d76f1a';
+
+      Future<List<WalletInfo>> addVaultWallet({
+        String? vaultId = 'vault-1',
+        String? identity = identityId,
+      }) async => (await repo.addSocialAccount(
+        provider: 'google',
+        name: 'Google Wallet',
+        solana: _socialSolana,
+        ethereum: _socialEthereum,
+        tezos: _socialTezos,
+        socialVaultId: vaultId,
+        socialIdentityId: identity,
+      )).wallets;
+
+      test('is stored on every row with the link', () async {
+        final wallets = await addVaultWallet();
+        expect(
+          wallets.map((w) => w.socialIdentityId),
+          everyElement(identityId),
+        );
+        for (final w in wallets) {
+          final row = await repo.getWalletById(w.id);
+          expect(row?.socialVaultId, 'vault-1');
+          expect(row?.socialIdentityId, identityId);
+        }
+      });
+
+      test('survives the loss of the database: the recovery graph carries '
+          'it', () async {
+        final wallets = await addVaultWallet();
+        final graphJson = (await storage.loadAccountGraph())!;
+        final entries =
+            (jsonDecode(graphJson) as Map<String, dynamic>)['wallets'] as List;
+        expect(
+          entries.map((e) => (e as Map)['socialIdentityId']),
+          everyElement(identityId),
+        );
+
+        await db.clearAll();
+        expect(await repo.restoreFromGraph(graphJson), isA<RestoreRestored>());
+        for (final w in wallets) {
+          final row = await repo.getWalletById(w.id);
+          expect(row?.socialVaultId, 'vault-1');
+          expect(row?.socialIdentityId, identityId);
+        }
+      });
+
+      test('a graph written before the identity was recorded restores a '
+          'vault wallet without one', () async {
+        final wallets = await addVaultWallet();
+        final graph =
+            jsonDecode((await storage.loadAccountGraph())!)
+                as Map<String, dynamic>;
+        for (final entry in graph['wallets'] as List) {
+          (entry as Map<String, dynamic>).remove('socialIdentityId');
+        }
+        await db.clearAll();
+        expect(
+          await repo.restoreFromGraph(jsonEncode(graph)),
+          isA<RestoreRestored>(),
+        );
+        final row = await repo.getWalletById(wallets.first.id);
+        expect(row?.socialVaultId, 'vault-1');
+        expect(row?.socialIdentityId, isNull);
+      });
+
+      test('a wallet opened before the identity was recorded picks it up at '
+          'its next sign-in', () async {
+        final wallets = await addVaultWallet(identity: null);
+        expect(
+          (await repo.getWalletById(wallets.first.id))?.socialIdentityId,
+          isNull,
+        );
+        final again = await addVaultWallet();
+        expect(again.map((w) => w.socialIdentityId), everyElement(identityId));
+        expect(
+          (await repo.getWalletById(wallets.first.id))?.socialIdentityId,
+          identityId,
+        );
+      });
+
+      test('a reopen with no sign-in keeps the identity recorded', () async {
+        final wallets = await addVaultWallet();
+        final again = await addVaultWallet(identity: null);
+        expect(again.map((w) => w.socialIdentityId), everyElement(identityId));
+        expect(
+          (await repo.getWalletById(wallets.first.id))?.socialIdentityId,
+          identityId,
+        );
+      });
+
+      test('unlinking drops it with the vault id, on the rows and in the '
+          'graph', () async {
+        final wallets = await addVaultWallet();
+        await repo.setSocialVaultId(wallets.first.accountId!, null);
+        for (final w in wallets) {
+          final row = await repo.getWalletById(w.id);
+          expect(row?.socialVaultId, isNull);
+          expect(row?.socialIdentityId, isNull);
+          expect(row?.isLegacySocialWallet, isFalse);
+        }
+        final entries =
+            (jsonDecode((await storage.loadAccountGraph())!)
+                    as Map<String, dynamic>)['wallets']
+                as List;
+        expect(
+          entries.map((e) => (e as Map)['socialIdentityId']),
+          everyElement(isNull),
+        );
+      });
+
+      test('is never recorded without a vault', () async {
+        final wallets = await addVaultWallet(vaultId: null);
+        expect(wallets.map((w) => w.socialIdentityId), everyElement(isNull));
+        expect(
+          (await repo.getWalletById(wallets.first.id))?.socialIdentityId,
+          isNull,
+        );
+      });
     });
 
     // An import whose every selection was already taken leaves an account row

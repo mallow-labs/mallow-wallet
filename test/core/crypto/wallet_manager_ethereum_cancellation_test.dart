@@ -57,6 +57,7 @@ void main() {
         walletType: 'ledger',
         chain: 'ethereum',
         derivationIndex: 2,
+        legacySocial: false,
         createdAt: 0,
         sortIndex: 0,
       ),

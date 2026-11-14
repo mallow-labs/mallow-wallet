@@ -313,6 +313,184 @@ void main() {
   // opens the re-auth gate in Settings. The bloc therefore reads the pair
   // through the store's retrying helper, and treats a read it cannot make at
   // all as a lock, not as the absence of one.
+  group('AppLockBloc shares its budget with the re-auth prompts', () {
+    Future<AppLockBloc> lockedBloc() async {
+      final bloc = buildBloc();
+      addTearDown(bloc.close);
+      bloc.add(const AppLockEvent.init());
+      await settle();
+      return bloc;
+    }
+
+    Future<AppLockBloc> relockedBloc() async {
+      final bloc = await lockedBloc();
+      bloc.add(const AppLockEvent.unlockWithPin(correctPin));
+      await settle();
+      expect(bloc.state, isA<AppLockStateUnlocked>());
+      return bloc;
+    }
+
+    test('a wrong PIN on the lock screen continues the count the prompts '
+        'left, rather than writing over it', () async {
+      final bloc = await lockedBloc();
+      // Spent on a sheet after this state was read.
+      when(() => storage.loadFailedPinAttempts()).thenAnswer((_) async => 4);
+
+      bloc.add(const AppLockEvent.unlockWithPin(wrongPin));
+      await settle();
+
+      final state = bloc.state as AppLockStateLocked;
+      expect(state.failedAttempts, 5);
+      expect(state.cooldownUntil, isNotNull);
+      verify(() => storage.storeFailedPinAttempts(5)).called(1);
+    });
+
+    test('a cooldown a prompt armed holds at the lock screen, even against the '
+        'correct PIN', () async {
+      final bloc = await lockedBloc();
+      final armed = DateTime.now().add(const Duration(minutes: 5));
+      when(() => storage.loadFailedPinAttempts()).thenAnswer((_) async => 5);
+      when(() => storage.loadPinCooldownUntil()).thenAnswer((_) async => armed);
+
+      bloc.add(const AppLockEvent.unlockWithPin(correctPin));
+      await settle();
+
+      final state = bloc.state as AppLockStateLocked;
+      expect(state.cooldownUntil, armed);
+      expect(state.failedAttempts, 5);
+      verifyNever(() => storage.verifyPin(any()));
+    });
+
+    test('backgrounding into the lock screen picks up what the prompts spent, '
+        'so the pad opens frozen', () async {
+      final bloc = await relockedBloc();
+      final armed = DateTime.now().add(const Duration(minutes: 5));
+      when(() => storage.loadFailedPinAttempts()).thenAnswer((_) async => 5);
+      when(() => storage.loadPinCooldownUntil()).thenAnswer((_) async => armed);
+
+      bloc.add(const AppLockEvent.lock());
+      await settle();
+
+      final state = bloc.state as AppLockStateLocked;
+      expect(state.failedAttempts, 5);
+      expect(state.cooldownUntil, armed);
+    });
+
+    test('a deadline left by a moved clock is pulled back to the top tier on '
+        'init', () async {
+      when(() => storage.loadFailedPinAttempts()).thenAnswer((_) async => 5);
+      when(
+        () => storage.loadPinCooldownUntil(),
+      ).thenAnswer((_) async => DateTime.utc(2040));
+
+      final bloc = await lockedBloc();
+
+      final state = bloc.state as AppLockStateLocked;
+      final left = state.cooldownUntil!.difference(DateTime.now()).inSeconds;
+      expect(left, inInclusiveRange(1790, 1800));
+      verify(
+        () => storage.storePinCooldownUntil(state.cooldownUntil!),
+      ).called(1);
+    });
+
+    test('and on a background lock', () async {
+      final bloc = await relockedBloc();
+      when(() => storage.loadFailedPinAttempts()).thenAnswer((_) async => 5);
+      when(
+        () => storage.loadPinCooldownUntil(),
+      ).thenAnswer((_) async => DateTime.utc(2040));
+
+      bloc.add(const AppLockEvent.lock());
+      await settle();
+
+      final state = bloc.state as AppLockStateLocked;
+      final left = state.cooldownUntil!.difference(DateTime.now()).inSeconds;
+      expect(left, inInclusiveRange(1790, 1800));
+    });
+
+    group('a deadline already held in the state', () {
+      final farAhead = DateTime.utc(2040);
+
+      Future<AppLockBloc> lockedHolding(DateTime deadline) async {
+        final bloc = await lockedBloc();
+        // What a clock moved back leaves behind while the lock screen is up.
+        bloc.emit(
+          AppLockState.locked(
+            hasPin: true,
+            failedAttempts: 5,
+            cooldownUntil: deadline,
+          ),
+        );
+        return bloc;
+      }
+
+      void expectAboutTopTierAhead(AppLockBloc bloc) {
+        final state = bloc.state as AppLockStateLocked;
+        final left = state.cooldownUntil!.difference(DateTime.now()).inSeconds;
+        expect(left, inInclusiveRange(1790, 1800));
+        verify(
+          () => storage.storePinCooldownUntil(state.cooldownUntil!),
+        ).called(1);
+      }
+
+      test('is pulled back when the app resumes', () async {
+        final bloc = await lockedHolding(farAhead);
+
+        bloc.add(const AppLockEvent.lock());
+        await settle();
+
+        expectAboutTopTierAhead(bloc);
+        expect((bloc.state as AppLockStateLocked).wrongPinAttempt, isFalse);
+      });
+
+      test('is pulled back by a PIN attempt, which it still refuses', () async {
+        final bloc = await lockedHolding(farAhead);
+
+        bloc.add(const AppLockEvent.unlockWithPin(correctPin));
+        await settle();
+
+        expectAboutTopTierAhead(bloc);
+        expect((bloc.state as AppLockStateLocked).wrongPinAttempt, isTrue);
+        verifyNever(() => storage.verifyPin(any()));
+      });
+
+      test('is left alone when the ladder could have armed it', () async {
+        final armed = DateTime.now().add(const Duration(minutes: 29));
+        final bloc = await lockedHolding(armed);
+
+        bloc.add(const AppLockEvent.lock());
+        await settle();
+
+        expect((bloc.state as AppLockStateLocked).cooldownUntil, armed);
+        verifyNever(() => storage.storePinCooldownUntil(any()));
+      });
+
+      test('a resume with no cooldown running changes nothing', () async {
+        final bloc = await lockedBloc();
+        final before = bloc.state;
+
+        bloc.add(const AppLockEvent.lock());
+        await settle();
+
+        expect(bloc.state, before);
+        verifyNever(() => storage.storePinCooldownUntil(any()));
+      });
+    });
+
+    test('a lockout read that fails does not stop the app locking', () async {
+      final bloc = await relockedBloc();
+      when(() => storage.loadFailedPinAttempts()).thenThrow(StateError('down'));
+      when(() => storage.loadPinCooldownUntil()).thenThrow(StateError('down'));
+
+      bloc.add(const AppLockEvent.lock());
+      await settle();
+
+      final state = bloc.state as AppLockStateLocked;
+      expect(state.failedAttempts, 0);
+      expect(state.cooldownUntil, isNull);
+    });
+  });
+
   group('AppLockBloc auth-factor floor on init', () {
     test('the factors are read through the retrying helper, not the raw '
         'single reads', () async {

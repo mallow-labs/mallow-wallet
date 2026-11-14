@@ -20,13 +20,11 @@ const _kukai =
     'gym exact clown can answer hope sample mirror knife twenty powder super '
     'imitate lion churn almost shed chalk dust civil gadget pyramid helmet trade';
 
-/// RFC 8032 §7.1 TEST 1 Ed25519 secret seed — also fed in as the Tezos seed,
-/// which is what Web3Auth's Tezos convention does with `getPrivKey()`.
+/// RFC 8032 §7.1 TEST 1 Ed25519 secret seed — also fed in as the Tezos seed.
 const _seedHex =
     '9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60';
 
-/// The same vector's 64-byte keypair (seed ‖ public key) — the shape
-/// `Web3AuthFlutter.getEd25519PrivKey()` returns.
+/// The same vector's 64-byte keypair (seed ‖ public key).
 const _ed25519KeyHex =
     '$_seedHex'
     'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a';
@@ -263,47 +261,22 @@ void main() {
     );
   });
 
-  group('Social (Web3Auth) key material', () {
-    test('Solana address is the trailing public half of the keypair hex', () {
-      expect(
-        MultiChainDerivation.solanaAddressFromEd25519KeyHex(_ed25519KeyHex),
-        _solanaAddress,
-      );
-    });
-
+  group('Social wallet key material', () {
     test(
-      'Solana address equals the keypair built from the leading seed half',
+      'a stored Solana key decodes to the seed that derives its address',
       () async {
-        // The seed-vs-pubkey byte order is the one mistake that yields a valid
-        // signature from the *wrong* address, so pin it against the primitive
-        // the imported-key sign path uses (`_loadImportedSolanaSecretKey` →
-        // `Ed25519HDKeyPair.fromPrivateKeyBytes`).
-        final keypair = await Ed25519HDKeyPair.fromPrivateKeyBytes(
-          privateKey: MultiChainDerivation.privateKeyBytesFromHex(_seedHex),
-        );
-        expect(
-          MultiChainDerivation.solanaAddressFromEd25519KeyHex(_ed25519KeyHex),
-          keypair.address,
-        );
-      },
-    );
-
-    test('Solana stored key is base58 of all 64 bytes', () {
-      expect(
-        MultiChainDerivation.solanaStoredKeyFromEd25519KeyHex(_ed25519KeyHex),
-        _solanaStoredKey,
-      );
-    });
-
-    test(
-      'Solana stored key round-trips through the imported-key loader decode',
-      () async {
-        final stored = MultiChainDerivation.solanaStoredKeyFromEd25519KeyHex(
-          _ed25519KeyHex,
-        );
-        // Byte-for-byte what `WalletManager._loadImportedSolanaSecretKey` does.
-        final secret = base58decode(stored).sublist(0, 32);
+        // A social wallet's Solana key is stored as base58 of the 64-byte
+        // keypair (seed, then public key) — the imported-key format. Wallets
+        // from the older sign-in were stored this way and nothing re-creates
+        // their keys, so the decode they sign through must keep reading it:
+        // byte-for-byte what `WalletManager._loadImportedSolanaSecretKey`
+        // does. Reading the wrong half would sign for another address.
+        final secret = base58decode(_solanaStoredKey).sublist(0, 32);
         expect(secret, MultiChainDerivation.privateKeyBytesFromHex(_seedHex));
+        expect(
+          base58decode(_solanaStoredKey),
+          MultiChainDerivation.privateKeyBytesFromHex(_ed25519KeyHex),
+        );
 
         final keypair = await Ed25519HDKeyPair.fromPrivateKeyBytes(
           privateKey: secret,
@@ -379,14 +352,8 @@ void main() {
 
     test('a 0x prefix and upper-case hex decode identically', () async {
       expect(
-        MultiChainDerivation.solanaAddressFromEd25519KeyHex(
-          '0x${_ed25519KeyHex.toUpperCase()}',
-        ),
-        _solanaAddress,
-      );
-      expect(
         MultiChainDerivation.ethereumAddressFromPrivateKeyHex(
-          '0x$_secp256k1Hex',
+          '0x${_secp256k1Hex.toUpperCase()}',
         ),
         _ethereumAddress,
       );
@@ -397,16 +364,8 @@ void main() {
     });
 
     test('wrong-length input throws instead of deriving a stray key', () {
-      // A 32-byte value where a 64-byte keypair is required (and vice versa)
-      // would otherwise sublist into garbage or mis-encode the stored key.
-      expect(
-        () => MultiChainDerivation.solanaAddressFromEd25519KeyHex(_seedHex),
-        throwsArgumentError,
-      );
-      expect(
-        () => MultiChainDerivation.solanaStoredKeyFromEd25519KeyHex(_seedHex),
-        throwsArgumentError,
-      );
+      // A 64-byte value where a 32-byte key is required would otherwise
+      // derive from a truncated or padded key.
       expect(
         () => MultiChainDerivation.ethereumAddressFromPrivateKeyHex(
           _ed25519KeyHex,

@@ -368,6 +368,28 @@ void main() {
     );
 
     blocTest<AuctionBloc, AuctionState>(
+      'values an auction as unknown for step-up auth, whatever its reserve',
+      setUp: stubExecutorSuccess,
+      build: buildBloc,
+      seed: validSeed,
+      act: (bloc) => bloc.add(const AuctionEvent.requestList()),
+      verify: (_) {
+        final usdValues = verify(
+          mockExecutor.execute(
+            txsBase64: anyNamed('txsBase64'),
+            usdValue: captureAnyNamed('usdValue'),
+            flow: anyNamed('flow'),
+            tracker: anyNamed('tracker'),
+            onStage: anyNamed('onStage'),
+            useLedger: anyNamed('useLedger'),
+            additionalSigners: anyNamed('additionalSigners'),
+          ),
+        ).captured;
+        expect(usdValues, [null]);
+      },
+    );
+
+    blocTest<AuctionBloc, AuctionState>(
       'kicks off the background indexer check after a successful broadcast',
       setUp: stubExecutorSuccess,
       build: buildBloc,

@@ -83,7 +83,7 @@ class RecipientSearchController extends ChangeNotifier {
     final query = trimmed.startsWith('@') ? trimmed.substring(1) : trimmed;
     if (query.length < kRecipientSearchMinLength) return false;
     if (query.length > kRecipientSearchMaxLength) return false;
-    // A dot means a `.sol`/`.eth` domain or a typo — never a mallow username.
+    // A dot means a `.sns`/`.skr`/`.eth` domain or a typo — never a mallow username.
     if (query.contains('.')) return false;
     // Most addresses are longer than the ceiling, but not all: base58 drops a
     // character per leading zero byte, so a pubkey like the System Program's
@@ -392,11 +392,32 @@ class _SuggestionRow extends StatelessWidget {
             ),
             const SizedBox(width: MallowTheme.spacing12),
             Expanded(
-              child: Text(
-                suggestion.label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: MallowTheme.uiBody.copyWith(color: colors.textPrimary),
+              child: Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      suggestion.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: MallowTheme.uiBody.copyWith(
+                        color: colors.textPrimary,
+                      ),
+                    ),
+                  ),
+                  // Its own widget rather than part of the label: a display
+                  // name runs to 48 characters, which would ellipsize a suffix
+                  // out of sight.
+                  if (suggestion.isDisplayNameOnly) ...[
+                    const SizedBox(width: MallowTheme.spacingSm),
+                    Text(
+                      'No username',
+                      maxLines: 1,
+                      style: MallowTheme.uiCaption.copyWith(
+                        color: colors.textSecondary,
+                      ),
+                    ),
+                  ],
+                ],
               ),
             ),
             const SizedBox(width: MallowTheme.spacingSm),

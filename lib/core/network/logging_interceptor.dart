@@ -146,7 +146,7 @@ class PrettyLoggingInterceptor extends Interceptor {
   String _formatBody(dynamic data) {
     if (data == null) return 'null';
 
-    final safe = _redactSensitive(data);
+    final safe = redactSensitive(data);
     try {
       if (safe is Map || safe is List) {
         const encoder = JsonEncoder.withIndent('  ');
@@ -158,25 +158,35 @@ class PrettyLoggingInterceptor extends Interceptor {
     }
   }
 
-  /// Keys whose values are signing material — never log their contents.
+  /// Keys whose values are signing material or social-vault credentials —
+  /// never log their contents. Lowercase; matched case-insensitively, so a
+  /// header map (`x-vault-signature`) is covered as well as a JSON body.
   static const _sensitiveKeys = {
     'signature',
-    'signedTransaction',
+    'signedtransaction',
     'transaction',
+    // Social vault: provider and identity tokens, the sealed payload and the
+    // wrapped data keys, and the write signature header.
+    'idtoken',
+    'identitytoken',
+    'payloadciphertext',
+    'wrappedkey',
+    'x-vault-signature',
   };
 
   /// Recursively replaces sensitive values with a redaction marker so signed
   /// payloads never reach the log even when bodies are explicitly enabled.
-  dynamic _redactSensitive(dynamic data) {
+  @visibleForTesting
+  static dynamic redactSensitive(dynamic data) {
     if (data is Map) {
       return {
         for (final entry in data.entries)
-          entry.key: _sensitiveKeys.contains(entry.key)
+          entry.key: _sensitiveKeys.contains('${entry.key}'.toLowerCase())
               ? '***redacted***'
-              : _redactSensitive(entry.value),
+              : redactSensitive(entry.value),
       };
     }
-    if (data is List) return data.map(_redactSensitive).toList();
+    if (data is List) return data.map(redactSensitive).toList();
     return data;
   }
 
